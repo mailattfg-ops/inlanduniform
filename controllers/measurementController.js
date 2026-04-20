@@ -39,13 +39,14 @@ exports.saveMeasurement = async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('measurements')
-      .insert([{
+      .upsert({
         student_id,
         recorded_by: req.user.id,
-        dynamic_data, // Storing all custom labels/values here
+        dynamic_data,
         suggested_size,
-        notes
-      }])
+        notes,
+        recorded_at: new Date()
+      }, { onConflict: 'student_id' })
       .select()
       .single();
 

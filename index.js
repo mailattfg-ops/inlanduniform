@@ -20,6 +20,8 @@ app.use('/api/users', userRoutes);
 app.use('/api/schools', schoolRoutes);
 app.use('/api/employees', require('./routes/employee'));
 app.use('/api/measurements', require('./routes/measurement'));
+app.use('/api/products', require('./routes/product'));
+app.use('/api/templates', require('./routes/template'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

@@ -80,7 +80,7 @@ exports.getClasses = async (req, res) => {
       query = query.eq('school_id', schoolId);
     }
 
-    const { data, error } = await query;
+    const { data, error } = await query.order('grade', { ascending: true }).order('section', { ascending: true });
     if (error) throw error;
     res.json(data);
   } catch (err) {
@@ -89,11 +89,17 @@ exports.getClasses = async (req, res) => {
 };
 
 exports.createClass = async (req, res) => {
-  const { schoolId, name } = req.body;
+  const { schoolId, grade, section } = req.body;
+  const name = `${grade}-${section}`;
   try {
     const { data, error } = await supabase
       .from('classes')
-      .insert([{ school_id: schoolId, name }])
+      .insert([{ 
+        school_id: schoolId, 
+        grade, 
+        section,
+        name 
+      }])
       .select()
       .single();
 
@@ -106,11 +112,17 @@ exports.createClass = async (req, res) => {
 
 exports.updateClass = async (req, res) => {
     const { id } = req.params;
-    const { schoolId, name } = req.body;
+    const { schoolId, grade, section } = req.body;
+    const name = `${grade}-${section}`;
     try {
       const { data, error } = await supabase
         .from('classes')
-        .update({ school_id: schoolId, name })
+        .update({ 
+          school_id: schoolId, 
+          grade, 
+          section,
+          name 
+        })
         .eq('id', id)
         .select()
         .single();

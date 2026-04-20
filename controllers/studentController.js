@@ -6,14 +6,23 @@ const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase
 
 exports.listStudents = async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { schoolId, classId } = req.query;
+    let query = supabase
       .from('students')
       .select(`
         *,
         schools(name),
-        classes(name)
-      `)
-      .order('created_at', { ascending: false });
+        classes(*)
+      `);
+
+    if (schoolId) {
+      query = query.eq('school_id', schoolId);
+    }
+    if (classId) {
+      query = query.eq('class_id', classId);
+    }
+
+    const { data, error } = await query.order('full_name', { ascending: true });
 
     if (error) throw error;
     res.json(data);
@@ -47,12 +56,22 @@ exports.createStudent = async (req, res) => {
     
     if (schoolFetchError) throw new Error('Could not identify school for credential generation');
 
-    // 2. Generate Custom Credentials Pattern: name + AdmissionNumber @ SchoolName .com
-    const namePrefix = full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '');
-    const cleanAdmission = admission_no.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const schoolSlug = schoolData.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    // 2. Generate Shorter & Unique Credentials
+    const namePrefix = full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '').substring(0, 3);
+    const cleanAdmission = String(admission_no).toLowerCase().replace(/[^a-z0-9]/g, '');
+    let baseEmail = `${namePrefix}${cleanAdmission}`;
+    let studentEmail = `${baseEmail}@inland`;
     
-    const studentEmail = `${namePrefix}${cleanAdmission}@${schoolSlug}.com`;
+    // Uniqueness check
+    let { data: collision } = await supabase.from('user_profiles').select('id').eq('email', studentEmail).maybeSingle();
+    let counter = 1;
+    while (collision) {
+        studentEmail = `${baseEmail}${counter}@inland.com`;
+        const { data: nextCheck } = await supabase.from('user_profiles').select('id').eq('email', studentEmail).maybeSingle();
+        collision = nextCheck;
+        counter++;
+    }
+
     const generatedPassword = generatePassword();
     const STUDENT_ROLE_ID = '64ae559c-42c2-4592-a1b7-0ef7b3a17d17';
 
@@ -199,13 +218,22 @@ exports.bulkCreateStudents = async (req, res) => {
     try {
       const { full_name, admission_no, school_id, class_id, contact_mobile } = s;
       
-      // 1. Generate Credentials
-      const schoolName = schoolMap[school_id] || 'inland';
-      const namePrefix = full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '');
+      // 1. Generate Shorter & Unique Credentials
+      const namePrefix = full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '').substring(0, 3);
       const cleanAdmission = String(admission_no).toLowerCase().replace(/[^a-z0-9]/g, '');
-      const schoolSlug = schoolName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      let baseEmail = `${namePrefix}${cleanAdmission}`;
+      let studentEmail = `${baseEmail}@inland.com`;
       
-      const studentEmail = `${namePrefix}${cleanAdmission}@${schoolSlug}.com`;
+      // Uniqueness check for bulk
+      let { data: collision } = await supabase.from('user_profiles').select('id').eq('email', studentEmail).maybeSingle();
+      let counter = 1;
+      while (collision) {
+          studentEmail = `${baseEmail}${counter}@inland.com`;
+          const { data: nextCheck } = await supabase.from('user_profiles').select('id').eq('email', studentEmail).maybeSingle();
+          collision = nextCheck;
+          counter++;
+      }
+
       const generatedPassword = generatePassword();
 
       // 2. Create User Profile
@@ -287,10 +315,20 @@ exports.syncUsername = async (req, res) => {
     if (sError || !student) throw new Error('Student not found');
     if (!student.user_id) throw new Error('Student has no login account');
 
-    const namePrefix = student.full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '');
+    const namePrefix = student.full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '').substring(0, 3);
     const cleanAdmission = String(student.admission_no).toLowerCase().replace(/[^a-z0-9]/g, '');
-    const schoolSlug = student.schools.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const newEmail = `${namePrefix}${cleanAdmission}@${schoolSlug}.com`;
+    let baseEmail = `${namePrefix}${cleanAdmission}`;
+    let newEmail = `${baseEmail}@inland.com`;
+
+    // Uniqueness check
+    let { data: collision } = await supabase.from('user_profiles').select('id').eq('email', newEmail).maybeSingle();
+    let counter = 1;
+    while (collision) {
+        newEmail = `${baseEmail}${counter}@inland.com`;
+        const { data: nextCheck } = await supabase.from('user_profiles').select('id').eq('email', newEmail).maybeSingle();
+        collision = nextCheck;
+        counter++;
+    }
 
     await supabase.from('user_profiles').update({ email: newEmail }).eq('id', student.user_id);
 

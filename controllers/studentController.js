@@ -6,7 +6,11 @@ const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase
 
 exports.listStudents = async (req, res) => {
   try {
-    const { schoolId, classId } = req.query;
+    let { schoolId, classId, search } = req.query;
+    const user = req.user;
+
+    console.log(`[AUTH] User '${user.email}' Role: '${user.role}' SchoolID: '${user.schoolId}'`);
+
     let query = supabase
       .from('students')
       .select(`
@@ -15,11 +19,22 @@ exports.listStudents = async (req, res) => {
         classes(*)
       `);
 
-    if (schoolId) {
+    // Strict Enforcement logic
+    if (user.role && user.role.toLowerCase() === 'school') {
+      if (!user.schoolId) {
+        return res.status(403).json({ error: 'Your account is not correctly linked to a school record.' });
+      }
+      query = query.eq('school_id', user.schoolId);
+    } else if (schoolId) {
       query = query.eq('school_id', schoolId);
     }
+
     if (classId) {
       query = query.eq('class_id', classId);
+    }
+
+    if (search) {
+      query = query.or(`full_name.ilike.%${search}%,admission_no.ilike.%${search}%`);
     }
 
     const { data, error } = await query.order('full_name', { ascending: true });
@@ -32,7 +47,7 @@ exports.listStudents = async (req, res) => {
 };
 
 exports.createStudent = async (req, res) => {
-  const { full_name, admission_no, school_id, class_id, contact_mobile } = req.body;
+  const { full_name, admission_no, school_id, class_id, contact_mobile, gender } = req.body;
   
   try {
     // 0. Check for duplicate admission number WITHIN the same school
@@ -98,6 +113,7 @@ exports.createStudent = async (req, res) => {
         school_id,
         class_id,
         contact_mobile,
+        gender,
         status: req.body.status || 'Active',
         user_id: userData.id
       }])
@@ -153,7 +169,7 @@ exports.deleteStudent = async (req, res) => {
 
 exports.updateStudent = async (req, res) => {
   const { id } = req.params;
-  const { full_name, admission_no, school_id, class_id, contact_mobile, status } = req.body;
+  const { full_name, admission_no, school_id, class_id, contact_mobile, status, gender } = req.body;
   try {
     // 0. Check for duplicate admission number in the SAME school (excluding current student)
     const { data: duplicate } = await supabase
@@ -177,7 +193,8 @@ exports.updateStudent = async (req, res) => {
         school_id,
         class_id,
         contact_mobile,
-        status
+        status,
+        gender
       })
       .eq('id', id)
       .select()
@@ -216,7 +233,7 @@ exports.bulkCreateStudents = async (req, res) => {
   // We loop to ensure each user gets a unique profile created
   for (const s of students) {
     try {
-      const { full_name, admission_no, school_id, class_id, contact_mobile } = s;
+      const { full_name, admission_no, school_id, class_id, contact_mobile, gender } = s;
       
       // 1. Generate Shorter & Unique Credentials
       const namePrefix = full_name.toLowerCase().split(' ')[0].replace(/[^a-z0-9]/g, '').substring(0, 3);
@@ -259,6 +276,7 @@ exports.bulkCreateStudents = async (req, res) => {
           school_id,
           class_id,
           contact_mobile,
+          gender,
           user_id: userData.id,
           status: 'Active'
         }]);

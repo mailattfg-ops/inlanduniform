@@ -1,12 +1,23 @@
 const supabase = require('../config/supabase');
 
 exports.listMeasurements = async (req, res) => {
+  const user = req.user;
+
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('measurements')
-      .select('*, students(full_name, admission_no)')
+      .select('*, students!inner(full_name, admission_no, school_id)')
       .order('recorded_at', { ascending: false });
 
+    // Strict Enforcement logic
+    if (user.role && user.role.toLowerCase() === 'school') {
+      if (!user.schoolId) {
+        return res.status(403).json({ error: 'Your account is not correctly linked to a school record.' });
+      }
+      query = query.eq('students.school_id', user.schoolId);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
     res.json(data);
   } catch (err) {

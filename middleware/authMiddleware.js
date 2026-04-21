@@ -23,21 +23,21 @@ const authMiddleware = async (req, res, next) => {
  * Higher-order middleware to check for specific permissions
  * Supports ['all'] bypass for Admins
  */
-const checkPermission = (requiredPermission) => {
+const checkPermission = (required) => {
   return (req, res, next) => {
     const userPermissions = req.user?.permissions || [];
+    const requiredList = Array.isArray(required) ? required : [required];
     
     // Admin bypass
     if (userPermissions.includes('all')) return next();
     
-    // Check if user has the specific permission
-    if (userPermissions.includes(requiredPermission)) {
-        return next();
-    }
+    // Check if user has ANY of the required permissions
+    const hasPerm = requiredList.some(p => userPermissions.includes(p));
+    if (hasPerm) return next();
 
     res.status(403).json({ 
         error: 'Access Denied', 
-        message: `You do not have permission to perform this action (${requiredPermission})` 
+        message: `You do not have permission to perform this action (${requiredList.join(' or ')})` 
     });
   };
 };

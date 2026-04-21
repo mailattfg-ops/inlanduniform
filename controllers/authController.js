@@ -16,14 +16,14 @@ exports.login = async (req, res) => {
           permissions
         )
       `)
-      .eq('email', email)
+      .or(`email.eq.${email || 'N/A'},username.eq.${email || 'N/A'}`)
       .eq('password', password)
       .single();
 
     if (pError || !profile) {
       return res.status(401).json({ 
         success: false, 
-        error: 'Invalid email or password.' 
+        error: 'Invalid username/email or password.' 
       });
     }
 
@@ -35,12 +35,26 @@ exports.login = async (req, res) => {
       permissions: profile.user_types?.permissions || []
     };
 
+    // If it's a School account, fetch the linked school_id
+    if (fullUser.role === 'School') {
+      const { data: schoolData } = await supabase
+        .from('schools')
+        .select('id, name')
+        .eq('user_id', profile.id)
+        .single();
+      if (schoolData) {
+        fullUser.schoolId = schoolData.id;
+        fullUser.schoolName = schoolData.name;
+      }
+    }
+
     const token = jwt.sign(
       { 
         id: fullUser.id, 
         email: fullUser.email, 
         role: fullUser.role,
-        permissions: fullUser.permissions 
+        permissions: fullUser.permissions,
+        schoolId: fullUser.schoolId
       },
       JWT_SECRET,
       { expiresIn: '7d' }

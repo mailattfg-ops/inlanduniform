@@ -28,6 +28,7 @@ router.delete('/threads/:id', inventoryController.threads.delete);
 const designController = require('../controllers/designController');
 
 // Designs
+router.get('/designs/next-code', designController.getNextCode);
 router.get('/designs', designController.listDesigns);
 router.post('/designs', designController.createDesign);
 router.put('/designs/:id', designController.updateDesign);

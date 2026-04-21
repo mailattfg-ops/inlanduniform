@@ -99,3 +99,31 @@ exports.deleteDesign = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
+exports.getNextCode = async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('designs')
+            .select('design_code')
+            .like('design_code', 'DN-%')
+            .order('design_code', { ascending: false })
+            .limit(1);
+        
+        if (error) throw error;
+
+        let nextNum = 1;
+        if (data && data.length > 0) {
+            const lastCode = data[0].design_code;
+            const match = lastCode.match(/DN-(\d+)/);
+            if (match) {
+                nextNum = parseInt(match[1]) + 1;
+            }
+        }
+
+        const nextCode = `DN-${nextNum.toString().padStart(3, '0')}`;
+        res.json({ nextCode });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+

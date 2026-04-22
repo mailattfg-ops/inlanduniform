@@ -1,12 +1,12 @@
 const supabase = require('../config/supabase');
 
-exports.listProducts = async (req, res) => {
+exports.listSizeCharts = async (req, res) => {
     try {
         const { data, error } = await supabase
-            .from('products')
+            .from('size_charts')
             .select('*')
-            .order('name');
-
+            .order('created_at');
+        
         if (error) throw error;
         res.json(data);
     } catch (err) {
@@ -14,15 +14,15 @@ exports.listProducts = async (req, res) => {
     }
 };
 
-exports.createProduct = async (req, res) => {
+exports.createSizeChart = async (req, res) => {
     try {
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id } = req.body;
+        const { name, category, unit, chart_data, metric_groups, fit_types } = req.body;
         const { data, error } = await supabase
-            .from('products')
-            .insert([{ name, art_number, gender, measurements, materials, entry_methods, size_chart_id }])
+            .from('size_charts')
+            .insert([{ name, category, unit, chart_data, metric_groups, fit_types }])
             .select()
             .single();
-
+        
         if (error) throw error;
         res.json(data);
     } catch (err) {
@@ -30,26 +30,17 @@ exports.createProduct = async (req, res) => {
     }
 };
 
-exports.updateProduct = async (req, res) => {
+exports.updateSizeChart = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id } = req.body;
+        const { name, category, unit, chart_data, metric_groups, fit_types } = req.body;
         const { data, error } = await supabase
-            .from('products')
-            .update({ 
-                name, 
-                art_number, 
-                gender, 
-                measurements, 
-                materials, 
-                entry_methods, 
-                size_chart_id,
-                updated_at: new Date() 
-            })
+            .from('size_charts')
+            .update({ name, category, unit, chart_data, metric_groups, fit_types, updated_at: new Date() })
             .eq('id', id)
             .select()
             .single();
-
+        
         if (error) throw error;
         res.json(data);
     } catch (err) {
@@ -57,14 +48,14 @@ exports.updateProduct = async (req, res) => {
     }
 };
 
-exports.deleteProduct = async (req, res) => {
+exports.deleteSizeChart = async (req, res) => {
     try {
         const { id } = req.params;
         const { error } = await supabase
-            .from('products')
+            .from('size_charts')
             .delete()
             .eq('id', id);
-
+        
         if (error) throw error;
         res.json({ success: true });
     } catch (err) {

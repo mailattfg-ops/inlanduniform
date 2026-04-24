@@ -18,13 +18,13 @@ app.use('/api/auth', authRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/schools', schoolRoutes);
-app.use('/api/employees', require('./routes/employee'));
-app.use('/api/measurements', require('./routes/measurement'));
-app.use('/api/products', require('./routes/product'));
-app.use('/api/templates', require('./routes/template'));
-app.use('/api/inventory', require('./routes/inventory'));
-app.use('/api/dashboard', require('./routes/dashboard'));
-app.use('/api/size-charts', require('./routes/sizeChart'));
+app.use('/api/employees', require('./routes/employee.js'));
+app.use('/api/measurements', require('./routes/measurement.js'));
+app.use('/api/products', require('./routes/product.js'));
+app.use('/api/templates', require('./routes/template.js'));
+app.use('/api/inventory', require('./routes/inventory.js'));
+app.use('/api/dashboard', require('./routes/dashboard.js'));
+app.use('/api/size-charts', require('./routes/size-charts.js'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

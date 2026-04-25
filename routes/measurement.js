@@ -19,6 +19,7 @@ router.get('/config', (req, res, next) => {
 router.post('/config', checkPermission('manage_measurements'), measurementController.addConfig);
 router.delete('/config/:id', checkPermission('manage_measurements'), measurementController.deleteConfig);
 router.post('/record', checkPermission('manage_measurements'), measurementController.saveMeasurement);
+router.post('/:id/status', checkPermission('all'), measurementController.updateStatus);
 
 // Get measurement history for a specific student - Allowing staff OR the student themselves
 // Get measurement history for a specific member - Allowing staff OR the member themselves

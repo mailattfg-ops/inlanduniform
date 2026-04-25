@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
+const { logAction } = require('../utils/logger');
 
 const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase();
 
@@ -70,6 +71,9 @@ exports.createOrganization = async (req, res) => {
       throw error;
     }
 
+    // 4. Log the action
+    await logAction(req.user.id, 'CREATE', 'organization', data.id, { name: data.name });
+
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -88,6 +92,10 @@ exports.updateOrganization = async (req, res) => {
         .single();
   
       if (error) throw error;
+
+      // 2. Log the action
+      await logAction(req.user.id, 'UPDATE', 'organization', id, { updated_name: name });
+
       res.json({ success: true, data });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -113,6 +121,9 @@ exports.deleteOrganization = async (req, res) => {
       if (org?.user_id) {
         await supabase.from('user_profiles').delete().eq('id', org.user_id);
       }
+
+      // 4. Log the action
+      await logAction(req.user.id, 'DELETE', 'organization', id, { org_id: id });
 
       res.json({ success: true });
     } catch (err) {

@@ -24,6 +24,11 @@ exports.createProduct = async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Log the action
+        const { logAction } = require('../utils/logger');
+        await logAction(req.user.id, 'CREATE', 'product', data.id, { name: data.name });
+
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -52,6 +57,11 @@ exports.updateProduct = async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Log the action
+        const { logAction } = require('../utils/logger');
+        await logAction(req.user.id, 'UPDATE', 'product', id, { name: data.name });
+
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -67,6 +77,11 @@ exports.deleteProduct = async (req, res) => {
             .eq('id', id);
 
         if (error) throw error;
+
+        // Log the action
+        const { logAction } = require('../utils/logger');
+        await logAction(req.user.id, 'DELETE', 'product', id, { product_id: id });
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });

@@ -60,6 +60,10 @@ exports.login = async (req, res) => {
       { expiresIn: '7d' }
     );
 
+    // Log the login action
+    const { logAction } = require('../utils/logger');
+    await logAction(fullUser.id, 'LOGIN', 'auth', fullUser.id, { email: fullUser.email });
+
     res.json({
       success: true,
       token,

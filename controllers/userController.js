@@ -58,6 +58,58 @@ exports.getUserTypes = async (req, res) => {
     }
 };
 
+exports.updateUserType = async (req, res) => {
+    const { id } = req.params;
+    const { name, permissions } = req.body;
+
+    try {
+        const { data, error } = await supabase
+            .from('user_types')
+            .update({ name, permissions })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createUserType = async (req, res) => {
+    const { name, permissions } = req.body;
+
+    try {
+        const { data, error } = await supabase
+            .from('user_types')
+            .insert([{ name, permissions }])
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.deleteUserType = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { error } = await supabase
+            .from('user_types')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true, message: 'Role deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
 exports.createUser = async (req, res) => {
-    // Already implemented as part of previous tasks but keeping it for completeness if needed
+    // Implementation for creating new user accounts
 };

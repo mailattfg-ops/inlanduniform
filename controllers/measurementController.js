@@ -84,12 +84,21 @@ exports.saveMeasurement = async (req, res) => {
         dynamic_data,
         suggested_size,
         notes,
+        status: 'Pending',
         recorded_at: new Date()
       }])
       .select()
       .single();
 
     if (error) throw error;
+
+    // Log the action
+    const { logAction } = require('../utils/logger');
+    await logAction(req.user.id, 'SAVE', 'measurement', member_id, { 
+        suggested_size,
+        notes: notes?.substring(0, 50) 
+    });
+
     res.json({ success: true, measurement: data });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -168,5 +177,37 @@ exports.deleteConfig = async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: "Cannot delete this label. It might be linked to historical records." });
+    }
+};
+
+exports.updateStatus = async (req, res) => {
+    const { id } = req.params;
+    const { status, remarks } = req.body;
+    const adminId = req.user.id;
+
+    try {
+        const { data, error } = await supabase
+            .from('measurements')
+            .update({ 
+                status: status || 'Approved',
+                reviewer_id: adminId,
+                reviewed_at: new Date()
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Log the action
+        const { logAction } = require('../utils/logger');
+        await logAction(adminId, (status || 'APPROVED').toUpperCase(), 'measurement', id, { 
+            message: `Measurement marked as ${status}`,
+            remarks
+        });
+
+        res.json({ success: true, measurement: data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 };

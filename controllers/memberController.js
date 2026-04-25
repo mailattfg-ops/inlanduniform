@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
+const { logAction } = require('../utils/logger');
 
 // Utility to generate a secure random password
 const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase(); // 8 char hex password
@@ -43,16 +44,26 @@ exports.listStudents = async (req, res) => {
         return res.json([]);
     }
 
-    // Manual Fetch for status badges to avoid join cache issues
+    // 2. Aggregate Measurement Statuses (Prioritize Pending over Approved)
     const { data: measurements } = await supabase
         .from('measurements')
-        .select('member_id');
+        .select('member_id, status')
+        .order('recorded_at', { ascending: false });
     
-    const measuredIds = new Set(measurements?.map(m => String(m.member_id)));
+    const statusMap = {};
+    if (measurements) {
+        measurements.forEach(m => {
+            const mid = String(m.member_id);
+            // If we already have a status for this member, only overwrite if current is Pending (higher priority for review)
+            if (!statusMap[mid] || m.status === 'Pending') {
+                statusMap[mid] = m.status;
+            }
+        });
+    }
 
     const enriched = members.map(m => ({
         ...m,
-        measurements: measuredIds.has(String(m.id)) ? [{ id: 'exists' }] : []
+        measurement_status: statusMap[String(m.id)] || 'Missing'
     }));
 
     res.json(enriched);
@@ -141,7 +152,13 @@ exports.createStudent = async (req, res) => {
         throw studentError;
     }
 
-    // 5. Return both for the copy-paste UI
+    // 5. Log the action
+    await logAction(req.user.id, 'CREATE', 'member', studentData.id, { 
+        name: full_name, 
+        admission: admission_no 
+    });
+
+    // 6. Return both for the copy-paste UI
     res.json({
         success: true,
         student: studentData,
@@ -224,6 +241,11 @@ exports.updateStudent = async (req, res) => {
           .update({ full_name })
           .eq('id', studentData.user_id);
     }
+
+    // 3. Log the action
+    await logAction(req.user.id, 'UPDATE', 'member', id, { 
+        updated_fields: { full_name, admission_no, status }
+    });
 
     res.json({ success: true, student: studentData });
   } catch (err) {

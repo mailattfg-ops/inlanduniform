@@ -17,24 +17,31 @@ exports.getStats = async (req, res) => {
             .from('measurements')
             .select('*', { count: 'exact', head: true });
 
-        // 4. Recently Added Members (this month)
+        // 4. Products & Catalogs
+        const { count: totalProducts } = await supabase.from('products').select('*', { count: 'exact', head: true });
+        const { count: totalFabrics } = await supabase.from('fabrics').select('*', { count: 'exact', head: true });
+        const { count: totalButtons } = await supabase.from('buttons').select('*', { count: 'exact', head: true });
+
+        // 5. Recently Added Members (this month)
         const firstDayOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
         const { count: newMembersThisMonth, error: growthError } = await supabase
             .from('registry_members')
             .select('*', { count: 'exact', head: true })
             .gte('created_at', firstDayOfMonth);
 
-        // 5. Reach rate
-        const reach = totalOrgs > 0 ? Math.min(100, Math.round((totalMembers / (totalOrgs * 500)) * 100)) : 0;
+        // 6. Reach rate (calculated as member density)
+        const reach = totalOrgs > 0 ? Math.min(100, Math.round((totalMembers / (totalOrgs * 100)) * 100)) : 0;
 
         if (memberError || orgError || measureError) {
-            throw new Error('Failed to fetch stats');
+            throw new Error('Failed to fetch detailed stats');
         }
 
         res.json({
             totalMembers: totalMembers || 0,
             totalOrganizations: totalOrgs || 0,
             totalMeasurements: totalMeasurements || 0,
+            totalInventory: (totalFabrics || 0) + (totalButtons || 0),
+            totalProducts: totalProducts || 0,
             newMembersThisMonth: newMembersThisMonth || 0,
             reach: reach || 87 
         });

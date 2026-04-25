@@ -35,16 +35,16 @@ exports.login = async (req, res) => {
       permissions: profile.user_types?.permissions || []
     };
 
-    // If it's a School account, fetch the linked school_id
-    if (fullUser.role === 'School') {
-      const { data: schoolData } = await supabase
-        .from('schools')
+    // If it's a School/Organization account, fetch the linked organization_id
+    if (fullUser.role === 'School' || fullUser.role === 'Organization') {
+      const { data: orgData } = await supabase
+        .from('organizations')
         .select('id, name')
         .eq('user_id', profile.id)
         .single();
-      if (schoolData) {
-        fullUser.schoolId = schoolData.id;
-        fullUser.schoolName = schoolData.name;
+      if (orgData) {
+        fullUser.organizationId = orgData.id;
+        fullUser.organizationName = orgData.name;
       }
     }
 
@@ -54,7 +54,7 @@ exports.login = async (req, res) => {
         email: fullUser.email, 
         role: fullUser.role,
         permissions: fullUser.permissions,
-        schoolId: fullUser.schoolId
+        organizationId: fullUser.organizationId
       },
       JWT_SECRET,
       { expiresIn: '7d' }

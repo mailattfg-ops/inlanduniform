@@ -16,10 +16,10 @@ exports.listProducts = async (req, res) => {
 
 exports.createProduct = async (req, res) => {
     try {
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id } = req.body;
+        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category } = req.body;
         const { data, error } = await supabase
             .from('products')
-            .insert([{ name, art_number, gender, measurements, materials, entry_methods, size_chart_id }])
+            .insert([{ name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category }])
             .select()
             .single();
 
@@ -33,7 +33,7 @@ exports.createProduct = async (req, res) => {
 exports.updateProduct = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id } = req.body;
+        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category } = req.body;
         const { data, error } = await supabase
             .from('products')
             .update({ 
@@ -44,6 +44,7 @@ exports.updateProduct = async (req, res) => {
                 materials, 
                 entry_methods, 
                 size_chart_id,
+                category,
                 updated_at: new Date() 
             })
             .eq('id', id)

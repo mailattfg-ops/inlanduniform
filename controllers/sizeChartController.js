@@ -2,10 +2,16 @@ const supabase = require('../config/supabase');
 
 exports.listSizeCharts = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { category } = req.query;
+        let query = supabase
             .from('size_charts')
-            .select('*')
-            .order('created_at');
+            .select('*');
+
+        if (category) {
+            query = query.eq('category', category);
+        }
+
+        const { data, error } = await query.order('created_at');
         
         if (error) throw error;
         res.json(data);
@@ -16,10 +22,25 @@ exports.listSizeCharts = async (req, res) => {
 
 exports.createSizeChart = async (req, res) => {
     try {
-        const { name, category, unit, chart_data, metric_groups, fit_types } = req.body;
+        const { 
+            name, 
+            category, 
+            unit, 
+            chart_data = [], 
+            metric_groups = [], 
+            fit_types = [] 
+        } = req.body;
+        
         const { data, error } = await supabase
             .from('size_charts')
-            .insert([{ name, category, unit, chart_data, metric_groups, fit_types }])
+            .insert([{ 
+                name, 
+                category, 
+                unit, 
+                chart_data, 
+                metric_groups, 
+                fit_types 
+            }])
             .select()
             .single();
         
@@ -33,10 +54,26 @@ exports.createSizeChart = async (req, res) => {
 exports.updateSizeChart = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, category, unit, chart_data, metric_groups, fit_types } = req.body;
+        const { 
+            name, 
+            category, 
+            unit, 
+            chart_data = [], 
+            metric_groups = [], 
+            fit_types = [] 
+        } = req.body;
+        
         const { data, error } = await supabase
             .from('size_charts')
-            .update({ name, category, unit, chart_data, metric_groups, fit_types, updated_at: new Date() })
+            .update({ 
+                name, 
+                category, 
+                unit, 
+                chart_data, 
+                metric_groups, 
+                fit_types, 
+                updated_at: new Date() 
+            })
             .eq('id', id)
             .select()
             .single();

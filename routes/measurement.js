@@ -21,7 +21,8 @@ router.delete('/config/:id', checkPermission('manage_measurements'), measurement
 router.post('/record', checkPermission('manage_measurements'), measurementController.saveMeasurement);
 
 // Get measurement history for a specific student - Allowing staff OR the student themselves
-router.get('/student/:studentId', async (req, res, next) => {
+// Get measurement history for a specific member - Allowing staff OR the member themselves
+router.get('/history/:memberId', async (req, res, next) => {
     try {
         const canViewAll = req.user.permissions.includes('view_measurements') || req.user.permissions.includes('all');
         
@@ -30,16 +31,16 @@ router.get('/student/:studentId', async (req, res, next) => {
             return measurementController.getStudentHistory(req, res);
         }
 
-        // If they are a student, we need to check if they are the OWNER of this history
-        if (req.user.role === 'Student') {
+        // If they are a student/member, we need to check if they are the OWNER of this history
+        if (req.user.role === 'Student' || req.user.role === 'Member') {
             const supabase = require('../config/supabase');
-            const { data: student } = await supabase
-                .from('students')
+            const { data: member } = await supabase
+                .from('registry_members')
                 .select('id')
                 .eq('user_id', req.user.id)
                 .single();
 
-            if (student && student.id.toString() === req.params.studentId) {
+            if (member && member.id.toString() === req.params.memberId) {
                 return measurementController.getStudentHistory(req, res);
             }
         }

@@ -6,20 +6,47 @@ exports.listMeasurements = async (req, res) => {
   try {
     let query = supabase
       .from('measurements')
-      .select('*, students!inner(full_name, admission_no, school_id)')
+      .select('*, registry_members!inner(full_name, admission_no, organization_id, organizations(name))')
       .order('recorded_at', { ascending: false });
 
     // Strict Enforcement logic
-    if (user.role && user.role.toLowerCase() === 'school') {
-      if (!user.schoolId) {
-        return res.status(403).json({ error: 'Your account is not correctly linked to a school record.' });
+    if (user.role && (user.role.toLowerCase() === 'school' || user.role.toLowerCase() === 'organization')) {
+      if (!user.organizationId) {
+        return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
       }
-      query = query.eq('students.school_id', user.schoolId);
+      query = query.eq('registry_members.organization_id', user.organizationId);
     }
 
-    const { data, error } = await query;
+    const { data: measurements, error } = await query;
     if (error) throw error;
-    res.json(data);
+
+    if (!measurements || measurements.length === 0) {
+        return res.json([]);
+    }
+
+    // Manual Fetch for staff names (recorder)
+    const recorderIds = [...new Set(measurements.map(m => m.recorded_by).filter(Boolean))];
+    let profileMap = {};
+    if (recorderIds.length > 0) {
+        const { data: profiles } = await supabase
+            .from('user_profiles')
+            .select('id, full_name')
+            .in('id', recorderIds);
+            
+        if (profiles) {
+            profiles.forEach(p => {
+                profileMap[p.id] = p;
+            });
+        }
+    }
+
+    // Merge recorder profiles
+    const enriched = measurements.map(m => ({
+        ...m,
+        user_profiles: profileMap[m.recorded_by] || { full_name: 'System' }
+    }));
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -41,23 +68,24 @@ exports.listConfig = async (req, res) => {
 
 exports.saveMeasurement = async (req, res) => {
   const { 
-    student_id, 
+    member_id, 
     dynamic_data,
     suggested_size, 
-    notes 
+    notes,
+    recorded_by
   } = req.body;
 
   try {
     const { data, error } = await supabase
       .from('measurements')
-      .upsert({
-        student_id,
-        recorded_by: req.user.id,
+      .insert([{
+        member_id,
+        recorded_by: recorded_by || req.user.id,
         dynamic_data,
         suggested_size,
         notes,
         recorded_at: new Date()
-      }, { onConflict: 'student_id' })
+      }])
       .select()
       .single();
 
@@ -69,16 +97,45 @@ exports.saveMeasurement = async (req, res) => {
 };
 
 exports.getStudentHistory = async (req, res) => {
-  const { studentId } = req.params;
+  const { memberId } = req.params;
   try {
-    const { data, error } = await supabase
+    // 1. Fetch measurements
+    const { data: measurements, error } = await supabase
       .from('measurements')
       .select('*')
-      .eq('student_id', studentId)
+      .eq('member_id', memberId)
       .order('recorded_at', { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+
+    if (!measurements || measurements.length === 0) {
+        return res.json([]);
+    }
+
+    // 2. Fetch unique recorder IDs
+    const recorderIds = [...new Set(measurements.map(m => m.recorded_by).filter(Boolean))];
+    
+    let profileMap = {};
+    if (recorderIds.length > 0) {
+        const { data: profiles } = await supabase
+            .from('user_profiles')
+            .select('id, full_name')
+            .in('id', recorderIds);
+            
+        if (profiles) {
+            profiles.forEach(p => {
+                profileMap[p.id] = p;
+            });
+        }
+    }
+
+    // 3. Merge data
+    const merged = measurements.map(m => ({
+        ...m,
+        user_profiles: profileMap[m.recorded_by] || { full_name: 'System' }
+    }));
+
+    res.json(merged);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

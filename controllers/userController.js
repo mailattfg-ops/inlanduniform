@@ -98,6 +98,20 @@ exports.deleteUserType = async (req, res) => {
     const { id } = req.params;
 
     try {
+        // Check if role is in use
+        const { count, error: countError } = await supabase
+            .from('user_profiles')
+            .select('*', { count: 'exact', head: true })
+            .eq('user_type_id', id);
+        
+        if (countError) throw countError;
+
+        if (count > 0) {
+            return res.status(400).json({ 
+                error: `This role is currently assigned to ${count} user(s). Please reassign them to another role before deleting.` 
+            });
+        }
+
         const { error } = await supabase
             .from('user_types')
             .delete()

@@ -5,10 +5,25 @@ const { authMiddleware, checkPermission } = require('../middleware/authMiddlewar
 
 router.use(authMiddleware);
 
-router.get('/', checkPermission('view_measurements'), measurementController.listMeasurements);
+router.get('/', (req, res, next) => {
+    const role = req.user.role?.toLowerCase();
+    if (req.user.permissions.includes('view_measurements') || 
+        req.user.permissions.includes('all') || 
+        ['student', 'entity', 'school', 'organization'].includes(role)) {
+        return next();
+    }
+    return res.status(403).json({ 
+        error: "Access Denied", 
+        message: "You do not have permission to view measurements" 
+    });
+}, measurementController.listMeasurements);
+
 router.get('/config', (req, res, next) => {
-    // Access configuration if they have permission OR if they are a student
-    if (req.user.permissions.includes('view_measurements') || req.user.permissions.includes('all') || req.user.role === 'Student') {
+    const role = req.user.role?.toLowerCase();
+    // Access configuration if they have permission OR if they are a student/entity/organization
+    if (req.user.permissions.includes('view_measurements') || 
+        req.user.permissions.includes('all') || 
+        ['student', 'entity', 'school', 'organization'].includes(role)) {
         return next();
     }
     return res.status(403).json({ 
@@ -18,7 +33,18 @@ router.get('/config', (req, res, next) => {
 }, measurementController.listConfig);
 router.post('/config', checkPermission('manage_measurements'), measurementController.addConfig);
 router.delete('/config/:id', checkPermission('manage_measurements'), measurementController.deleteConfig);
-router.post('/record', checkPermission('manage_measurements'), measurementController.saveMeasurement);
+router.post('/record', (req, res, next) => {
+    const role = req.user.role?.toLowerCase();
+    if (req.user.permissions.includes('manage_measurements') || 
+        req.user.permissions.includes('all') || 
+        ['entity', 'school', 'organization'].includes(role)) {
+        return next();
+    }
+    return res.status(403).json({ 
+        error: "Access Denied", 
+        message: "You do not have permission to perform this action (manage_measurements)" 
+    });
+}, measurementController.saveMeasurement);
 router.post('/:id/status', checkPermission('all'), measurementController.updateStatus);
 
 // Get measurement history for a specific student - Allowing staff OR the student themselves
@@ -26,9 +52,10 @@ router.post('/:id/status', checkPermission('all'), measurementController.updateS
 router.get('/history/:memberId', async (req, res, next) => {
     try {
         const canViewAll = req.user.permissions.includes('view_measurements') || req.user.permissions.includes('all');
+        const role = req.user.role?.toLowerCase();
         
-        // If they are staff/admin, let them through to the controller
-        if (canViewAll) {
+        // If they are staff/admin/entity/school, let them through to the controller
+        if (canViewAll || ['entity', 'school', 'organization'].includes(role)) {
             return measurementController.getStudentHistory(req, res);
         }
 

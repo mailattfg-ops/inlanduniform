@@ -20,7 +20,8 @@ exports.listStudents = async (req, res) => {
         departments(*)
       `);
 
-    if (user.role && user.role.toLowerCase() === 'school') {
+    const role = user.role?.toLowerCase();
+    if (role === 'school' || role === 'organization' || role === 'entity') {
       if (!user.organizationId) {
         return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
       }

@@ -2,15 +2,24 @@ const supabase = require('../config/supabase');
 
 exports.listMeasurements = async (req, res) => {
   const user = req.user;
+  const { orgId, deptId } = req.query;
 
   try {
     let query = supabase
       .from('measurements')
-      .select('*, registry_members!inner(full_name, admission_no, organization_id, organizations(name))')
+      .select('*, registry_members!inner(full_name, admission_no, organization_id, department_id, organizations(name))')
       .order('recorded_at', { ascending: false });
 
+    if (orgId) {
+      query = query.eq('registry_members.organization_id', orgId);
+    }
+    if (deptId) {
+      query = query.eq('registry_members.department_id', deptId);
+    }
+
     // Strict Enforcement logic
-    if (user.role && (user.role.toLowerCase() === 'school' || user.role.toLowerCase() === 'organization')) {
+    const role = user.role?.toLowerCase();
+    if (role === 'school' || role === 'organization' || role === 'entity') {
       if (!user.organizationId) {
         return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
       }

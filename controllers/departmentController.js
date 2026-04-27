@@ -13,7 +13,8 @@ exports.getDepartments = async (req, res) => {
       .order('created_at', { ascending: false });
 
     // Strict Enforcement logic
-    if (user.role && (user.role.toLowerCase() === 'school' || user.role.toLowerCase() === 'organization')) {
+    const role = user.role?.toLowerCase();
+    if (role === 'school' || role === 'organization' || role === 'entity') {
       const userOrgId = user.schoolId || user.organizationId;
       if (!userOrgId) {
         return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
@@ -25,26 +26,37 @@ exports.getDepartments = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+    
+    // Map 'section' column to 'division' for frontend consistency
+    const enriched = data.map(d => ({
+        ...d,
+        division: d.section
+    }));
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
 
 exports.createDepartment = async (req, res) => {
-  const { orgId, name } = req.body;
+  const { orgId, name, division } = req.body;
   try {
     const { data, error } = await supabase
       .from('departments')
       .insert([{ 
         organization_id: orgId, 
-        name 
+        name,
+        section: division
       }])
       .select()
       .single();
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ 
+        success: true, 
+        data: { ...data, division: data.section } 
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -52,20 +64,24 @@ exports.createDepartment = async (req, res) => {
 
 exports.updateDepartment = async (req, res) => {
     const { id } = req.params;
-    const { orgId, name } = req.body;
+    const { orgId, name, division } = req.body;
     try {
       const { data, error } = await supabase
         .from('departments')
         .update({ 
           organization_id: orgId, 
-          name 
+          name,
+          section: division
         })
         .eq('id', id)
         .select()
         .single();
   
       if (error) throw error;
-      res.json({ success: true, data });
+      res.json({ 
+        success: true, 
+        data: { ...data, division: data.section } 
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

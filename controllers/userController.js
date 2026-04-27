@@ -5,22 +5,57 @@ exports.getProfile = async (req, res) => {
   const role = req.user.role;
 
   try {
-    let profileData = { ...req.user };
+    // 1. Fetch base profile
+    const { data: profile, error: pError } = await supabase
+      .from('user_profiles')
+      .select(`
+        *,
+        user_types (name, permissions)
+      `)
+      .eq('id', userId)
+      .single();
 
-    if (role === 'Student') {
-      const { data, error } = await supabase
-        .from('students')
-        .select('*, schools(name), classes(name)')
-        .eq('user_id', userId)
-        .single();
-      if (!error) profileData.details = data;
-    } else if (role === 'Staff' || role === 'Admin') {
-      const { data, error } = await supabase
+    if (pError || !profile) throw new Error('User profile not found');
+
+    let profileData = {
+      id: profile.id,
+      email: profile.email,
+      fullName: profile.full_name,
+      role: profile.user_types?.name || 'User',
+      avatar_url: profile.avatar_url
+    };
+
+    // 2. Fetch specific details based on role
+    // First, always check if they are a member in the registry (to show measurements)
+    const { data: memberData } = await supabase
+      .from('registry_members')
+      .select('*, organizations(name), departments(*)')
+      .eq('user_id', userId)
+      .maybeSingle();
+    
+    if (memberData) {
+      profileData.memberDetails = memberData;
+      // If they are a student, this is their primary detail
+      if (profileData.role.toLowerCase() === 'student') {
+        profileData.details = memberData;
+      }
+    }
+
+    // Then check role-specific tables
+    if (profileData.role.toLowerCase() === 'staff' || profileData.role.toLowerCase() === 'admin') {
+      const { data } = await supabase
         .from('employees')
         .select('*')
         .eq('user_id', userId)
         .single();
-      if (!error) profileData.details = data;
+      if (data) profileData.details = data;
+    } else if (['school', 'organization', 'entity'].includes(profileData.role.toLowerCase())) {
+      const { data } = await supabase
+        .from('organizations')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+      if (data) profileData.details = data;
     }
 
     res.json(profileData);

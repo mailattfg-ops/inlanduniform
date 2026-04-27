@@ -35,8 +35,8 @@ exports.login = async (req, res) => {
       permissions: profile.user_types?.permissions || []
     };
 
-    // If it's a School/Organization account, fetch the linked organization_id
-    if (fullUser.role === 'School' || fullUser.role === 'Organization') {
+    // If it's a School/Organization/Entity account, fetch the linked organization_id
+    if (fullUser.role === 'School' || fullUser.role === 'Organization' || fullUser.role === 'Entity') {
       const { data: orgData } = await supabase
         .from('organizations')
         .select('id, name')

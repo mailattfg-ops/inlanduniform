@@ -5,5 +5,7 @@ const { authMiddleware, checkPermission } = require('../middleware/authMiddlewar
 
 router.get('/', industryController.listIndustries);
 router.post('/', authMiddleware, checkPermission(['manage_schools']), industryController.createIndustry);
+router.put('/:id', authMiddleware, checkPermission(['manage_schools']), industryController.updateIndustry);
+router.delete('/:id', authMiddleware, checkPermission(['manage_schools']), industryController.deleteIndustry);
 
 module.exports = router;

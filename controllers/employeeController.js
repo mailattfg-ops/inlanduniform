@@ -148,3 +148,49 @@ exports.syncUsername = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+exports.updateEmployee = async (req, res) => {
+  const { id } = req.params;
+  const { full_name, employee_id, designation, department, contact_mobile, email, joining_date, status } = req.body;
+  
+  try {
+    // Check if another employee has the same employee_id
+    const { data: existing } = await supabase
+      .from('employees')
+      .select('id')
+      .eq('employee_id', employee_id)
+      .neq('id', id)
+      .maybeSingle();
+
+    if (existing) return res.status(400).json({ error: 'Employee ID already exists' });
+
+    // Update Employee Record
+    const { data: empData, error: empError } = await supabase
+      .from('employees')
+      .update({
+        full_name,
+        employee_id,
+        designation,
+        department,
+        contact_mobile,
+        email,
+        joining_date,
+        status
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (empError) throw empError;
+
+    // Update user profile name if they have an account
+    if (empData.user_id) {
+        await supabase.from('user_profiles').update({ full_name }).eq('id', empData.user_id);
+    }
+
+    res.json({ success: true, employee: empData });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};

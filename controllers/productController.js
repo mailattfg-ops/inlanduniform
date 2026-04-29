@@ -5,7 +5,7 @@ exports.listProducts = async (req, res) => {
         const { data, error } = await supabase
             .from('products')
             .select('*')
-            .order('name');
+            .order('created_at', { ascending: false });
 
         if (error) throw error;
         res.json(data);
@@ -23,7 +23,12 @@ exports.createProduct = async (req, res) => {
             .select()
             .single();
 
-        if (error) throw error;
+        if (error) {
+            if (error.code === '23505') {
+                return res.status(400).json({ error: 'A product with this ART Number already exists' });
+            }
+            throw error;
+        }
 
         // Log the action
         const { logAction } = require('../utils/logger');
@@ -56,7 +61,12 @@ exports.updateProduct = async (req, res) => {
             .select()
             .single();
 
-        if (error) throw error;
+        if (error) {
+            if (error.code === '23505') {
+                return res.status(400).json({ error: 'A product with this ART Number already exists' });
+            }
+            throw error;
+        }
 
         // Log the action
         const { logAction } = require('../utils/logger');

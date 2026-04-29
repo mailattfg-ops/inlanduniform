@@ -167,7 +167,12 @@ exports.addConfig = async (req, res) => {
             .select()
             .single();
 
-        if (error) throw error;
+        if (error) {
+            if (error.code === '23505') {
+                return res.status(400).json({ error: 'A measurement metric with this label already exists' });
+            }
+            throw error;
+        }
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });

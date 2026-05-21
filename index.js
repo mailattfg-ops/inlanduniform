@@ -29,11 +29,15 @@ app.use('/api/user', userRoutes); // Alias for consistency with some frontend ca
 app.use('/api/employees', require('./routes/employee.js'));
 app.use('/api/measurements', require('./routes/measurement.js'));
 app.use('/api/products', require('./routes/product.js'));
+app.use('/api/product-types', require('./routes/productType.js'));
+app.use('/api/art-number-hub', require('./routes/artNumberHub.js'));
 app.use('/api/templates', require('./routes/template.js'));
+app.use('/api/staff-measurements', require('./routes/staffMeasurement.js'));
 app.use('/api/inventory', require('./routes/inventory.js'));
 app.use('/api/dashboard', require('./routes/dashboard.js'));
 app.use('/api/size-charts', require('./routes/size-charts.js'));
 app.use('/api/audit', require('./routes/audit.js'));
+app.use('/api/quotations', require('./routes/quotation.js'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

@@ -82,11 +82,11 @@ exports.createOrganization = async (req, res) => {
 
 exports.updateOrganization = async (req, res) => {
     const { id } = req.params;
-    const { name, address, industry_id } = req.body;
+    const { name, address, industry_id, assigned_staff_id } = req.body;
     try {
       const { data, error } = await supabase
         .from('organizations')
-        .update({ name, address, industry_id })
+        .update({ name, address, industry_id, assigned_staff_id })
         .eq('id', id)
         .select()
         .single();
@@ -100,6 +100,128 @@ exports.updateOrganization = async (req, res) => {
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+};
+
+exports.getOrganizationDetails = async (req, res) => {
+  const { id } = req.params;
+  try {
+    // 1. Get Departments
+    const { data: departments } = await supabase
+      .from('departments')
+      .select('*')
+      .eq('organization_id', id);
+
+    // 2. Get Members and Measurement Status
+    const { data: members } = await supabase
+      .from('registry_members')
+      .select('id')
+      .eq('organization_id', id);
+
+    let completed = 0;
+    let pending = 0;
+
+    if (members && members.length > 0) {
+       const memberIds = members.map(m => m.id);
+       const { data: measurements } = await supabase
+         .from('measurements')
+         .select('member_id, status')
+         .in('member_id', memberIds);
+       
+       const statusMap = {};
+       if (measurements) {
+         measurements.forEach(m => {
+             const mid = String(m.member_id);
+             if (!statusMap[mid] || m.status === 'Pending') {
+                 statusMap[mid] = m.status;
+             }
+         });
+       }
+
+       members.forEach(m => {
+           const status = statusMap[String(m.id)];
+           if (status === 'COMPLETED' || status === 'Completed') {
+               completed++;
+           } else {
+               pending++;
+           }
+       });
+    }
+
+    res.json({
+      success: true,
+      departments: departments || [],
+      measurements: {
+        total: members ? members.length : 0,
+        completed,
+        pending
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.getAssignedStaff = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('organization_staff')
+      .select(`
+        id,
+        employee_id,
+        assigned_at,
+        employees (
+          full_name,
+          employee_id,
+          department
+        )
+      `)
+      .eq('organization_id', id);
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.assignStaff = async (req, res) => {
+  const { id } = req.params;
+  const { employee_ids } = req.body; // Array of employee IDs
+  
+  try {
+    if (!Array.isArray(employee_ids)) {
+      return res.status(400).json({ error: 'employee_ids must be an array' });
+    }
+
+    // Prepare inserts
+    const inserts = employee_ids.map(empId => ({
+      organization_id: id,
+      employee_id: empId
+    }));
+
+    // First delete existing assignments for these employees in this org to avoid unique constraint errors?
+    // Actually, it's better to just delete all current assignments and re-insert, or handle it properly.
+    // We will do a full sync: delete all existing, insert new ones.
+    const { error: deleteError } = await supabase
+      .from('organization_staff')
+      .delete()
+      .eq('organization_id', id);
+      
+    if (deleteError) throw deleteError;
+
+    if (inserts.length > 0) {
+       const { data, error } = await supabase
+         .from('organization_staff')
+         .insert(inserts)
+         .select();
+       if (error) throw error;
+    }
+
+    res.json({ success: true, message: 'Staff assignments updated' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
 
 exports.deleteOrganization = async (req, res) => {

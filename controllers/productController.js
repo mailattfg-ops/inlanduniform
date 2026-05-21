@@ -4,7 +4,7 @@ exports.listProducts = async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('products')
-            .select('*')
+            .select('*, product_types(id, name)')
             .order('created_at', { ascending: false });
 
         if (error) throw error;
@@ -16,10 +16,10 @@ exports.listProducts = async (req, res) => {
 
 exports.createProduct = async (req, res) => {
     try {
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category } = req.body;
+        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value } = req.body;
         const { data, error } = await supabase
             .from('products')
-            .insert([{ name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category }])
+            .insert([{ name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null }])
             .select()
             .single();
 
@@ -43,7 +43,7 @@ exports.createProduct = async (req, res) => {
 exports.updateProduct = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category } = req.body;
+        const { name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value } = req.body;
         const { data, error } = await supabase
             .from('products')
             .update({ 
@@ -55,6 +55,8 @@ exports.updateProduct = async (req, res) => {
                 entry_methods, 
                 size_chart_id,
                 category,
+                product_type_id,
+                sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
                 updated_at: new Date() 
             })
             .eq('id', id)

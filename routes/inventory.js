@@ -27,13 +27,16 @@ router.post('/threads', requireAdmin, inventoryController.threads.create);
 router.put('/threads/:id', requireAdmin, inventoryController.threads.update);
 router.delete('/threads/:id', requireAdmin, inventoryController.threads.delete);
 
-const designController = require('../controllers/designController');
 
-// Designs
-router.get('/designs/next-code', designController.getNextCode);
-router.get('/designs', designController.listDesigns);
-router.post('/designs', requireAdmin, designController.createDesign);
-router.put('/designs/:id', requireAdmin, designController.updateDesign);
-router.delete('/designs/:id', requireAdmin, designController.deleteDesign);
+
+// Stock & Thresholds
+router.get('/stock', inventoryController.stocks.list);
+router.post('/stock/adjust', requireAdmin, inventoryController.stocks.adjust);
+
+// Purchase Orders
+router.get('/purchase-orders', inventoryController.purchaseOrders.list);
+router.get('/purchase-orders/:id', inventoryController.purchaseOrders.getDetails);
+router.post('/purchase-orders', requireAdmin, inventoryController.purchaseOrders.create);
+router.put('/purchase-orders/:id/status', requireAdmin, inventoryController.purchaseOrders.updateStatus);
 
 module.exports = router;

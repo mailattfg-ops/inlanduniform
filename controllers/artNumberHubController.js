@@ -291,8 +291,8 @@ exports.createArtNumber = async (req, res) => {
         const genderCode = genderRes.data.code;
         const patternCode = patternRes.data.code;
 
-        // Auto-generate code: [DressCode]-[GenderCode][PatternCode]
-        const combinedCode = `${dressCode}-${genderCode}${patternCode}`;
+        // Auto-generate code: [GenderCode]-[DressCode][PatternCode]
+        const combinedCode = `${genderCode}-${dressCode}${patternCode}`;
 
         const { data, error } = await supabase
             .from('art_numbers')

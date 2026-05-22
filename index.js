@@ -38,6 +38,8 @@ app.use('/api/dashboard', require('./routes/dashboard.js'));
 app.use('/api/size-charts', require('./routes/size-charts.js'));
 app.use('/api/audit', require('./routes/audit.js'));
 app.use('/api/quotations', require('./routes/quotation.js'));
+app.use('/api/payments', require('./routes/payment.js'));
+app.use('/api/orders', require('./routes/order.js'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

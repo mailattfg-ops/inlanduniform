@@ -12,6 +12,9 @@ router.get('/:id', authMiddleware, quotationController.getQuotationDetails);
 // Create quotation
 router.post('/', authMiddleware, checkPermission(['manage_quotations']), quotationController.createQuotation);
 
+// Update quotation
+router.put('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.updateQuotation);
+
 // Delete quotation
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);
 

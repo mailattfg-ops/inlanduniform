@@ -116,10 +116,10 @@ exports.createQuotation = async (req, res) => {
             total_price: item.total_price || 0,
             size_breakdown: {
                 ...(item.size_breakdown || {}),
-                fabric_id: item.fabric_id || null,
-                sam_value: item.sam_value || null,
-                design_number: item.design_number || null,
-                is_manual: item.is_manual || false
+                fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
+                design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
+                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
             },
             fabric_cost_per_item: item.fabric_cost_per_item || 0,
             accessories_cost_per_item: item.accessories_cost_per_item || 0,
@@ -209,20 +209,17 @@ exports.calculateOrgMeasurements = async (req, res) => {
 
         if (templatesError) throw templatesError;
 
-        // 3a. Extract all unique product_ids and design_ids from template configs
+        // 3a. Extract all unique product_ids from template configs
         const productIdSet = new Set();
-        const designIdSet = new Set();
 
         (templates || []).forEach(tmpl => {
             const configs = [...(tmpl.boys_config || []), ...(tmpl.girls_config || [])];
             configs.forEach(cfg => {
                 if (cfg.product_id) productIdSet.add(cfg.product_id);
-                if (cfg.design_id) designIdSet.add(cfg.design_id);
             });
         });
 
         const productIds = Array.from(productIdSet);
-        const designIds = Array.from(designIdSet);
 
         // 3b. Fetch linked products (with product type info)
         let templateProducts = [];
@@ -234,23 +231,12 @@ exports.calculateOrgMeasurements = async (req, res) => {
             if (!prodsError) templateProducts = prods || [];
         }
 
-        // 3c. Fetch linked designs
-        let templateDesigns = [];
-        if (designIds.length > 0) {
-            const { data: desigs, error: desigError } = await supabase
-                .from('designs')
-                .select('id, design_code')
-                .in('id', designIds);
-            if (!desigError) templateDesigns = desigs || [];
-        }
-
-        // 3d. Build enriched template line items (product + design pairing per template config row)
+        // 3c. Build enriched template line items (product info)
         const templateLineItems = [];
         (templates || []).forEach(tmpl => {
             const configs = [...(tmpl.boys_config || []), ...(tmpl.girls_config || [])];
             configs.forEach(cfg => {
                 const product = templateProducts.find(p => String(p.id) === String(cfg.product_id));
-                const design = templateDesigns.find(d => d.id === cfg.design_id);
                 if (product) {
                     templateLineItems.push({
                         product_id: product.id,
@@ -260,8 +246,8 @@ exports.calculateOrgMeasurements = async (req, res) => {
                         sam_value: product.sam_value,
                         materials: product.materials,
                         product_type: product.product_types?.name || null,
-                        design_id: cfg.design_id || null,
-                        design_code: design?.design_code || null,
+                        design_id: null,
+                        design_code: null,
                         template_quantity: cfg.quantity || null
                     });
                 }
@@ -359,6 +345,113 @@ exports.calculateOrgMeasurements = async (req, res) => {
             entities: enrichedEntities,
             template_line_items: templateLineItems
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 6. Update an existing quotation and its items
+exports.updateQuotation = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            title,
+            quotation_no,
+            organization_id,
+            status,
+            estimated_expenses,
+            total_estimated_time,
+            production_days_estimate,
+            expected_delivery_date,
+            profit_margin_percent,
+            final_quote_value,
+            metrics_summary,
+            items // Array of items
+        } = req.body;
+
+        if (!title || !title.trim()) {
+            return res.status(400).json({ error: 'Quotation title is required' });
+        }
+        if (!organization_id) {
+            return res.status(400).json({ error: 'Organization (customer) is required' });
+        }
+        if (!items || !items.length) {
+            return res.status(400).json({ error: 'At least one product item is required' });
+        }
+
+        // Update the quotation header
+        const { data: quote, error: quoteError } = await supabase
+            .from('quotations')
+            .update({
+                title: title.trim(),
+                quotation_no: quotation_no ? quotation_no.trim() : undefined,
+                organization_id,
+                status: status || 'Draft',
+                estimated_expenses: estimated_expenses || 0,
+                total_estimated_time: total_estimated_time || '',
+                production_days_estimate: production_days_estimate || 0,
+                expected_delivery_date: expected_delivery_date || null,
+                profit_margin_percent: profit_margin_percent || 0,
+                final_quote_value: final_quote_value || 0,
+                metrics_summary: metrics_summary || {}
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (quoteError) {
+            throw quoteError;
+        }
+
+        // Delete existing quotation items
+        const { error: deleteError } = await supabase
+            .from('quotation_items')
+            .delete()
+            .eq('quotation_id', id);
+
+        if (deleteError) throw deleteError;
+
+        // Format items with quotation ID
+        const itemsToInsert = items.map(item => ({
+            quotation_id: id,
+            product_type_id: item.product_type_id || null,
+            quantity: item.quantity || 1,
+            unit_price: item.unit_price || 0,
+            total_price: item.total_price || 0,
+            size_breakdown: {
+                ...(item.size_breakdown || {}),
+                fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
+                design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
+                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
+            },
+            fabric_cost_per_item: item.fabric_cost_per_item || 0,
+            accessories_cost_per_item: item.accessories_cost_per_item || 0,
+            labor_cost_per_item: item.labor_cost_per_item || 0
+        }));
+
+        // Insert quotation items
+        const { error: itemsError } = await supabase
+            .from('quotation_items')
+            .insert(itemsToInsert);
+
+        if (itemsError) {
+            throw itemsError;
+        }
+
+        // Log action if available
+        try {
+            const { logAction } = require('../utils/logger');
+            await logAction(req.user.id, 'UPDATE', 'quotation', id, { 
+                quotation_no: quote.quotation_no, 
+                final_quote_value: quote.final_quote_value,
+                status: quote.status
+            });
+        } catch (logErr) {
+            console.error('Logging failed:', logErr.message);
+        }
+
+        res.json({ success: true, quotationId: id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

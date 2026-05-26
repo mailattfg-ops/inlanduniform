@@ -130,3 +130,97 @@ exports.recordPayment = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
+// 4. Cancel/Delete a payment
+exports.cancelPayment = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Fetch payment details
+        const { data: payment, error: fetchError } = await supabase
+            .from('payments')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !payment) {
+            return res.status(404).json({ error: 'Payment not found.' });
+        }
+
+        const quotation_id = payment.quotation_id;
+
+        // Fetch quotation details
+        const { data: quotation, error: quoteError } = await supabase
+            .from('quotations')
+            .select('id, quotation_no, final_quote_value, paid_amount, payment_status')
+            .eq('id', quotation_id)
+            .single();
+
+        if (quoteError || !quotation) {
+            return res.status(404).json({ error: 'Associated quotation not found.' });
+        }
+
+        // Delete the payment line
+        const { error: deleteError } = await supabase
+            .from('payments')
+            .delete()
+            .eq('id', id);
+
+        if (deleteError) throw deleteError;
+
+        // Fetch all remaining payments for this quotation to calculate cumulative sum
+        const { data: allPayments, error: allPaymentsError } = await supabase
+            .from('payments')
+            .select('amount')
+            .eq('quotation_id', quotation_id);
+
+        if (allPaymentsError) throw allPaymentsError;
+
+        const totalPaid = allPayments ? allPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0) : 0;
+        const finalValue = parseFloat(quotation.final_quote_value || 0);
+
+        let newStatus = 'Pending';
+        if (totalPaid >= finalValue && finalValue > 0) {
+            newStatus = 'Paid';
+        } else if (totalPaid > 0) {
+            newStatus = 'Partially Paid';
+        }
+
+        // Update quotation payment status and paid amount
+        const { error: updateError } = await supabase
+            .from('quotations')
+            .update({
+                paid_amount: totalPaid,
+                payment_status: newStatus
+            })
+            .eq('id', quotation_id);
+
+        if (updateError) throw updateError;
+
+        // Log action if available
+        try {
+            const { logAction } = require('../utils/logger');
+            await logAction(req.user.id, 'CANCEL_PAYMENT', 'payment', id, {
+                quotation_id,
+                quotation_no: quotation.quotation_no,
+                amount: payment.amount,
+                total_paid: totalPaid,
+                payment_status: newStatus
+            });
+        } catch (logErr) {
+            console.error('Logging failed:', logErr.message);
+        }
+
+        res.json({
+            success: true,
+            quotation: {
+                id: quotation_id,
+                quotation_no: quotation.quotation_no,
+                paid_amount: totalPaid,
+                payment_status: newStatus
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};

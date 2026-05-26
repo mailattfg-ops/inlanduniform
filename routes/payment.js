@@ -12,4 +12,7 @@ router.get('/quotation/:quotationId', authMiddleware, paymentController.getQuota
 // Record a new payment
 router.post('/', authMiddleware, checkPermission(['manage_quotations']), paymentController.recordPayment);
 
+// Cancel/Delete a payment
+router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), paymentController.cancelPayment);
+
 module.exports = router;

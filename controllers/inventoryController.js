@@ -75,11 +75,22 @@ exports.fabrics = {
         }
     },
     create: async (req, res) => {
-        const { code, name, brand_name, quantity, shade, width } = req.body;
+        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image } = req.body;
         try {
             const { data, error } = await supabase
                 .from('fabrics')
-                .insert([{ code, name, brand_name: brand_name || null, quantity: quantity || 0, shade: shade || null, width: width || null }])
+                .insert([{ 
+                    code, 
+                    name, 
+                    brand_name: brand_name || null, 
+                    quantity: quantity || 0, 
+                    shade: shade || null, 
+                    width: width || null,
+                    description: description || null,
+                    brand_type: brand_type || null,
+                    quality: quality || null,
+                    image: image || null
+                }])
                 .select()
                 .single();
             if (error) throw error;
@@ -90,11 +101,22 @@ exports.fabrics = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, brand_name, quantity, shade, width } = req.body;
+        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image } = req.body;
         try {
             const { data, error } = await supabase
                 .from('fabrics')
-                .update({ code, name, brand_name: brand_name || null, quantity: quantity || 0, shade: shade || null, width: width || null })
+                .update({ 
+                    code, 
+                    name, 
+                    brand_name: brand_name || null, 
+                    quantity: quantity || 0, 
+                    shade: shade || null, 
+                    width: width || null,
+                    description: description || null,
+                    brand_type: brand_type || null,
+                    quality: quality || null,
+                    image: image || null
+                })
                 .eq('id', id)
                 .select()
                 .single();
@@ -118,8 +140,143 @@ exports.fabrics = {
         }
     }
 };
-exports.buttons = createInventoryHandler('buttons');
-exports.threads = createInventoryHandler('threads');
+exports.buttons = {
+    list: async (req, res) => {
+        try {
+            const { data, error } = await supabase
+                .from('buttons')
+                .select('*')
+                .order('code', { ascending: true });
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    create: async (req, res) => {
+        const { code, name, description, unit_price } = req.body;
+        try {
+            const { data, error } = await supabase
+                .from('buttons')
+                .insert([{ 
+                    code, 
+                    name, 
+                    description: description || null,
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                }])
+                .select()
+                .single();
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    update: async (req, res) => {
+        const { id } = req.params;
+        const { code, name, description, unit_price } = req.body;
+        try {
+            const { data, error } = await supabase
+                .from('buttons')
+                .update({ 
+                    code, 
+                    name, 
+                    description: description || null,
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                })
+                .eq('id', id)
+                .select()
+                .single();
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    delete: async (req, res) => {
+        const { id } = req.params;
+        try {
+            const { error } = await supabase
+                .from('buttons')
+                .delete()
+                .eq('id', id);
+            if (error) throw error;
+            res.json({ success: true });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    }
+};
+
+exports.threads = {
+    list: async (req, res) => {
+        try {
+            const { data, error } = await supabase
+                .from('threads')
+                .select('*')
+                .order('code', { ascending: true });
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    create: async (req, res) => {
+        const { code, name, type, description, unit_price } = req.body;
+        try {
+            const { data, error } = await supabase
+                .from('threads')
+                .insert([{ 
+                    code, 
+                    name, 
+                    type: type || null,
+                    description: description || null,
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                }])
+                .select()
+                .single();
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    update: async (req, res) => {
+        const { id } = req.params;
+        const { code, name, type, description, unit_price } = req.body;
+        try {
+            const { data, error } = await supabase
+                .from('threads')
+                .update({ 
+                    code, 
+                    name, 
+                    type: type || null,
+                    description: description || null,
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                })
+                .eq('id', id)
+                .select()
+                .single();
+            if (error) throw error;
+            res.json(data);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+    delete: async (req, res) => {
+        const { id } = req.params;
+        try {
+            const { error } = await supabase
+                .from('threads')
+                .delete()
+                .eq('id', id);
+            if (error) throw error;
+            res.json({ success: true });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    }
+};
 
 // Stocks Controller
 exports.stocks = {

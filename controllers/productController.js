@@ -74,9 +74,7 @@ exports.listProducts = async (req, res) => {
             .from('products')
             .select(`
                 *,
-                product_types(id, name),
-                buttons!button_id(name),
-                threads!thread_id(name)
+                product_types(id, name)
             `)
             .order('created_at', { ascending: false });
 
@@ -90,10 +88,16 @@ exports.listProducts = async (req, res) => {
 
 exports.createProduct = async (req, res) => {
     try {
-        const { 
+        let { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
-            main_fabric, attachment_fabric1, attachment_fabric2, button_id, thread_id, base_size, fit 
+            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number 
         } = req.body;
+        
+        if (!design_number || design_number.trim() === '') {
+            design_number = await generateNextDesignNumberInternal();
+        } else {
+            design_number = design_number.trim();
+        }
         
         const { data, error } = await supabase
             .from('products')
@@ -112,10 +116,12 @@ exports.createProduct = async (req, res) => {
                 main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
                 attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
-                button_id: button_id || null,
-                thread_id: thread_id || null,
+                button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
+                thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
                 base_size: base_size || null,
-                fit: fit || null
+                fit: fit || null,
+                images: images || [],
+                design_number
             }])
             .select()
             .single();
@@ -145,7 +151,7 @@ exports.updateProduct = async (req, res) => {
         const { id } = req.params;
         const { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
-            main_fabric, attachment_fabric1, attachment_fabric2, button_id, thread_id, base_size, fit 
+            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number 
         } = req.body;
         
         const { data, error } = await supabase
@@ -165,10 +171,12 @@ exports.updateProduct = async (req, res) => {
                 main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
                 attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
-                button_id: button_id || null,
-                thread_id: thread_id || null,
+                button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
+                thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
                 base_size: base_size || null,
                 fit: fit || null,
+                images: images || [],
+                design_number: design_number || null,
                 updated_at: new Date() 
             })
             .eq('id', id)
@@ -210,6 +218,50 @@ exports.deleteProduct = async (req, res) => {
         await logAction(req.user.id, 'DELETE', 'product', id, { product_id: id });
 
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+async function generateNextDesignNumberInternal() {
+    try {
+        const { data, error } = await supabase
+            .from('products')
+            .select('design_number')
+            .not('design_number', 'is', null);
+
+        if (error) {
+            console.error('Error fetching design numbers:', error.message);
+            return 'DN-0001';
+        }
+
+        let maxNum = 0;
+        if (data && data.length > 0) {
+            data.forEach(p => {
+                const dn = p.design_number;
+                if (dn && dn.startsWith('DN-')) {
+                    const numPart = dn.substring(3);
+                    const num = parseInt(numPart, 10);
+                    if (!isNaN(num) && num > maxNum) {
+                        maxNum = num;
+                    }
+                }
+            });
+        }
+
+        const nextNum = maxNum + 1;
+        const padded = String(nextNum).padStart(4, '0');
+        return `DN-${padded}`;
+    } catch (err) {
+        console.error('Exception in generateNextDesignNumberInternal:', err.message);
+        return 'DN-0001';
+    }
+}
+
+exports.getNextDesignNumber = async (req, res) => {
+    try {
+        const nextDesignNumber = await generateNextDesignNumberInternal();
+        res.json({ nextDesignNumber });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

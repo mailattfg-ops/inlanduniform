@@ -154,7 +154,7 @@ exports.buttons = {
         }
     },
     create: async (req, res) => {
-        const { code, name, description, unit_price } = req.body;
+        const { code, name, description, unit_price, quantity, low_stock_threshold } = req.body;
         try {
             const { data, error } = await supabase
                 .from('buttons')
@@ -162,7 +162,9 @@ exports.buttons = {
                     code, 
                     name, 
                     description: description || null,
-                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
+                    quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
                 }])
                 .select()
                 .single();
@@ -174,7 +176,7 @@ exports.buttons = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, description, unit_price } = req.body;
+        const { code, name, description, unit_price, quantity, low_stock_threshold } = req.body;
         try {
             const { data, error } = await supabase
                 .from('buttons')
@@ -182,7 +184,9 @@ exports.buttons = {
                     code, 
                     name, 
                     description: description || null,
-                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
+                    quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
                 })
                 .eq('id', id)
                 .select()
@@ -222,7 +226,7 @@ exports.threads = {
         }
     },
     create: async (req, res) => {
-        const { code, name, type, description, unit_price } = req.body;
+        const { code, name, type, description, unit_price, quantity, low_stock_threshold } = req.body;
         try {
             const { data, error } = await supabase
                 .from('threads')
@@ -231,7 +235,9 @@ exports.threads = {
                     name, 
                     type: type || null,
                     description: description || null,
-                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
+                    quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
                 }])
                 .select()
                 .single();
@@ -243,7 +249,7 @@ exports.threads = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, type, description, unit_price } = req.body;
+        const { code, name, type, description, unit_price, quantity, low_stock_threshold } = req.body;
         try {
             const { data, error } = await supabase
                 .from('threads')
@@ -252,7 +258,9 @@ exports.threads = {
                     name, 
                     type: type || null,
                     description: description || null,
-                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null
+                    unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
+                    quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
                 })
                 .eq('id', id)
                 .select()
@@ -314,16 +322,34 @@ exports.stocks = {
 
             if (fabError) throw fabError;
 
+            // 4. Fetch threads list
+            const { data: threads, error: threadError } = await supabase
+                .from('threads')
+                .select('*')
+                .order('code', { ascending: true });
+
+            if (threadError) throw threadError;
+
+            // 5. Fetch buttons list
+            const { data: buttons, error: buttonError } = await supabase
+                .from('buttons')
+                .select('*')
+                .order('code', { ascending: true });
+
+            if (buttonError) throw buttonError;
+
             res.json({
                 products: enrichedProducts,
-                fabrics: fabrics || []
+                fabrics: fabrics || [],
+                threads: threads || [],
+                buttons: buttons || []
             });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
     },
     adjust: async (req, res) => {
-        const { product_id, size, fabric_id, quantity_delta, low_stock_threshold } = req.body;
+        const { product_id, size, fabric_id, thread_id, button_id, quantity_delta, low_stock_threshold } = req.body;
         try {
             const { ensureStockRecord, checkAndTriggerFabricAutoPO } = require('../services/inventoryService');
             
@@ -366,7 +392,75 @@ exports.stocks = {
                 return res.json(updatedFabric);
             }
 
-            // Case 2: Product Sizing Stock/Threshold Adjustment
+            // Case 2: Thread Stock/Threshold Adjustment
+            if (thread_id) {
+                const { data: thread, error: fetchErr } = await supabase
+                    .from('threads')
+                    .select('*')
+                    .eq('id', thread_id)
+                    .single();
+
+                if (fetchErr || !thread) {
+                    return res.status(404).json({ error: 'Thread record not found.' });
+                }
+
+                const updates = {};
+
+                if (quantity_delta !== undefined) {
+                    updates.quantity = Math.max(0.00, parseFloat(thread.quantity || 0) + parseFloat(quantity_delta));
+                }
+
+                if (low_stock_threshold !== undefined) {
+                    updates.low_stock_threshold = Math.max(0.00, parseFloat(low_stock_threshold));
+                }
+
+                const { data: updatedThread, error: updateErr } = await supabase
+                    .from('threads')
+                    .update(updates)
+                    .eq('id', thread_id)
+                    .select()
+                    .single();
+
+                if (updateErr) throw updateErr;
+
+                return res.json(updatedThread);
+            }
+
+            // Case 3: Button Stock/Threshold Adjustment
+            if (button_id) {
+                const { data: button, error: fetchErr } = await supabase
+                    .from('buttons')
+                    .select('*')
+                    .eq('id', button_id)
+                    .single();
+
+                if (fetchErr || !button) {
+                    return res.status(404).json({ error: 'Button record not found.' });
+                }
+
+                const updates = {};
+
+                if (quantity_delta !== undefined) {
+                    updates.quantity = Math.max(0.00, parseFloat(button.quantity || 0) + parseFloat(quantity_delta));
+                }
+
+                if (low_stock_threshold !== undefined) {
+                    updates.low_stock_threshold = Math.max(0.00, parseFloat(low_stock_threshold));
+                }
+
+                const { data: updatedButton, error: updateErr } = await supabase
+                    .from('buttons')
+                    .update(updates)
+                    .eq('id', button_id)
+                    .select()
+                    .single();
+
+                if (updateErr) throw updateErr;
+
+                return res.json(updatedButton);
+            }
+
+            // Case 4: Product Sizing Stock/Threshold Adjustment
             if (product_id && size) {
                 const stock = await ensureStockRecord(product_id, size);
                 if (!stock) {
@@ -397,7 +491,7 @@ exports.stocks = {
                 return res.json(updatedStock);
             }
 
-            return res.status(400).json({ error: 'Either fabric_id OR product_id and size must be provided.' });
+            return res.status(400).json({ error: 'Either fabric_id, thread_id, button_id, OR product_id and size must be provided.' });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

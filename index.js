@@ -41,6 +41,7 @@ app.use('/api/quotations', require('./routes/quotation.js'));
 app.use('/api/payments', require('./routes/payment.js'));
 app.use('/api/orders', require('./routes/order.js'));
 app.use('/api/sam-management', require('./routes/samManagement.js'));
+app.use('/api/company-settings', require('./routes/companySettings.js'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

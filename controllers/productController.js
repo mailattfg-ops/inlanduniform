@@ -1,5 +1,30 @@
 const supabase = require('../config/supabase');
 
+async function findOrCreateProductDesignNumber(code) {
+    if (!code || code.trim() === '') return null;
+    const cleanCode = code.trim();
+
+    // Check if it exists
+    const { data: existing, error } = await supabase
+        .from('design_numbers')
+        .select('id')
+        .eq('code', cleanCode)
+        .maybeSingle();
+
+    if (existing) return existing.id;
+
+    // Insert new
+    const { data: inserted, error: insertError } = await supabase
+        .from('design_numbers')
+        .insert([{ code: cleanCode }])
+        .select('id')
+        .single();
+
+    if (insertError) throw insertError;
+    return inserted.id;
+}
+
+
 async function registerArtNumberInHub(art_number, base_size, fit) {
     if (!art_number) return;
     try {
@@ -74,13 +99,20 @@ exports.listProducts = async (req, res) => {
             .from('products')
             .select(`
                 *,
-                product_types(id, name)
+                product_types(id, name),
+                design_number_ref:design_numbers(code)
             `)
             .order('created_at', { ascending: false });
 
         if (prodError) throw prodError;
 
-        res.json(products || []);
+        const formatted = (products || []).map(p => ({
+            ...p,
+            design_number: p.design_number_ref?.code || null,
+            design_number_ref: undefined
+        }));
+
+        res.json(formatted || []);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -90,7 +122,8 @@ exports.createProduct = async (req, res) => {
     try {
         let { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
-            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number 
+            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
+            main_fabric_id, button_id, thread_id
         } = req.body;
         
         if (!design_number || design_number.trim() === '') {
@@ -98,6 +131,8 @@ exports.createProduct = async (req, res) => {
         } else {
             design_number = design_number.trim();
         }
+
+        const designNumberId = await findOrCreateProductDesignNumber(design_number);
         
         const { data, error } = await supabase
             .from('products')
@@ -118,10 +153,13 @@ exports.createProduct = async (req, res) => {
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
                 button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
                 thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
+                main_fabric_id: main_fabric_id || null,
+                button_id: button_id || null,
+                thread_id: thread_id || null,
                 base_size: base_size || null,
                 fit: fit || null,
                 images: images || [],
-                design_number
+                design_number_id: designNumberId
             }])
             .select()
             .single();
@@ -151,8 +189,11 @@ exports.updateProduct = async (req, res) => {
         const { id } = req.params;
         const { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
-            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number 
+            main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
+            main_fabric_id, button_id, thread_id
         } = req.body;
+        
+        const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
         
         const { data, error } = await supabase
             .from('products')
@@ -173,10 +214,13 @@ exports.updateProduct = async (req, res) => {
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
                 button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
                 thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
+                main_fabric_id: main_fabric_id || null,
+                button_id: button_id || null,
+                thread_id: thread_id || null,
                 base_size: base_size || null,
                 fit: fit || null,
                 images: images || [],
-                design_number: design_number || null,
+                design_number_id: designNumberId,
                 updated_at: new Date() 
             })
             .eq('id', id)
@@ -226,21 +270,21 @@ exports.deleteProduct = async (req, res) => {
 async function generateNextDesignNumberInternal() {
     try {
         const { data, error } = await supabase
-            .from('products')
-            .select('design_number')
-            .not('design_number', 'is', null);
+            .from('design_numbers')
+            .select('code')
+            .not('code', 'is', null);
 
         if (error) {
             console.error('Error fetching design numbers:', error.message);
-            return 'DN-0001';
+            return 'DNS-0001';
         }
 
         let maxNum = 0;
         if (data && data.length > 0) {
-            data.forEach(p => {
-                const dn = p.design_number;
-                if (dn && dn.startsWith('DN-')) {
-                    const numPart = dn.substring(3);
+            data.forEach(dnRecord => {
+                const dn = dnRecord.code;
+                if (dn && dn.startsWith('DNS-')) {
+                    const numPart = dn.substring(4);
                     const num = parseInt(numPart, 10);
                     if (!isNaN(num) && num > maxNum) {
                         maxNum = num;
@@ -251,10 +295,10 @@ async function generateNextDesignNumberInternal() {
 
         const nextNum = maxNum + 1;
         const padded = String(nextNum).padStart(4, '0');
-        return `DN-${padded}`;
+        return `DNS-${padded}`;
     } catch (err) {
         console.error('Exception in generateNextDesignNumberInternal:', err.message);
-        return 'DN-0001';
+        return 'DNS-0001';
     }
 }
 

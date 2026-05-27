@@ -11,4 +11,7 @@ router.post('/', checkPermission('manage_system'), productController.createProdu
 router.put('/:id', checkPermission('manage_system'), productController.updateProduct);
 router.delete('/:id', checkPermission('manage_system'), productController.deleteProduct);
 
+router.get('/:id/variants', productController.getProductVariants);
+router.post('/:id/variants', checkPermission('manage_system'), productController.createProductVariant);
+
 module.exports = router;

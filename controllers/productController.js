@@ -194,7 +194,110 @@ exports.updateProduct = async (req, res) => {
         } = req.body;
         
         const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
+
+        // Fetch current base product values to detect button/thread changes
+        const { data: currentProduct } = await supabase
+            .from('products')
+            .select('button_id, thread_id, button_count, thread_count, design_number_id')
+            .eq('id', id)
+            .maybeSingle();
+
+        const normNewButtonId = button_id || null;
+        const normNewThreadId = thread_id || null;
+        const normCurButtonId = currentProduct?.button_id || null;
+        const normCurThreadId = currentProduct?.thread_id || null;
+
+        const buttonChanged = normNewButtonId !== normCurButtonId;
+        const threadChanged = normNewThreadId !== normCurThreadId;
+
+        // If button or thread changed, auto-create a variant for the NEW combination
+        // so the base design number stays clean with its original specs.
+        if ((buttonChanged || threadChanged) && (normNewButtonId || normNewThreadId)) {
+            // Check if a variant already exists for the new combination
+            const { data: existingVariant } = await supabase
+                .from('product_design_variants')
+                .select('id, design_number_id, design_numbers(code)')
+                .eq('product_id', id)
+                .eq('button_id', normNewButtonId)
+                .eq('thread_id', normNewThreadId)
+                .maybeSingle();
+
+            if (!existingVariant) {
+                // Also make sure it doesn't match the base product itself
+                const baseMatches = normNewButtonId === normCurButtonId && normNewThreadId === normCurThreadId;
+                if (!baseMatches) {
+                    // Create a new variant design number for the new combination
+                    const nextCode = await generateNextDesignNumberInternal();
+                    const { data: newDn, error: dnErr } = await supabase
+                        .from('design_numbers')
+                        .insert([{ code: nextCode }])
+                        .select()
+                        .single();
+
+                    if (!dnErr && newDn) {
+                        await supabase
+                            .from('product_design_variants')
+                            .insert([{
+                                product_id: parseInt(id, 10),
+                                design_number_id: newDn.id,
+                                button_id: normNewButtonId,
+                                thread_id: normNewThreadId,
+                                button_count: parseInt(button_count, 10) || 0,
+                                thread_count: parseInt(thread_count, 10) || 0,
+                                variant_status: 'active'
+                            }]);
+                    }
+                }
+            }
+
+            // Keep the base product's button/thread unchanged (don't overwrite)
+            const { data, error } = await supabase
+                .from('products')
+                .update({ 
+                    name, 
+                    art_number, 
+                    gender, 
+                    measurements, 
+                    materials, 
+                    entry_methods, 
+                    size_chart_id,
+                    category,
+                    product_type_id,
+                    sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
+                    retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+                    main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
+                    attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
+                    attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
+                    // Keep base button/thread unchanged - they belong to the base design number
+                    button_count: currentProduct?.button_count !== undefined ? currentProduct.button_count : 0,
+                    thread_count: currentProduct?.thread_count !== undefined ? currentProduct.thread_count : 0,
+                    button_id: normCurButtonId,
+                    thread_id: normCurThreadId,
+                    main_fabric_id: main_fabric_id || null,
+                    base_size: base_size || null,
+                    fit: fit || null,
+                    images: images || [],
+                    design_number_id: designNumberId || currentProduct?.design_number_id || null,
+                    updated_at: new Date() 
+                })
+                .eq('id', id)
+                .select()
+                .single();
+
+            if (error) {
+                if (error.code === '23505') {
+                    return res.status(400).json({ error: 'A product with this ART Number already exists' });
+                }
+                throw error;
+            }
+
+            const { logAction } = require('../utils/logger');
+            await logAction(req.user.id, 'UPDATE', 'product', id, { name: data.name });
+            await registerArtNumberInHub(data.art_number, data.base_size, data.fit);
+            return res.json({ ...data, variant_created: true });
+        }
         
+        // No button/thread change – regular update
         const { data, error } = await supabase
             .from('products')
             .update({ 
@@ -246,6 +349,7 @@ exports.updateProduct = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
 
 exports.deleteProduct = async (req, res) => {
     try {
@@ -306,6 +410,142 @@ exports.getNextDesignNumber = async (req, res) => {
     try {
         const nextDesignNumber = await generateNextDesignNumberInternal();
         res.json({ nextDesignNumber });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.getProductVariants = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data, error } = await supabase
+            .from('product_design_variants')
+            .select(`
+                *,
+                design_numbers(id, code),
+                buttons(id, name),
+                threads(id, name, code)
+            `)
+            .eq('product_id', id);
+
+        if (error) throw error;
+        
+        const formatted = (data || []).map(v => ({
+            id: v.id,
+            product_id: v.product_id,
+            design_number_id: v.design_number_id,
+            design_code: v.design_numbers?.code || 'DNS-xxxx',
+            button_id: v.button_id,
+            button_name: v.buttons?.name || 'Standard',
+            button_count: v.button_count,
+            thread_id: v.thread_id,
+            thread_name: v.threads?.name || 'Standard',
+            thread_code: v.threads?.code || 'Standard',
+            thread_count: v.thread_count,
+            material_combination: v.material_combination || '',
+            variant_status: v.variant_status,
+            created_at: v.created_at
+        }));
+
+        res.json(formatted);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createProductVariant = async (req, res) => {
+    try {
+        const { id: product_id } = req.params;
+        const { button_id, thread_id, button_count, thread_count, material_combination } = req.body;
+
+        const { data: existingVariant, error: findError } = await supabase
+            .from('product_design_variants')
+            .select('id, design_number_id, design_numbers(code)')
+            .eq('product_id', product_id)
+            .eq('button_id', button_id || null)
+            .eq('thread_id', thread_id || null)
+            .maybeSingle();
+
+        if (findError) throw findError;
+
+        if (existingVariant) {
+            return res.status(400).json({ 
+                error: 'Combination already exists', 
+                design_number: existingVariant.design_numbers?.code,
+                design_number_id: existingVariant.design_number_id,
+                id: existingVariant.id
+            });
+        }
+
+        const { data: baseProduct, error: baseError } = await supabase
+            .from('products')
+            .select('id, design_number_id, design_numbers(code)')
+            .eq('id', product_id)
+            .eq('button_id', button_id || null)
+            .eq('thread_id', thread_id || null)
+            .maybeSingle();
+
+        if (baseError) throw baseError;
+
+        if (baseProduct) {
+            return res.status(400).json({
+                error: 'Combination matches default/base product design',
+                design_number: baseProduct.design_numbers?.code,
+                design_number_id: baseProduct.design_number_id
+            });
+        }
+
+        const nextCode = await generateNextDesignNumberInternal();
+        const { data: newDn, error: dnError } = await supabase
+            .from('design_numbers')
+            .insert([{ code: nextCode }])
+            .select()
+            .single();
+
+        if (dnError) throw dnError;
+
+        const { data: variant, error: varError } = await supabase
+            .from('product_design_variants')
+            .insert([{
+                product_id: parseInt(product_id, 10),
+                design_number_id: newDn.id,
+                button_id: button_id || null,
+                thread_id: thread_id || null,
+                button_count: button_count !== undefined && button_count !== '' && button_count !== null ? parseInt(button_count, 10) : 0,
+                thread_count: thread_count !== undefined && thread_count !== '' && thread_count !== null ? parseInt(thread_count, 10) : 0,
+                material_combination: material_combination || '',
+                variant_status: 'active'
+            }])
+            .select(`
+                *,
+                design_numbers(id, code),
+                buttons(id, name),
+                threads(id, name, code)
+            `)
+            .single();
+
+        if (varError) {
+            await supabase.from('design_numbers').delete().eq('id', newDn.id);
+            throw varError;
+        }
+
+        res.json({
+            id: variant.id,
+            product_id: variant.product_id,
+            design_number_id: variant.design_number_id,
+            design_code: variant.design_numbers?.code || nextCode,
+            button_id: variant.button_id,
+            button_name: variant.buttons?.name || 'Standard',
+            button_count: variant.button_count,
+            thread_id: variant.thread_id,
+            thread_name: variant.threads?.name || 'Standard',
+            thread_code: variant.threads?.code || 'Standard',
+            thread_count: variant.thread_count,
+            material_combination: variant.material_combination,
+            variant_status: variant.variant_status,
+            created_at: variant.created_at
+        });
+
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

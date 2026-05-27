@@ -1,5 +1,119 @@
 const supabase = require('../config/supabase');
 
+// Local helper to generate the next design number
+async function generateNextDesignNumberLocal() {
+    try {
+        const { data, error } = await supabase
+            .from('design_numbers')
+            .select('code')
+            .not('code', 'is', null);
+
+        if (error) {
+            console.error('Error fetching design numbers:', error.message);
+            return 'DNS-0001';
+        }
+
+        let maxNum = 0;
+        if (data && data.length > 0) {
+            data.forEach(dnRecord => {
+                const dn = dnRecord.code;
+                if (dn && dn.startsWith('DNS-')) {
+                    const numPart = dn.substring(4);
+                    const num = parseInt(numPart, 10);
+                    if (!isNaN(num) && num > maxNum) {
+                        maxNum = num;
+                    }
+                }
+            });
+        }
+
+        const nextNum = maxNum + 1;
+        const padded = String(nextNum).padStart(4, '0');
+        return `DNS-${padded}`;
+    } catch (err) {
+        console.error('Exception in generateNextDesignNumberLocal:', err.message);
+        return 'DNS-0001';
+    }
+}
+
+// Local helper to resolve or auto-create variant design numbers
+async function resolveOrCreateQuotationItemDesignNumber(item) {
+    const productId = item.product_id || (item.size_breakdown && item.size_breakdown.product_id);
+    if (!productId) {
+        return item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null;
+    }
+
+    const { data: product } = await supabase
+        .from('products')
+        .select('*, design_numbers(code)')
+        .eq('id', productId)
+        .maybeSingle();
+
+    if (!product) {
+        return item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null;
+    }
+
+    const buttonId = item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null;
+    const threadId = item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null;
+    const buttonCount = item.button_count || (item.size_breakdown && item.size_breakdown.button_count) || 0;
+    const threadCount = item.thread_count || (item.size_breakdown && item.size_breakdown.thread_count) || 0;
+
+    const normButtonId = buttonId === '' ? null : buttonId;
+    const normThreadId = threadId === '' ? null : threadId;
+
+    // 1. Check if it matches the base product's button and thread specs
+    if (product.button_id === normButtonId && product.thread_id === normThreadId) {
+        return product.design_numbers?.code || null;
+    }
+
+    // 2. Check if a variant already exists
+    const { data: existingVariant } = await supabase
+        .from('product_design_variants')
+        .select('*, design_numbers(code)')
+        .eq('product_id', productId)
+        .eq('button_id', normButtonId)
+        .eq('thread_id', normThreadId)
+        .maybeSingle();
+
+    if (existingVariant) {
+        return existingVariant.design_numbers?.code || null;
+    }
+
+    // 3. Create a new variant
+    try {
+        const nextCode = await generateNextDesignNumberLocal();
+        const { data: newDn, error: dnError } = await supabase
+            .from('design_numbers')
+            .insert([{ code: nextCode }])
+            .select()
+            .single();
+
+        if (dnError) throw dnError;
+
+        const { error: varError } = await supabase
+            .from('product_design_variants')
+            .insert([{
+                product_id: parseInt(productId, 10),
+                design_number_id: newDn.id,
+                button_id: normButtonId,
+                thread_id: normThreadId,
+                button_count: parseInt(buttonCount, 10) || 0,
+                thread_count: parseInt(threadCount, 10) || 0,
+                variant_status: 'active'
+            }]);
+
+        if (varError) {
+            await supabase.from('design_numbers').delete().eq('id', newDn.id);
+            throw varError;
+        }
+
+        return nextCode;
+    } catch (err) {
+        console.error('Error auto-creating variant design number:', err.message);
+        return product.design_numbers?.code || null;
+    }
+}
+
 // Helper to find or create a Group Design Number based on associated design codes
 async function findOrCreateGroupDesignNumber(designCodes) {
     if (!designCodes || !Array.isArray(designCodes)) return null;
@@ -46,7 +160,7 @@ async function findOrCreateGroupDesignNumber(designCodes) {
         dnMap[dn.code] = dn.id;
     });
 
-    const targetIds = uniqueCodes.map(code => dnMap[code]).sort();
+    const targetIds = uniqueCodes.map(code => Number(dnMap[code])).sort((a, b) => a - b);
 
     // 2. Find if an existing Group Design Number matches this exact set of child IDs
     const { data: mappings, error: mapErr } = await supabase
@@ -58,12 +172,12 @@ async function findOrCreateGroupDesignNumber(designCodes) {
     const groupMap = {};
     (mappings || []).forEach(m => {
         if (!groupMap[m.parent_id]) groupMap[m.parent_id] = [];
-        groupMap[m.parent_id].push(m.child_id);
+        groupMap[m.parent_id].push(Number(m.child_id));
     });
 
     let matchedParentId = null;
     for (const parentId of Object.keys(groupMap)) {
-        const childIds = groupMap[parentId].sort();
+        const childIds = groupMap[parentId].sort((a, b) => a - b);
         if (childIds.length === targetIds.length && childIds.every((val, index) => val === targetIds[index])) {
             matchedParentId = Number(parentId);
             break;
@@ -271,11 +385,28 @@ exports.createQuotation = async (req, res) => {
             return res.status(400).json({ error: 'At least one product item is required' });
         }
 
-        // Retrieve design numbers from items mapped to their actual design codes
-        const designCodes = await resolveDesignCodes(items);
+        // Resolve or auto-create variant design numbers for each configured item
+        for (const item of items) {
+            const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
+            if (resolvedDn) {
+                item.design_number = resolvedDn;
+                if (!item.size_breakdown) item.size_breakdown = {};
+                item.size_breakdown.design_number = resolvedDn;
+            }
+        }
+
+        // Collect the resolved design codes directly from each item (already resolved above)
+        // Do NOT call resolveDesignCodes() - it would overwrite variant codes with base product codes
+        const designCodes = [...new Set(
+            items
+                .map(item => item.design_number || (item.size_breakdown && item.size_breakdown.design_number))
+                .filter(code => code && (code.startsWith('DNS-') || code.startsWith('DN-')))
+        )];
 
         // Find or create group design number
-        const groupDesignNumberId = await findOrCreateGroupDesignNumber(designCodes);
+        const groupDesignNumberId = designCodes.length > 0
+            ? await findOrCreateGroupDesignNumber(designCodes)
+            : null;
 
         // Generate a unique quotation number if not provided
         const finalQuotationNo = quotation_no && quotation_no.trim() 
@@ -582,8 +713,23 @@ exports.updateQuotation = async (req, res) => {
             return res.status(400).json({ error: 'At least one product item is required' });
         }
 
-        // Retrieve design numbers from items mapped to their actual design codes
-        const designCodes = await resolveDesignCodes(items);
+        // Resolve or auto-create variant design numbers for each configured item
+        for (const item of items) {
+            const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
+            if (resolvedDn) {
+                item.design_number = resolvedDn;
+                if (!item.size_breakdown) item.size_breakdown = {};
+                item.size_breakdown.design_number = resolvedDn;
+            }
+        }
+
+        // Collect the resolved design codes directly from each item (already resolved above)
+        // Do NOT call resolveDesignCodes() - it would overwrite variant codes with base product codes
+        const designCodes = [...new Set(
+            items
+                .map(item => item.design_number || (item.size_breakdown && item.size_breakdown.design_number))
+                .filter(code => code && (code.startsWith('DNS-') || code.startsWith('DN-')))
+        )];
 
         // Find or create group design number
         const groupDesignNumberId = await findOrCreateGroupDesignNumber(designCodes);
@@ -1087,6 +1233,15 @@ exports.listGroupDesignCombinations = async (req, res) => {
 
         if (prodError) throw prodError;
 
+        const { data: variants, error: varError } = await supabase
+            .from('product_design_variants')
+            .select(`
+                *,
+                design_numbers(id, code)
+            `);
+
+        if (varError) throw varError;
+
         // Group mappings by parent_id
         const mappingsByParent = {};
         (mappings || []).forEach(m => {
@@ -1111,7 +1266,29 @@ exports.listGroupDesignCombinations = async (req, res) => {
         const results = (groupDesigns || []).map(gd => {
             const childItems = mappingsByParent[gd.id] || [];
             const items = childItems.map(item => {
-                const product = formattedProducts.find(p => p.design_number_id === item.child_id);
+                const variant = (variants || []).find(v => v.design_number_id === item.child_id);
+                let product = null;
+                let buttonId = null;
+                let buttonCount = null;
+                let threadId = null;
+                let threadCount = null;
+
+                if (variant) {
+                    product = formattedProducts.find(p => p.id === variant.product_id);
+                    buttonId = variant.button_id;
+                    buttonCount = variant.button_count;
+                    threadId = variant.thread_id;
+                    threadCount = variant.thread_count;
+                } else {
+                    product = formattedProducts.find(p => p.design_number_id === item.child_id);
+                    if (product) {
+                        buttonId = product.button_id;
+                        buttonCount = product.button_count;
+                        threadId = product.thread_id;
+                        threadCount = product.thread_count;
+                    }
+                }
+
                 return {
                     design_number_id: item.child_id,
                     design_number: item.design_code,
@@ -1122,10 +1299,10 @@ exports.listGroupDesignCombinations = async (req, res) => {
                     main_fabric: product ? product.main_fabric : null,
                     main_fabric_id: product ? product.main_fabric_id : null,
                     sam_value: product ? product.sam_value : null,
-                    button_id: product ? product.button_id : null,
-                    button_count: product ? product.button_count : null,
-                    thread_id: product ? product.thread_id : null,
-                    thread_count: product ? product.thread_count : null
+                    button_id: buttonId,
+                    button_count: buttonCount,
+                    thread_id: threadId,
+                    thread_count: threadCount
                 };
             });
             return {
@@ -1148,30 +1325,176 @@ exports.updateGroupDesignCombination = async (req, res) => {
         const { id } = req.params;
         const { name, description, products } = req.body;
 
-        // 1. Update group_design_numbers
-        const { error: gdError } = await supabase
-            .from('group_design_numbers')
-            .update({ name, description })
-            .eq('id', id);
+        let targetParentId = parseInt(id, 10);
+        if (products && Array.isArray(products) && products.length > 0) {
+            const newDesignCodes = products.map(p => p.design_number).filter(Boolean);
+            const resolvedParentId = await findOrCreateGroupDesignNumber(newDesignCodes);
+            
+            if (resolvedParentId && resolvedParentId !== targetParentId) {
+                // Redirect quotations pointing to the old combination to the new resolved one
+                await supabase
+                    .from('quotations')
+                    .update({ group_design_number_id: resolvedParentId })
+                    .eq('group_design_number_id', targetParentId);
 
-        if (gdError) throw gdError;
+                // Clear new parent's mappings to prevent conflict before overwrite
+                await supabase
+                    .from('group_design_mappings')
+                    .delete()
+                    .eq('parent_id', resolvedParentId);
 
-        // 2. Update remarks in group_design_mappings for each product
-        if (products && Array.isArray(products)) {
-            for (const prod of products) {
-                if (prod.design_number_id) {
-                    await supabase
-                        .from('group_design_mappings')
-                        .update({ remarks: prod.remarks || '' })
-                        .eq('parent_id', id)
-                        .eq('child_id', prod.design_number_id);
-                }
+                // Delete old mappings
+                await supabase
+                    .from('group_design_mappings')
+                    .delete()
+                    .eq('parent_id', targetParentId);
+
+                // Delete old unused group design number record
+                await supabase
+                    .from('group_design_numbers')
+                    .delete()
+                    .eq('id', targetParentId);
+
+                targetParentId = resolvedParentId;
             }
         }
 
-        res.json({ success: true });
+        // Update group design details for the resolved parent
+        const { error: gdError } = await supabase
+            .from('group_design_numbers')
+            .update({ name, description })
+            .eq('id', targetParentId);
+
+        if (gdError) throw gdError;
+
+        // Re-create mappings under the resolved parent ID
+        if (products && Array.isArray(products)) {
+            await supabase
+                .from('group_design_mappings')
+                .delete()
+                .eq('parent_id', targetParentId);
+
+            const mappingsToInsert = products.map(prod => ({
+                parent_id: targetParentId,
+                child_id: parseInt(prod.design_number_id, 10),
+                remarks: prod.remarks || ''
+            }));
+
+            const { error: insError } = await supabase
+                .from('group_design_mappings')
+                .insert(mappingsToInsert);
+
+            if (insError) throw insError;
+        }
+
+        res.json({ success: true, groupDesignId: targetParentId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
+
+exports.listDesignNumbers = async (req, res) => {
+    try {
+        const { data: designNumbers, error: dnError } = await supabase
+            .from('design_numbers')
+            .select('id, code, name, description, created_at')
+            .order('code', { ascending: true });
+
+        if (dnError) throw dnError;
+
+        // Fetch products
+        const { data: products, error: prodError } = await supabase
+            .from('products')
+            .select('id, name, art_number, main_fabric, sam_value, button_id, button_count, thread_id, thread_count, design_number_id');
+
+        if (prodError) throw prodError;
+
+        // Fetch product variants
+        const { data: variants, error: varError } = await supabase
+            .from('product_design_variants')
+            .select(`
+                id,
+                product_id,
+                design_number_id,
+                button_id,
+                button_count,
+                thread_id,
+                thread_count
+            `);
+
+        if (varError) throw varError;
+
+        const results = (designNumbers || []).map(dn => {
+            // Find if it's a main product design
+            const mainProduct = (products || []).find(p => p.design_number_id === dn.id);
+            
+            // Find if it's a variant design
+            const variant = (variants || []).find(v => v.design_number_id === dn.id);
+            
+            let spec = null;
+            if (mainProduct) {
+                spec = {
+                    product_id: mainProduct.id,
+                    product_name: mainProduct.name,
+                    art_number: mainProduct.art_number || '—',
+                    main_fabric_id: null,
+                    main_fabric_meters: mainProduct.main_fabric || '1.25',
+                    sam_value: mainProduct.sam_value,
+                    button_id: mainProduct.button_id,
+                    button_count: mainProduct.button_count || 0,
+                    thread_id: mainProduct.thread_id,
+                    thread_count: mainProduct.thread_count || 0,
+                    type: 'Main Product'
+                };
+            } else if (variant) {
+                const parentProduct = (products || []).find(p => p.id === variant.product_id);
+                spec = {
+                    product_id: variant.product_id,
+                    product_name: parentProduct ? parentProduct.name : 'Unregistered Product',
+                    art_number: parentProduct ? parentProduct.art_number : '—',
+                    main_fabric_id: null,
+                    main_fabric_meters: parentProduct ? (parentProduct.main_fabric || '1.25') : '1.25',
+                    sam_value: parentProduct ? parentProduct.sam_value : null,
+                    button_id: variant.button_id,
+                    button_count: variant.button_count || 0,
+                    thread_id: variant.thread_id,
+                    thread_count: variant.thread_count || 0,
+                    type: 'Variant'
+                };
+            }
+
+            return {
+                id: dn.id,
+                code: dn.code,
+                name: dn.name || dn.code,
+                description: dn.description || '',
+                created_at: dn.created_at,
+                spec: spec
+            };
+        });
+
+        res.json(results);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.updateDesignNumber = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, description } = req.body;
+
+        const { error } = await supabase
+            .from('design_numbers')
+            .update({ name, description })
+            .eq('id', id);
+
+        if (error) throw error;
+
+        res.json({ success: true, designNumberId: id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
 

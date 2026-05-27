@@ -15,6 +15,13 @@ router.get('/group-designs', authMiddleware, quotationController.listGroupDesign
 // Update group design combination
 router.put('/group-designs/:id', authMiddleware, checkPermission(['manage_products']), quotationController.updateGroupDesignCombination);
 
+// Get individual design numbers catalog
+router.get('/design-numbers', authMiddleware, quotationController.listDesignNumbers);
+
+// Update individual design number details
+router.put('/design-numbers/:id', authMiddleware, checkPermission(['manage_products']), quotationController.updateDesignNumber);
+
+
 // Get single quotation details
 router.get('/:id', authMiddleware, quotationController.getQuotationDetails);
 

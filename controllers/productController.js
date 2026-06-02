@@ -1,5 +1,45 @@
 const supabase = require('../config/supabase');
 
+const parseMaterialsMetadata = (rawText) => {
+    if (!rawText) return { main_fabric_id: null, attachment_fabric1_id: null, attachment_fabric2_id: null, cleanMaterials: '' };
+    
+    let text = rawText;
+    let main_fabric_id = null;
+    let attachment_fabric1_id = null;
+    let attachment_fabric2_id = null;
+
+    // Parse main_fabric_id
+    const mainMatch = text.match(/\[MainFabricId:\s*([^\]]+)\]/);
+    if (mainMatch) {
+        main_fabric_id = mainMatch[1];
+        text = text.replace(/\[MainFabricId:\s*([^\]]+)\]/, '').trim();
+    }
+    
+    // Parse attachment_fabric1_id
+    const att1Match = text.match(/\[AttachmentFabric1Id:\s*([^\]]+)\]/);
+    if (att1Match) {
+        attachment_fabric1_id = att1Match[1];
+        text = text.replace(/\[AttachmentFabric1Id:\s*([^\]]+)\]/, '').trim();
+    }
+
+    // Parse attachment_fabric2_id
+    const att2Match = text.match(/\[AttachmentFabric2Id:\s*([^\]]+)\]/);
+    if (att2Match) {
+        attachment_fabric2_id = att2Match[1];
+        text = text.replace(/\[AttachmentFabric2Id:\s*([^\]]+)\]/, '').trim();
+    }
+
+    return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, cleanMaterials: text };
+};
+
+const serializeMaterialsMetadata = (materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id) => {
+    let text = materials || '';
+    if (main_fabric_id) text = `[MainFabricId: ${main_fabric_id}] ${text}`;
+    if (attachment_fabric1_id) text = `[AttachmentFabric1Id: ${attachment_fabric1_id}] ${text}`;
+    if (attachment_fabric2_id) text = `[AttachmentFabric2Id: ${attachment_fabric2_id}] ${text}`;
+    return text.trim();
+};
+
 async function findOrCreateProductDesignNumber(code) {
     if (!code || code.trim() === '') return null;
     const cleanCode = code.trim();
@@ -106,11 +146,18 @@ exports.listProducts = async (req, res) => {
 
         if (prodError) throw prodError;
 
-        const formatted = (products || []).map(p => ({
-            ...p,
-            design_number: p.design_number_ref?.code || null,
-            design_number_ref: undefined
-        }));
+        const formatted = (products || []).map(p => {
+            const meta = parseMaterialsMetadata(p.materials);
+            return {
+                ...p,
+                design_number: p.design_number_ref?.code || null,
+                design_number_ref: undefined,
+                main_fabric_id: meta.main_fabric_id,
+                attachment_fabric1_id: meta.attachment_fabric1_id,
+                attachment_fabric2_id: meta.attachment_fabric2_id,
+                materials: meta.cleanMaterials
+            };
+        });
 
         res.json(formatted || []);
     } catch (err) {
@@ -123,7 +170,7 @@ exports.createProduct = async (req, res) => {
         let { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
-            main_fabric_id, button_id, thread_id
+            main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id
         } = req.body;
         
         if (!design_number || design_number.trim() === '') {
@@ -133,6 +180,13 @@ exports.createProduct = async (req, res) => {
         }
 
         const designNumberId = await findOrCreateProductDesignNumber(design_number);
+
+        const serializedMaterials = serializeMaterialsMetadata(
+            materials,
+            main_fabric_id,
+            attachment_fabric1_id,
+            attachment_fabric2_id
+        );
         
         const { data, error } = await supabase
             .from('products')
@@ -141,7 +195,7 @@ exports.createProduct = async (req, res) => {
                 art_number, 
                 gender, 
                 measurements, 
-                materials, 
+                materials: serializedMaterials, 
                 entry_methods, 
                 size_chart_id, 
                 category, 
@@ -153,7 +207,6 @@ exports.createProduct = async (req, res) => {
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
                 button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
                 thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
-                main_fabric_id: main_fabric_id || null,
                 button_id: button_id || null,
                 thread_id: thread_id || null,
                 base_size: base_size || null,
@@ -190,10 +243,17 @@ exports.updateProduct = async (req, res) => {
         const { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
-            main_fabric_id, button_id, thread_id
+            main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id
         } = req.body;
         
         const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
+
+        const serializedMaterials = serializeMaterialsMetadata(
+            materials,
+            main_fabric_id,
+            attachment_fabric1_id,
+            attachment_fabric2_id
+        );
 
         // Fetch current base product values to detect button/thread changes
         const { data: currentProduct } = await supabase
@@ -258,7 +318,7 @@ exports.updateProduct = async (req, res) => {
                     art_number, 
                     gender, 
                     measurements, 
-                    materials, 
+                    materials: serializedMaterials, 
                     entry_methods, 
                     size_chart_id,
                     category,
@@ -273,7 +333,6 @@ exports.updateProduct = async (req, res) => {
                     thread_count: currentProduct?.thread_count !== undefined ? currentProduct.thread_count : 0,
                     button_id: normCurButtonId,
                     thread_id: normCurThreadId,
-                    main_fabric_id: main_fabric_id || null,
                     base_size: base_size || null,
                     fit: fit || null,
                     images: images || [],
@@ -305,7 +364,7 @@ exports.updateProduct = async (req, res) => {
                 art_number, 
                 gender, 
                 measurements, 
-                materials, 
+                materials: serializedMaterials, 
                 entry_methods, 
                 size_chart_id,
                 category,
@@ -317,7 +376,6 @@ exports.updateProduct = async (req, res) => {
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
                 button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
                 thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
-                main_fabric_id: main_fabric_id || null,
                 button_id: button_id || null,
                 thread_id: thread_id || null,
                 base_size: base_size || null,

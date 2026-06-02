@@ -36,6 +36,8 @@ async function generateNextDesignNumberLocal() {
     }
 }
 
+const variantLocks = new Map();
+
 // Local helper to resolve or auto-create variant design numbers
 async function resolveOrCreateQuotationItemDesignNumber(item) {
     const productId = item.product_id || (item.size_breakdown && item.size_breakdown.product_id);
@@ -61,26 +63,49 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
     const normButtonId = buttonId === '' ? null : buttonId;
     const normThreadId = threadId === '' ? null : threadId;
 
-    // 1. Check if it matches the base product's button and thread specs
-    if (product.button_id === normButtonId && product.thread_id === normThreadId) {
+    // 1. Check if it matches the base product's button and thread specs (or if they are standard/null)
+    const isBaseButton = normButtonId === null || normButtonId === product.button_id;
+    const isBaseThread = normThreadId === null || normThreadId === product.thread_id;
+    if (isBaseButton && isBaseThread) {
         return product.design_numbers?.code || null;
     }
 
-    // 2. Check if a variant already exists
-    const { data: existingVariant } = await supabase
-        .from('product_design_variants')
-        .select('*, design_numbers(code)')
-        .eq('product_id', productId)
-        .eq('button_id', normButtonId)
-        .eq('thread_id', normThreadId)
-        .maybeSingle();
-
-    if (existingVariant) {
-        return existingVariant.design_numbers?.code || null;
+    // Use concurrency lock to serialize calls for the exact same variant configuration
+    const lockKey = `${productId}_${normButtonId || 'null'}_${normThreadId || 'null'}`;
+    while (variantLocks.has(lockKey)) {
+        await variantLocks.get(lockKey);
     }
 
-    // 3. Create a new variant
+    let resolveFn;
+    const lockPromise = new Promise(resolve => { resolveFn = resolve; });
+    variantLocks.set(lockKey, lockPromise);
+
     try {
+        // 2. Check if a variant already exists (use select() instead of maybeSingle to avoid 406 error on duplicate records)
+        let query = supabase
+            .from('product_design_variants')
+            .select('*, design_numbers(code)')
+            .eq('product_id', productId);
+
+        if (normButtonId === null) {
+            query = query.is('button_id', null);
+        } else {
+            query = query.eq('button_id', normButtonId);
+        }
+
+        if (normThreadId === null) {
+            query = query.is('thread_id', null);
+        } else {
+            query = query.eq('thread_id', normThreadId);
+        }
+
+        const { data: existingVariants } = await query;
+
+        if (existingVariants && existingVariants.length > 0) {
+            return existingVariants[0].design_numbers?.code || null;
+        }
+
+        // 3. Create a new variant
         const nextCode = await generateNextDesignNumberLocal();
         const { data: newDn, error: dnError } = await supabase
             .from('design_numbers')
@@ -111,6 +136,9 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
     } catch (err) {
         console.error('Error auto-creating variant design number:', err.message);
         return product.design_numbers?.code || null;
+    } finally {
+        variantLocks.delete(lockKey);
+        resolveFn();
     }
 }
 
@@ -358,6 +386,70 @@ async function enrichQuotationItemsWithDesignNumbers(items) {
     return items;
 }
 
+// Helper to extract design codes (including nested ones for set type) and resolve/create group design number
+async function resolveGroupDesignNumberForQuotation(items, metrics_summary, existingGroupDesignNumberId = null) {
+    const designCodes = [];
+    for (const item of items) {
+        const rootCode = item.design_number || (item.size_breakdown && item.size_breakdown.design_number);
+        if (rootCode && (rootCode.startsWith('DNS-') || rootCode.startsWith('DN-'))) {
+            designCodes.push(rootCode);
+        }
+        // Extract design codes from nested products in Set Types
+        if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
+            for (const p of item.size_breakdown.products) {
+                const childCode = p.product_design_number || p.design_number;
+                if (childCode && (childCode.startsWith('DNS-') || childCode.startsWith('DN-'))) {
+                    designCodes.push(childCode);
+                }
+            }
+        }
+    }
+    const uniqueDesignCodes = [...new Set(designCodes)];
+
+    if (uniqueDesignCodes.length === 0) {
+        // If there is an existing Group Design Number, preserve it!
+        if (existingGroupDesignNumberId) {
+            return existingGroupDesignNumberId;
+        }
+
+        // Otherwise, generate a new continuous DNG-XXXX group design number
+        try {
+            const { data: allDNsList } = await supabase
+                .from('group_design_numbers')
+                .select('code')
+                .ilike('code', 'DNG-%');
+            let maxNum = 0;
+            if (allDNsList && allDNsList.length > 0) {
+                allDNsList.forEach(dnRecord => {
+                    const dn = dnRecord.code;
+                    if (dn && dn.startsWith('DNG-')) {
+                        const numPart = dn.substring(4);
+                        const num = parseInt(numPart, 10);
+                        if (!isNaN(num) && num > maxNum) {
+                            maxNum = num;
+                        }
+                    }
+                });
+            }
+            const nextNum = maxNum + 1;
+            const nextCode = `DNG-${String(nextNum).padStart(4, '0')}`;
+            const { data: newGDN } = await supabase
+                .from('group_design_numbers')
+                .insert([{ code: nextCode }])
+                .select()
+                .single();
+            if (newGDN) {
+                return newGDN.id;
+            }
+        } catch (err) {
+            console.error('Error generating fallback group design number:', err.message);
+        }
+        return null;
+    }
+
+    return await findOrCreateGroupDesignNumber(uniqueDesignCodes);
+}
+
 // 3. Create a new quotation and its items
 exports.createQuotation = async (req, res) => {
     try {
@@ -385,28 +477,28 @@ exports.createQuotation = async (req, res) => {
             return res.status(400).json({ error: 'At least one product item is required' });
         }
 
-        // Resolve or auto-create variant design numbers for each configured item
+        // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
         for (const item of items) {
-            const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
-            if (resolvedDn) {
-                item.design_number = resolvedDn;
-                if (!item.size_breakdown) item.size_breakdown = {};
-                item.size_breakdown.design_number = resolvedDn;
+            if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
+                for (const p of item.size_breakdown.products) {
+                    const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(p);
+                    if (resolvedDn) {
+                        p.design_number = resolvedDn;
+                        p.product_design_number = resolvedDn;
+                    }
+                }
+            } else {
+                const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
+                if (resolvedDn) {
+                    item.design_number = resolvedDn;
+                    if (!item.size_breakdown) item.size_breakdown = {};
+                    item.size_breakdown.design_number = resolvedDn;
+                }
             }
         }
 
-        // Collect the resolved design codes directly from each item (already resolved above)
-        // Do NOT call resolveDesignCodes() - it would overwrite variant codes with base product codes
-        const designCodes = [...new Set(
-            items
-                .map(item => item.design_number || (item.size_breakdown && item.size_breakdown.design_number))
-                .filter(code => code && (code.startsWith('DNS-') || code.startsWith('DN-')))
-        )];
-
-        // Find or create group design number
-        const groupDesignNumberId = designCodes.length > 0
-            ? await findOrCreateGroupDesignNumber(designCodes)
-            : null;
+        // Find or create group design number (with smart nested resolve and auto-fallback generation)
+        const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(items, metrics_summary);
 
         // Generate a unique quotation number if not provided
         const finalQuotationNo = quotation_no && quotation_no.trim() 
@@ -713,26 +805,39 @@ exports.updateQuotation = async (req, res) => {
             return res.status(400).json({ error: 'At least one product item is required' });
         }
 
-        // Resolve or auto-create variant design numbers for each configured item
+        // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
         for (const item of items) {
-            const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
-            if (resolvedDn) {
-                item.design_number = resolvedDn;
-                if (!item.size_breakdown) item.size_breakdown = {};
-                item.size_breakdown.design_number = resolvedDn;
+            if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
+                for (const p of item.size_breakdown.products) {
+                    const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(p);
+                    if (resolvedDn) {
+                        p.design_number = resolvedDn;
+                        p.product_design_number = resolvedDn;
+                    }
+                }
+            } else {
+                const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
+                if (resolvedDn) {
+                    item.design_number = resolvedDn;
+                    if (!item.size_breakdown) item.size_breakdown = {};
+                    item.size_breakdown.design_number = resolvedDn;
+                }
             }
         }
 
-        // Collect the resolved design codes directly from each item (already resolved above)
-        // Do NOT call resolveDesignCodes() - it would overwrite variant codes with base product codes
-        const designCodes = [...new Set(
-            items
-                .map(item => item.design_number || (item.size_breakdown && item.size_breakdown.design_number))
-                .filter(code => code && (code.startsWith('DNS-') || code.startsWith('DN-')))
-        )];
+        // Retrieve existing quotation to preserve its group_design_number_id if needed
+        const { data: existingQuote } = await supabase
+            .from('quotations')
+            .select('group_design_number_id')
+            .eq('id', id)
+            .maybeSingle();
 
-        // Find or create group design number
-        const groupDesignNumberId = await findOrCreateGroupDesignNumber(designCodes);
+        // Find or create group design number (with smart nested resolve and auto-fallback generation)
+        const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(
+            items, 
+            metrics_summary, 
+            existingQuote?.group_design_number_id
+        );
 
         // Update the quotation header
         const { data: quote, error: quoteError } = await supabase
@@ -902,7 +1007,7 @@ exports.getSharePDF = async (req, res) => {
 
             // Compute pricing
             const subtotal = (items || []).reduce((acc, item) => acc + Number(item.total_price), 0) || 0;
-            const gstRate = 18;
+            const gstRate = Number(quote.metrics_summary?.gst_percent ?? 18);
             const gstValue = subtotal * (gstRate / 100);
             const finalValue = subtotal + gstValue;
 
@@ -911,23 +1016,130 @@ exports.getSharePDF = async (req, res) => {
                 ? new Date(quote.expected_delivery_date).toLocaleDateString('en-IN', { month: 'long', day: 'numeric', year: 'numeric' })
                 : 'N/A';
 
+            // Construct target departments breakdown HTML if departments are saved
+            let departmentsHtml = '';
+            if (quote.metrics_summary?.departments && quote.metrics_summary.departments.length > 0) {
+                const depts = quote.metrics_summary.departments;
+                const totalPersons = depts.reduce((sum, d) => sum + (Number(d.persons) || 0), 0);
+                const totalSetsQty = depts.reduce((sum, d) => sum + ((Number(d.persons) || 0) * (Number(d.sets) || 0)), 0);
+                
+                let deptRows = '';
+                depts.forEach(dept => {
+                    const dName = dept.name || 'Department';
+                    const dDivision = dept.division || '—';
+                    const dPersons = Number(dept.persons) || 0;
+                    const dSets = Number(dept.sets) || 0;
+                    const dTotal = dPersons * dSets;
+                    
+                    deptRows += `
+                      <tr class="hover:bg-gray-50/50 transition-colors">
+                        <td class="py-3 px-4 font-black text-gray-800">${dName}</td>
+                        <td class="py-3 px-4 text-gray-400">${dDivision}</td>
+                        <td class="py-3 px-4 text-right">${dPersons}</td>
+                        <td class="py-3 px-4 text-right">${dSets}</td>
+                        <td class="py-3 px-4 text-right font-black text-[#2d8d9b]">${dTotal}</td>
+                      </tr>
+                    `;
+                });
+
+                departmentsHtml = `
+            <div class="py-8 border-b border-gray-100">
+              <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-4">Target Departments Sizing Breakdown</p>
+              <div class="border border-gray-150 rounded-2xl overflow-hidden shadow-sm max-w-2xl bg-white">
+                <table class="w-full text-left border-collapse">
+                  <thead>
+                    <tr class="bg-gray-50 border-b border-gray-150 text-[9px] font-black uppercase tracking-widest text-gray-500">
+                      <th class="py-3 px-4">Department Name</th>
+                      <th class="py-3 px-4">Division</th>
+                      <th class="py-3 px-4 text-right">No. of Persons</th>
+                      <th class="py-3 px-4 text-right">Sets per Person</th>
+                      <th class="py-3 px-4 text-right font-mono">Total Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-100 font-semibold text-xs text-gray-650">
+                    ${deptRows}
+                    <!-- Total Row -->
+                    <tr class="bg-gray-50/30 border-t border-gray-150 text-[10px] font-black uppercase text-gray-800">
+                      <td class="py-3 px-4" colspan="2">Total</td>
+                      <td class="py-3 px-4 text-right">${totalPersons}</td>
+                      <td class="py-3 px-4"></td>
+                      <td class="py-3 px-4 text-right text-[#2d8d9b]">${totalSetsQty}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+                `;
+            }
+
             // Construct items HTML
             let itemsHtml = '';
             if (items && items.length > 0) {
                 items.forEach((item) => {
                     const pTypeName = item.product_types?.name || item.product_type_name || 'Uniform Item';
-                    const fabricId = item.size_breakdown?.fabric_id;
-                    const fabricBrand = fabricsList.find((f) => String(f.id) === String(fabricId))?.brand_name || 'Custom Fabric';
+                    const deptId = item.size_breakdown?.department_id;
+                    const deptName = item.size_breakdown?.department_name;
+                    const qty = Number(item.quantity) || 0;
+                    
+                    let firstCellHtml = '';
+                    let fabricStyleCellHtml = '';
+                    
+                    if (deptName) {
+                        const deptMeta = quote.metrics_summary?.departments?.find((d) => String(d.id) === String(deptId));
+                        let deptHeader = '';
+                        if (deptMeta) {
+                            deptHeader = `${deptName} _ ${deptMeta.persons}*${deptMeta.sets}`;
+                        } else {
+                            const assumedSets = 2;
+                            const assumedPersons = Math.ceil(qty / assumedSets);
+                            deptHeader = `${deptName} _ ${assumedPersons}*${assumedSets}`;
+                        }
+                        
+                        const designNotes = item.size_breakdown?.design_number || '';
+                        const productLine = designNotes ? `* ${pTypeName} - ${designNotes}` : `* ${pTypeName}`;
+                        
+                        const fabricId = item.size_breakdown?.fabric_id;
+                        const fabric = fabricsList.find((f) => String(f.id) === String(fabricId));
+                        const fabricBrand = fabric ? (fabric.brand_name || fabric.name || 'Custom Fabric') : 'Custom Fabric';
+                        const mainFabricLine = fabricId ? `FAB(M) - ${fabricBrand}` : '';
+                        
+                        const att1Id = item.size_breakdown?.attachment_fabric1_id;
+                        const att1Fabric = fabricsList.find((f) => String(f.id) === String(att1Id));
+                        const att1Brand = att1Fabric ? (att1Fabric.brand_name || att1Fabric.name) : '';
+                        const att1Line = att1Id ? `FAB(A) - ${att1Brand}` : '';
+                        
+                        const att2Id = item.size_breakdown?.attachment_fabric2_id;
+                        const att2Fabric = fabricsList.find((f) => String(f.id) === String(att2Id));
+                        const att2Brand = att2Fabric ? (att2Fabric.brand_name || att2Fabric.name) : '';
+                        const att2Line = att2Id ? `FAB(A) - ${att2Brand}` : '';
+                        
+                        firstCellHtml = `
+            <div class="space-y-0.5 py-1 text-left">
+              <div class="font-black text-gray-800 uppercase text-[11px]">${deptHeader}</div>
+              <div class="font-semibold text-gray-600 text-xs">${productLine}</div>
+              ${mainFabricLine ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${mainFabricLine}</div>` : ''}
+              ${att1Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att1Line}</div>` : ''}
+              ${att2Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att2Line}</div>` : ''}
+            </div>
+                        `;
+                        fabricStyleCellHtml = '—';
+                    } else {
+                        const fabricId = item.size_breakdown?.fabric_id;
+                        const fabric = fabricsList.find((f) => String(f.id) === String(fabricId));
+                        const fabricBrand = fabric ? (fabric.brand_name || fabric.name || 'Custom Fabric') : 'Custom Fabric';
+                        firstCellHtml = `<span class="font-bold text-gray-800 text-xs">${pTypeName}</span>`;
+                        fabricStyleCellHtml = fabricBrand;
+                    }
+
                     const designNum = item.size_breakdown?.product_design_number || item.size_breakdown?.design_number || '—';
                     const sam = item.size_breakdown?.sam_value ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}` : '—';
-                    const qty = item.quantity || 0;
                     const price = Number(item.unit_price) || 0;
                     const total = Number(item.total_price) || 0;
 
                     itemsHtml += `
               <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                <td class="py-3.5 px-4 font-bold text-gray-800 text-xs">${pTypeName}</td>
-                <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricBrand}</td>
+                <td class="py-3.5 px-4">${firstCellHtml}</td>
+                <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
                 <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
                 <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
                 <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${qty}</td>
@@ -995,6 +1207,9 @@ exports.getSharePDF = async (req, res) => {
               </div>
             ` : ''}
 
+            <!-- DEPARTMENTS BREAKDOWN SECTION -->
+            ${departmentsHtml}
+
             <!-- SPECIFICATIONS TABLE -->
             <div class="py-8 page-break">
               <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-4">Quotation Product Specifications</p>
@@ -1022,7 +1237,7 @@ exports.getSharePDF = async (req, res) => {
             <div class="flex justify-end py-6 border-t border-gray-100">
               <div class="w-80 space-y-3.5 text-xs font-bold text-gray-500">
                 <div class="flex justify-between">
-                  <span>Subtotal (Pre-Tax):</span>
+                  <span>Subtotal (Pre-Tax):</span>e-Tax):</span>
                   <span class="font-mono text-gray-800 font-black">₹ ${subtotal.toFixed(2)}</span>
                 </div>
                 <div class="flex justify-between border-b border-gray-100 pb-2">

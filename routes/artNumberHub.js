@@ -16,6 +16,7 @@ router.put('/genders/:id', authMiddleware, checkPermission(['manage_products']),
 router.delete('/genders/:id', authMiddleware, checkPermission(['manage_products']), controller.deleteGender);
 
 // --- PATTERN CODES ---
+router.get('/patterns/next', controller.getNextPatternCode);
 router.get('/patterns', controller.listPatterns);
 router.post('/patterns', authMiddleware, checkPermission(['manage_products']), controller.createPattern);
 router.put('/patterns/:id', authMiddleware, checkPermission(['manage_products']), controller.updatePattern);

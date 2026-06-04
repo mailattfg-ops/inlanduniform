@@ -228,6 +228,41 @@ exports.createProduct = async (req, res) => {
         const { logAction } = require('../utils/logger');
         await logAction(req.user.id, 'CREATE', 'product', data.id, { name: data.name });
 
+        // Auto-register the pattern code in art_patterns if it doesn't exist
+        if (art_number) {
+            try {
+                const artParts = art_number.split('-');
+                if (artParts.length === 2) {
+                    const { data: allDresses } = await supabase.from('art_dresses').select('code');
+                    const rest = artParts[1];
+                    let patternCode = rest;
+                    if (allDresses) {
+                        for (const d of allDresses) {
+                            if (rest.startsWith(d.code)) {
+                                patternCode = rest.slice(d.code.length);
+                                break;
+                            }
+                        }
+                    }
+                    if (patternCode) {
+                        const { data: existingPattern } = await supabase
+                            .from('art_patterns')
+                            .select('id')
+                            .eq('code', patternCode)
+                            .maybeSingle();
+                        if (!existingPattern) {
+                            await supabase.from('art_patterns').insert([{
+                                code: patternCode,
+                                name: `Pattern ${patternCode}`
+                            }]);
+                        }
+                    }
+                }
+            } catch (patternErr) {
+                console.error('Pattern auto-register error (non-critical):', patternErr.message);
+            }
+        }
+
         // Register in Art Number Hub
         await registerArtNumberInHub(data.art_number, data.base_size, data.fit);
 

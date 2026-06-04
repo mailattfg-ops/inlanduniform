@@ -171,6 +171,28 @@ exports.deleteGender = async (req, res) => {
 // ==========================================
 // 3. PATTERN CODES CRUD
 // ==========================================
+exports.getNextPatternCode = async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('art_patterns')
+            .select('code')
+            .order('code', { ascending: true });
+
+        if (error) throw error;
+
+        let maxNum = 0;
+        (data || []).forEach(p => {
+            const num = parseInt(p.code, 10);
+            if (!isNaN(num) && num > maxNum) maxNum = num;
+        });
+
+        const nextCode = String(maxNum + 1).padStart(3, '0');
+        res.json({ nextCode });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
 exports.listPatterns = async (req, res) => {
     try {
         const { data, error } = await supabase

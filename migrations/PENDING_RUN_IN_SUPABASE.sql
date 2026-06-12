@@ -170,3 +170,8 @@ ALTER TABLE public.fabrics ADD COLUMN IF NOT EXISTS garment_category VARCHAR(50)
 -- Reload Supabase PostgREST schema cache
 NOTIFY pgrst, 'reload schema';
 
+-- 14. Add remarks JSONB column to products table
+ALTER TABLE public.products ADD COLUMN IF NOT EXISTS remarks JSONB DEFAULT NULL;
+
+-- Reload Supabase PostgREST schema cache
+NOTIFY pgrst, 'reload schema';

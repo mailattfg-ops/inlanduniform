@@ -171,7 +171,7 @@ exports.createProduct = async (req, res) => {
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
-            other_sizes, other_fits, measurement_type, class_fabric_consumption
+            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks
         } = req.body;
         
         if (!design_number || design_number.trim() === '') {
@@ -217,7 +217,8 @@ exports.createProduct = async (req, res) => {
                 other_sizes: other_sizes || null,
                 other_fits: other_fits || null,
                 measurement_type: measurement_type || null,
-                class_fabric_consumption: class_fabric_consumption || {}
+                class_fabric_consumption: class_fabric_consumption || {},
+                remarks: remarks || null
             }])
             .select()
             .single();
@@ -284,7 +285,7 @@ exports.updateProduct = async (req, res) => {
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
-            other_sizes, other_fits, measurement_type, class_fabric_consumption
+            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks
         } = req.body;
         
         const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
@@ -382,6 +383,7 @@ exports.updateProduct = async (req, res) => {
                     other_fits: other_fits || null,
                     measurement_type: measurement_type || null,
                     class_fabric_consumption: class_fabric_consumption || {},
+                    remarks: remarks || null,
                     updated_at: new Date() 
                 })
                 .eq('id', id)
@@ -431,6 +433,7 @@ exports.updateProduct = async (req, res) => {
                 other_fits: other_fits || null,
                 measurement_type: measurement_type || null,
                 class_fabric_consumption: class_fabric_consumption || {},
+                remarks: remarks || null,
                 updated_at: new Date() 
             })
             .eq('id', id)

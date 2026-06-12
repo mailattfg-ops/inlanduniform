@@ -40,14 +40,15 @@ exports.getDepartments = async (req, res) => {
 };
 
 exports.createDepartment = async (req, res) => {
-  const { orgId, name, division } = req.body;
+  const { orgId, name, division, grade } = req.body;
   try {
     const { data, error } = await supabase
       .from('departments')
       .insert([{ 
         organization_id: orgId, 
         name,
-        section: division
+        section: division,
+        grade: grade || null
       }])
       .select()
       .single();
@@ -64,14 +65,15 @@ exports.createDepartment = async (req, res) => {
 
 exports.updateDepartment = async (req, res) => {
     const { id } = req.params;
-    const { orgId, name, division } = req.body;
+    const { orgId, name, division, grade } = req.body;
     try {
       const { data, error } = await supabase
         .from('departments')
         .update({ 
           organization_id: orgId, 
           name,
-          section: division
+          section: division,
+          grade: grade || null
         })
         .eq('id', id)
         .select()

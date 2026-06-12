@@ -42,7 +42,10 @@ const variantLocks = new Map();
 async function resolveOrCreateQuotationItemDesignNumber(item) {
     const productId = item.product_id || (item.size_breakdown && item.size_breakdown.product_id);
     if (!productId) {
-        return item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null;
+        return {
+            designNumber: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
+            alreadyExists: false
+        };
     }
 
     const { data: product } = await supabase
@@ -52,7 +55,10 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
         .maybeSingle();
 
     if (!product) {
-        return item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null;
+        return {
+            designNumber: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
+            alreadyExists: false
+        };
     }
 
     const buttonId = item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null;
@@ -63,15 +69,33 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
     const normButtonId = buttonId === '' ? null : buttonId;
     const normThreadId = threadId === '' ? null : threadId;
 
-    // 1. Check if it matches the base product's button and thread specs (or if they are standard/null)
-    const isBaseButton = normButtonId === null || normButtonId === product.button_id;
-    const isBaseThread = normThreadId === null || normThreadId === product.thread_id;
-    if (isBaseButton && isBaseThread) {
-        return product.design_numbers?.code || null;
-    }
+    // 1. Build a deterministic variant signature of all customization factors
+    const variantObj = {
+        collar_type: item.collar_type || (item.size_breakdown && item.size_breakdown.collar_type) || null,
+        button_id: normButtonId,
+        thread_id: normThreadId,
+        button_count: parseInt(buttonCount, 10) || 0,
+        thread_count: parseInt(threadCount, 10) || 0,
+        // Fabric selling / selection
+        fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+        fabric_color: item.fabric_color || (item.size_breakdown && item.size_breakdown.fabric_color) || null,
+        fabric_selling: item.fabric_selling || (item.size_breakdown && item.size_breakdown.fabric_selling) || null,
+        // Customization details
+        attachments: item.attachments || (item.size_breakdown && item.size_breakdown.attachments) || null,
+        customization: item.customization || (item.size_breakdown && item.size_breakdown.customization) || null,
+        notes: item.notes || (item.size_breakdown && item.size_breakdown.notes) || null,
+    };
 
-    // Use concurrency lock to serialize calls for the exact same variant configuration
-    const lockKey = `${productId}_${normButtonId || 'null'}_${normThreadId || 'null'}`;
+    // Sort keys and stringify to get a stable JSON signature
+    const sortedKeys = Object.keys(variantObj).sort();
+    const sortedObj = {};
+    for (const key of sortedKeys) {
+        sortedObj[key] = variantObj[key];
+    }
+    const signature = JSON.stringify(sortedObj);
+
+    // Use concurrency lock to serialize calls for the exact same variant configuration signature
+    const lockKey = `${productId}_${signature}`;
     while (variantLocks.has(lockKey)) {
         await variantLocks.get(lockKey);
     }
@@ -81,31 +105,34 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
     variantLocks.set(lockKey, lockPromise);
 
     try {
-        // 2. Check if a variant already exists (use select() instead of maybeSingle to avoid 406 error on duplicate records)
-        let query = supabase
+        // 2. Check if a variant already exists with this signature
+        const { data: existingVariants } = await supabase
             .from('product_design_variants')
             .select('*, design_numbers(code)')
-            .eq('product_id', productId);
-
-        if (normButtonId === null) {
-            query = query.is('button_id', null);
-        } else {
-            query = query.eq('button_id', normButtonId);
-        }
-
-        if (normThreadId === null) {
-            query = query.is('thread_id', null);
-        } else {
-            query = query.eq('thread_id', normThreadId);
-        }
-
-        const { data: existingVariants } = await query;
+            .eq('product_id', productId)
+            .eq('material_combination', signature);
 
         if (existingVariants && existingVariants.length > 0) {
-            return existingVariants[0].design_numbers?.code || null;
+            return {
+                designNumber: existingVariants[0].design_numbers?.code || null,
+                alreadyExists: true
+            };
         }
 
-        // 3. Create a new variant
+        // 3. Check if standard base configuration matches
+        const isBaseButton = normButtonId === null || normButtonId === product.button_id;
+        const isBaseThread = normThreadId === null || normThreadId === product.thread_id;
+        // Let's also check if they did not customize anything else (all others null/defaults)
+        const hasOtherCustomization = variantObj.collar_type || variantObj.fabric_id || variantObj.fabric_color || variantObj.fabric_selling || variantObj.attachments || variantObj.customization || variantObj.notes;
+        if (isBaseButton && isBaseThread && !hasOtherCustomization) {
+            // It matches base product's design code
+            return {
+                designNumber: product.design_numbers?.code || null,
+                alreadyExists: true
+            };
+        }
+
+        // 4. Create a new design number variant
         const nextCode = await generateNextDesignNumberLocal();
         const { data: newDn, error: dnError } = await supabase
             .from('design_numbers')
@@ -124,7 +151,8 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
                 thread_id: normThreadId,
                 button_count: parseInt(buttonCount, 10) || 0,
                 thread_count: parseInt(threadCount, 10) || 0,
-                variant_status: 'active'
+                variant_status: 'active',
+                material_combination: signature
             }]);
 
         if (varError) {
@@ -132,15 +160,86 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
             throw varError;
         }
 
-        return nextCode;
+        return {
+            designNumber: nextCode,
+            alreadyExists: false
+        };
     } catch (err) {
         console.error('Error auto-creating variant design number:', err.message);
-        return product.design_numbers?.code || null;
+        return {
+            designNumber: product.design_numbers?.code || null,
+            alreadyExists: false
+        };
     } finally {
         variantLocks.delete(lockKey);
         resolveFn();
     }
 }
+
+// Helper to update fabrics latest_sam when a quotation is created or updated
+async function updateFabricLatestSAMs(items) {
+    if (!items || !Array.isArray(items)) return;
+    try {
+        const fabricSamMap = new Map();
+        
+        for (const item of items) {
+            // Main fabric
+            const mainFabId = item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id);
+            const mainFabSam = item.main_fabric_sam !== undefined ? item.main_fabric_sam : (item.size_breakdown && item.size_breakdown.main_fabric_sam);
+            if (mainFabId && mainFabSam !== undefined && mainFabSam !== null && mainFabSam !== '') {
+                fabricSamMap.set(mainFabId, parseFloat(mainFabSam));
+            }
+            
+            // Attachment 1
+            const att1FabId = item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id);
+            const att1FabSam = item.attachment_fabric1_sam !== undefined ? item.attachment_fabric1_sam : (item.size_breakdown && item.size_breakdown.attachment_fabric1_sam);
+            if (att1FabId && att1FabSam !== undefined && att1FabSam !== null && att1FabSam !== '') {
+                fabricSamMap.set(att1FabId, parseFloat(att1FabSam));
+            }
+            
+            // Attachment 2
+            const att2FabId = item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id);
+            const att2FabSam = item.attachment_fabric2_sam !== undefined ? item.attachment_fabric2_sam : (item.size_breakdown && item.size_breakdown.attachment_fabric2_sam);
+            if (att2FabId && att2FabSam !== undefined && att2FabSam !== null && att2FabSam !== '') {
+                fabricSamMap.set(att2FabId, parseFloat(att2FabSam));
+            }
+
+            // Check if there are nested products in set type
+            if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
+                for (const p of item.size_breakdown.products) {
+                    const pFabId = p.fabric_id || (p.size_breakdown && p.size_breakdown.fabric_id);
+                    const pFabSam = p.main_fabric_sam !== undefined ? p.main_fabric_sam : (p.size_breakdown && p.size_breakdown.main_fabric_sam);
+                    if (pFabId && pFabSam !== undefined && pFabSam !== null && pFabSam !== '') {
+                        fabricSamMap.set(pFabId, parseFloat(pFabSam));
+                    }
+                    
+                    const pAtt1FabId = p.attachment_fabric1_id || (p.size_breakdown && p.size_breakdown.attachment_fabric1_id);
+                    const pAtt1FabSam = p.attachment_fabric1_sam !== undefined ? p.attachment_fabric1_sam : (p.size_breakdown && p.size_breakdown.attachment_fabric1_sam);
+                    if (pAtt1FabId && pAtt1FabSam !== undefined && pAtt1FabSam !== null && pAtt1FabSam !== '') {
+                        fabricSamMap.set(pAtt1FabId, parseFloat(pAtt1FabSam));
+                    }
+                    
+                    const pAtt2FabId = p.attachment_fabric2_id || (p.size_breakdown && p.size_breakdown.attachment_fabric2_id);
+                    const pAtt2FabSam = p.attachment_fabric2_sam !== undefined ? p.attachment_fabric2_sam : (p.size_breakdown && p.size_breakdown.attachment_fabric2_sam);
+                    if (pAtt2FabId && pAtt2FabSam !== undefined && pAtt2FabSam !== null && pAtt2FabSam !== '') {
+                        fabricSamMap.set(pAtt2FabId, parseFloat(pAtt2FabSam));
+                    }
+                }
+            }
+        }
+        
+        for (const [fabricId, latestSamValue] of fabricSamMap.entries()) {
+            if (!fabricId || isNaN(latestSamValue)) continue;
+            await supabase
+                .from('fabrics')
+                .update({ latest_sam: latestSamValue })
+                .eq('id', fabricId);
+        }
+    } catch (err) {
+        console.error('Failed to auto-update fabrics latest_sam values from quotation:', err.message);
+    }
+}
+
 
 // Helper to find or create a Group Design Number based on associated design codes
 async function findOrCreateGroupDesignNumber(designCodes) {
@@ -478,21 +577,28 @@ exports.createQuotation = async (req, res) => {
         }
 
         // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
+        let anyDesignNumberAlreadyExists = false;
         for (const item of items) {
             if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
                 for (const p of item.size_breakdown.products) {
-                    const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(p);
-                    if (resolvedDn) {
-                        p.design_number = resolvedDn;
-                        p.product_design_number = resolvedDn;
+                    const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
+                    if (resObj && resObj.designNumber) {
+                        p.design_number = resObj.designNumber;
+                        p.product_design_number = resObj.designNumber;
+                        if (resObj.alreadyExists) {
+                            anyDesignNumberAlreadyExists = true;
+                        }
                     }
                 }
             } else {
-                const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
-                if (resolvedDn) {
-                    item.design_number = resolvedDn;
+                const resObj = await resolveOrCreateQuotationItemDesignNumber(item);
+                if (resObj && resObj.designNumber) {
+                    item.design_number = resObj.designNumber;
                     if (!item.size_breakdown) item.size_breakdown = {};
-                    item.size_breakdown.design_number = resolvedDn;
+                    item.size_breakdown.design_number = resObj.designNumber;
+                    if (resObj.alreadyExists) {
+                        anyDesignNumberAlreadyExists = true;
+                    }
                 }
             }
         }
@@ -562,6 +668,9 @@ exports.createQuotation = async (req, res) => {
             throw itemsError;
         }
 
+        // Auto-update fabrics latest_sam values from quotation
+        await updateFabricLatestSAMs(items);
+
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');
@@ -573,7 +682,7 @@ exports.createQuotation = async (req, res) => {
             console.error('Logging failed:', logErr.message);
         }
 
-        res.json({ success: true, quotationId: quote.id });
+        res.json({ success: true, quotationId: quote.id, designNumberAlreadyExists: anyDesignNumberAlreadyExists });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -806,21 +915,28 @@ exports.updateQuotation = async (req, res) => {
         }
 
         // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
+        let anyDesignNumberAlreadyExists = false;
         for (const item of items) {
             if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
                 for (const p of item.size_breakdown.products) {
-                    const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(p);
-                    if (resolvedDn) {
-                        p.design_number = resolvedDn;
-                        p.product_design_number = resolvedDn;
+                    const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
+                    if (resObj && resObj.designNumber) {
+                        p.design_number = resObj.designNumber;
+                        p.product_design_number = resObj.designNumber;
+                        if (resObj.alreadyExists) {
+                            anyDesignNumberAlreadyExists = true;
+                        }
                     }
                 }
             } else {
-                const resolvedDn = await resolveOrCreateQuotationItemDesignNumber(item);
-                if (resolvedDn) {
-                    item.design_number = resolvedDn;
+                const resObj = await resolveOrCreateQuotationItemDesignNumber(item);
+                if (resObj && resObj.designNumber) {
+                    item.design_number = resObj.designNumber;
                     if (!item.size_breakdown) item.size_breakdown = {};
-                    item.size_breakdown.design_number = resolvedDn;
+                    item.size_breakdown.design_number = resObj.designNumber;
+                    if (resObj.alreadyExists) {
+                        anyDesignNumberAlreadyExists = true;
+                    }
                 }
             }
         }
@@ -901,6 +1017,9 @@ exports.updateQuotation = async (req, res) => {
             throw itemsError;
         }
 
+        // Auto-update fabrics latest_sam values from quotation
+        await updateFabricLatestSAMs(items);
+
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');
@@ -913,7 +1032,7 @@ exports.updateQuotation = async (req, res) => {
             console.error('Logging failed:', logErr.message);
         }
 
-        res.json({ success: true, quotationId: id });
+        res.json({ success: true, quotationId: id, designNumberAlreadyExists: anyDesignNumberAlreadyExists });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1073,81 +1192,140 @@ exports.getSharePDF = async (req, res) => {
             }
 
             // Construct items HTML
+            // Helpers for department and division cleanup
+            const getCleanDeptName = (name) => {
+                if (!name) return 'General Items';
+                return name.replace(/\s*\([^)]*\)\s*/g, '').trim();
+            };
+
+            const getCleanDivision = (name, fallbackDiv) => {
+                if (fallbackDiv) return fallbackDiv;
+                if (!name) return '';
+                const match = name.match(/\(([^)]+)\)/);
+                return match ? match[1].trim() : '';
+            };
+
             let itemsHtml = '';
             if (items && items.length > 0) {
-                items.forEach((item) => {
-                    const pTypeName = item.product_types?.name || item.product_type_name || 'Uniform Item';
-                    const deptId = item.size_breakdown?.department_id;
-                    const deptName = item.size_breakdown?.department_name;
-                    const qty = Number(item.quantity) || 0;
-                    
-                    let firstCellHtml = '';
-                    let fabricStyleCellHtml = '';
-                    
-                    if (deptName) {
-                        const deptMeta = quote.metrics_summary?.departments?.find((d) => String(d.id) === String(deptId));
-                        let deptHeader = '';
-                        if (deptMeta) {
-                            deptHeader = `${deptName} _ ${deptMeta.persons}*${deptMeta.sets}`;
-                        } else {
-                            const assumedSets = 2;
-                            const assumedPersons = Math.ceil(qty / assumedSets);
-                            deptHeader = `${deptName} _ ${assumedPersons}*${assumedSets}`;
+                const standardItems = items.filter((item) => !item.size_breakdown?.is_separate_fabric);
+                const hasDeptItems = standardItems.some((item) => item.size_breakdown?.department_name);
+
+                if (hasDeptItems) {
+                    const groups = {};
+                    standardItems.forEach((item) => {
+                        const deptName = item.size_breakdown?.department_name || 'General Items';
+                        const cleanDept = getCleanDeptName(deptName);
+                        if (!groups[cleanDept]) {
+                            groups[cleanDept] = [];
                         }
-                        
-                        const designNotes = item.size_breakdown?.design_number || '';
-                        const productLine = designNotes ? `* ${pTypeName} - ${designNotes}` : `* ${pTypeName}`;
-                        
-                        const fabricId = item.size_breakdown?.fabric_id;
-                        const fabric = fabricsList.find((f) => String(f.id) === String(fabricId));
-                        const fabricBrand = fabric ? (fabric.brand_name || fabric.name || 'Custom Fabric') : 'Custom Fabric';
-                        const mainFabricLine = fabricId ? `FAB(M) - ${fabricBrand}` : '';
-                        
-                        const att1Id = item.size_breakdown?.attachment_fabric1_id;
-                        const att1Fabric = fabricsList.find((f) => String(f.id) === String(att1Id));
-                        const att1Brand = att1Fabric ? (att1Fabric.brand_name || att1Fabric.name) : '';
-                        const att1Line = att1Id ? `FAB(A) - ${att1Brand}` : '';
-                        
-                        const att2Id = item.size_breakdown?.attachment_fabric2_id;
-                        const att2Fabric = fabricsList.find((f) => String(f.id) === String(att2Id));
-                        const att2Brand = att2Fabric ? (att2Fabric.brand_name || att2Fabric.name) : '';
-                        const att2Line = att2Id ? `FAB(A) - ${att2Brand}` : '';
-                        
-                        firstCellHtml = `
-            <div class="space-y-0.5 py-1 text-left">
-              <div class="font-black text-gray-800 uppercase text-[11px]">${deptHeader}</div>
-              <div class="font-semibold text-gray-600 text-xs">${productLine}</div>
-              ${mainFabricLine ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${mainFabricLine}</div>` : ''}
-              ${att1Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att1Line}</div>` : ''}
-              ${att2Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att2Line}</div>` : ''}
-            </div>
+                        groups[cleanDept].push(item);
+                    });
+
+                    Object.entries(groups).forEach(([cleanDeptName, groupItems]) => {
+                        itemsHtml += `
+                            <tr class="bg-gray-50/80 border-t border-b border-gray-150 text-[10px] font-black uppercase text-[#3a525d] tracking-wider">
+                              <td colspan="7" class="py-2.5 px-4 font-black">DEPARTMENT: ${cleanDeptName}</td>
+                            </tr>
                         `;
-                        fabricStyleCellHtml = '—';
-                    } else {
+
+                        groupItems.forEach((item) => {
+                            const pTypeName = item.product_types?.name || item.product_type_name || 'Uniform Item';
+                            const deptId = item.size_breakdown?.department_id;
+                            const qty = Number(item.quantity) || 0;
+                            
+                            let firstCellHtml = '';
+                            let fabricStyleCellHtml = '';
+                            
+                            const deptMeta = quote.metrics_summary?.departments?.find((d) => String(d.id) === String(deptId));
+                            let divisionName = '';
+                            if (deptMeta && deptMeta.division) {
+                                divisionName = deptMeta.division;
+                            } else if (String(deptId).includes('_')) {
+                                divisionName = String(deptId).split('_')[1];
+                            }
+                            if (!divisionName && item.size_breakdown?.department_name) {
+                                divisionName = getCleanDivision(item.size_breakdown.department_name);
+                            }
+
+                            const persons = deptMeta ? deptMeta.persons : Math.ceil(qty / 2);
+                            const sets = deptMeta ? deptMeta.sets : 2;
+                            const divisionLabel = divisionName ? `Division: ${divisionName}` : 'Main Division';
+                            const deptHeader = `${divisionLabel} (${persons} Persons × ${sets} Sets)`;
+                            
+                            const designNotes = item.size_breakdown?.design_number || '';
+                            const productLine = designNotes ? `* ${pTypeName} - ${designNotes}` : `* ${pTypeName}`;
+                            
+                            const fabricId = item.size_breakdown?.fabric_id;
+                            const fabric = fabricsList.find((f) => String(f.id) === String(fabricId));
+                            const fabricBrand = fabric ? (fabric.brand_name || fabric.name || 'Custom Fabric') : 'Custom Fabric';
+                            const mainFabricLine = fabricId ? `FAB(M) - ${fabricBrand}` : '';
+                            
+                            const att1Id = item.size_breakdown?.attachment_fabric1_id;
+                            const att1Fabric = fabricsList.find((f) => String(f.id) === String(att1Id));
+                            const att1Brand = att1Fabric ? (att1Fabric.brand_name || att1Fabric.name) : '';
+                            const att1Line = att1Id ? `FAB(A) - ${att1Brand}` : '';
+                            
+                            const att2Id = item.size_breakdown?.attachment_fabric2_id;
+                            const att2Fabric = fabricsList.find((f) => String(f.id) === String(att2Id));
+                            const att2Brand = att2Fabric ? (att2Fabric.brand_name || att2Fabric.name) : '';
+                            const att2Line = att2Id ? `FAB(A) - ${att2Brand}` : '';
+                            
+                            firstCellHtml = `
+                              <div class="space-y-0.5 py-1 text-left">
+                                <div class="font-bold text-gray-500 uppercase text-[9px] tracking-wider">${deptHeader}</div>
+                                <div class="font-bold text-gray-800 text-xs">${productLine}</div>
+                                ${mainFabricLine ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${mainFabricLine}</div>` : ''}
+                                ${att1Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att1Line}</div>` : ''}
+                                ${att2Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att2Line}</div>` : ''}
+                              </div>
+                            `;
+                            fabricStyleCellHtml = '—';
+
+                            const designNum = item.size_breakdown?.product_design_number || item.size_breakdown?.design_number || '—';
+                            const sam = item.size_breakdown?.sam_value ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}` : '—';
+                            const price = Number(item.unit_price) || 0;
+                            const total = Number(item.total_price) || 0;
+
+                            itemsHtml += `
+                              <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                                <td class="py-3.5 px-4">${firstCellHtml}</td>
+                                <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
+                                <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
+                                <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
+                                <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${qty}</td>
+                                <td class="py-3.5 px-4 text-gray-700 text-xs text-right font-mono">₹ ${price.toFixed(2)}</td>
+                                <td class="py-3.5 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono">₹ ${total.toFixed(2)}</td>
+                              </tr>
+                            `;
+                        });
+                    });
+                } else {
+                    standardItems.forEach((item) => {
+                        const pTypeName = item.product_types?.name || item.product_type_name || 'Uniform Item';
                         const fabricId = item.size_breakdown?.fabric_id;
                         const fabric = fabricsList.find((f) => String(f.id) === String(fabricId));
                         const fabricBrand = fabric ? (fabric.brand_name || fabric.name || 'Custom Fabric') : 'Custom Fabric';
-                        firstCellHtml = `<span class="font-bold text-gray-800 text-xs">${pTypeName}</span>`;
-                        fabricStyleCellHtml = fabricBrand;
-                    }
+                        const firstCellHtml = `<span class="font-bold text-gray-800 text-xs">${pTypeName}</span>`;
+                        const fabricStyleCellHtml = fabricBrand;
 
-                    const designNum = item.size_breakdown?.product_design_number || item.size_breakdown?.design_number || '—';
-                    const sam = item.size_breakdown?.sam_value ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}` : '—';
-                    const price = Number(item.unit_price) || 0;
-                    const total = Number(item.total_price) || 0;
+                        const designNum = item.size_breakdown?.product_design_number || item.size_breakdown?.design_number || '—';
+                        const sam = item.size_breakdown?.sam_value ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}` : '—';
+                        const price = Number(item.unit_price) || 0;
+                        const total = Number(item.total_price) || 0;
 
-                    itemsHtml += `
-              <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                <td class="py-3.5 px-4">${firstCellHtml}</td>
-                <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
-                <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
-                <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
-                <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${qty}</td>
-                <td class="py-3.5 px-4 text-gray-700 text-xs text-right font-mono">₹ ${price.toFixed(2)}</td>
-                <td class="py-3.5 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono">₹ ${total.toFixed(2)}</td>
-              </tr>
-            `;
-                });
+                        itemsHtml += `
+                          <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                            <td class="py-3.5 px-4">${firstCellHtml}</td>
+                            <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
+                            <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
+                            <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
+                            <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${item.quantity}</td>
+                            <td class="py-3.5 px-4 text-gray-700 text-xs text-right font-mono">₹ ${price.toFixed(2)}</td>
+                            <td class="py-3.5 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono">₹ ${total.toFixed(2)}</td>
+                          </tr>
+                        `;
+                    });
+                }
             }
 
             const compiledHtml = `

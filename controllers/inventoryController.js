@@ -60,7 +60,43 @@ const createInventoryHandler = (tableName) => {
     };
 };
 
-// Fabrics get a dedicated handler with extra fields (brand_name, quantity, shade, width)
+// Helper to generate the next fabric code (FAB-0001, FAB-0002, etc.)
+async function generateNextFabricCodeLocal() {
+    try {
+        const { data, error } = await supabase
+            .from('fabrics')
+            .select('code')
+            .not('code', 'is', null);
+
+        if (error) {
+            console.error('Error fetching fabrics codes:', error.message);
+            return 'FAB-0001';
+        }
+
+        let maxNum = 0;
+        if (data && data.length > 0) {
+            data.forEach(item => {
+                const c = item.code;
+                if (c && c.startsWith('FAB-')) {
+                    const numPart = c.substring(4);
+                    const num = parseInt(numPart, 10);
+                    if (!isNaN(num) && num > maxNum) {
+                        maxNum = num;
+                    }
+                }
+            });
+        }
+
+        const nextNum = maxNum + 1;
+        const padded = String(nextNum).padStart(4, '0');
+        return `FAB-${padded}`;
+    } catch (err) {
+        console.error('Exception in generateNextFabricCodeLocal:', err.message);
+        return 'FAB-0001';
+    }
+}
+
+// Fabrics get a dedicated handler with extra fields (brand_name, quantity, shade, width, latest_sam, vendors, images)
 exports.fabrics = {
     list: async (req, res) => {
         try {
@@ -75,12 +111,17 @@ exports.fabrics = {
         }
     },
     create: async (req, res) => {
-        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image } = req.body;
+        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image, images, latest_sam, vendors, garment_category } = req.body;
         try {
+            let finalCode = code;
+            if (!finalCode || finalCode.trim() === '') {
+                finalCode = await generateNextFabricCodeLocal();
+            }
+
             const { data, error } = await supabase
                 .from('fabrics')
                 .insert([{ 
-                    code, 
+                    code: finalCode, 
                     name, 
                     brand_name: brand_name || null, 
                     quantity: quantity || 0, 
@@ -89,7 +130,11 @@ exports.fabrics = {
                     description: description || null,
                     brand_type: brand_type || null,
                     quality: quality || null,
-                    image: image || null
+                    image: image || null,
+                    images: images || [],
+                    latest_sam: latest_sam !== undefined && latest_sam !== null && latest_sam !== '' ? parseFloat(latest_sam) : 0,
+                    vendors: vendors || [],
+                    garment_category: garment_category || null
                 }])
                 .select()
                 .single();
@@ -101,7 +146,7 @@ exports.fabrics = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image } = req.body;
+        const { code, name, brand_name, quantity, shade, width, description, brand_type, quality, image, images, latest_sam, vendors, garment_category } = req.body;
         try {
             const { data, error } = await supabase
                 .from('fabrics')
@@ -115,7 +160,11 @@ exports.fabrics = {
                     description: description || null,
                     brand_type: brand_type || null,
                     quality: quality || null,
-                    image: image || null
+                    image: image || null,
+                    images: images || [],
+                    latest_sam: latest_sam !== undefined && latest_sam !== null && latest_sam !== '' ? parseFloat(latest_sam) : 0,
+                    vendors: vendors || [],
+                    garment_category: garment_category || null
                 })
                 .eq('id', id)
                 .select()
@@ -140,6 +189,42 @@ exports.fabrics = {
         }
     }
 };
+// Helper to generate the next button code (BTN-0001, BTN-0002, etc.)
+async function generateNextButtonCodeLocal() {
+    try {
+        const { data, error } = await supabase
+            .from('buttons')
+            .select('code')
+            .not('code', 'is', null);
+
+        if (error) {
+            console.error('Error fetching buttons codes:', error.message);
+            return 'BTN-0001';
+        }
+
+        let maxNum = 0;
+        if (data && data.length > 0) {
+            data.forEach(item => {
+                const c = item.code;
+                if (c && c.startsWith('BTN-')) {
+                    const numPart = c.substring(4);
+                    const num = parseInt(numPart, 10);
+                    if (!isNaN(num) && num > maxNum) {
+                        maxNum = num;
+                    }
+                }
+            });
+        }
+
+        const nextNum = maxNum + 1;
+        const padded = String(nextNum).padStart(4, '0');
+        return `BTN-${padded}`;
+    } catch (err) {
+        console.error('Exception in generateNextButtonCodeLocal:', err.message);
+        return 'BTN-0001';
+    }
+}
+
 exports.buttons = {
     list: async (req, res) => {
         try {
@@ -154,17 +239,24 @@ exports.buttons = {
         }
     },
     create: async (req, res) => {
-        const { code, name, description, unit_price, quantity, low_stock_threshold } = req.body;
+        const { code, name, description, unit_price, quantity, low_stock_threshold, images, vendors } = req.body;
         try {
+            let finalCode = code;
+            if (!finalCode || finalCode.trim() === '') {
+                finalCode = await generateNextButtonCodeLocal();
+            }
+
             const { data, error } = await supabase
                 .from('buttons')
                 .insert([{ 
-                    code, 
+                    code: finalCode, 
                     name, 
                     description: description || null,
                     unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
                     quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
-                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10,
+                    images: images || [],
+                    vendors: vendors || []
                 }])
                 .select()
                 .single();
@@ -176,7 +268,7 @@ exports.buttons = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, description, unit_price, quantity, low_stock_threshold } = req.body;
+        const { code, name, description, unit_price, quantity, low_stock_threshold, images, vendors } = req.body;
         try {
             const { data, error } = await supabase
                 .from('buttons')
@@ -186,7 +278,9 @@ exports.buttons = {
                     description: description || null,
                     unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
                     quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
-                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10,
+                    images: images || [],
+                    vendors: vendors || []
                 })
                 .eq('id', id)
                 .select()
@@ -212,6 +306,42 @@ exports.buttons = {
     }
 };
 
+// Helper to generate the next thread code (THR-0001, THR-0002, etc.)
+async function generateNextThreadCodeLocal() {
+    try {
+        const { data, error } = await supabase
+            .from('threads')
+            .select('code')
+            .not('code', 'is', null);
+
+        if (error) {
+            console.error('Error fetching threads codes:', error.message);
+            return 'THR-0001';
+        }
+
+        let maxNum = 0;
+        if (data && data.length > 0) {
+            data.forEach(item => {
+                const c = item.code;
+                if (c && c.startsWith('THR-')) {
+                    const numPart = c.substring(4);
+                    const num = parseInt(numPart, 10);
+                    if (!isNaN(num) && num > maxNum) {
+                        maxNum = num;
+                    }
+                }
+            });
+        }
+
+        const nextNum = maxNum + 1;
+        const padded = String(nextNum).padStart(4, '0');
+        return `THR-${padded}`;
+    } catch (err) {
+        console.error('Exception in generateNextThreadCodeLocal:', err.message);
+        return 'THR-0001';
+    }
+}
+
 exports.threads = {
     list: async (req, res) => {
         try {
@@ -226,18 +356,25 @@ exports.threads = {
         }
     },
     create: async (req, res) => {
-        const { code, name, type, description, unit_price, quantity, low_stock_threshold } = req.body;
+        const { code, name, type, description, unit_price, quantity, low_stock_threshold, images, vendors } = req.body;
         try {
+            let finalCode = code;
+            if (!finalCode || finalCode.trim() === '') {
+                finalCode = await generateNextThreadCodeLocal();
+            }
+
             const { data, error } = await supabase
                 .from('threads')
                 .insert([{ 
-                    code, 
+                    code: finalCode, 
                     name, 
                     type: type || null,
                     description: description || null,
                     unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
                     quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
-                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10,
+                    images: images || [],
+                    vendors: vendors || []
                 }])
                 .select()
                 .single();
@@ -249,7 +386,7 @@ exports.threads = {
     },
     update: async (req, res) => {
         const { id } = req.params;
-        const { code, name, type, description, unit_price, quantity, low_stock_threshold } = req.body;
+        const { code, name, type, description, unit_price, quantity, low_stock_threshold, images, vendors } = req.body;
         try {
             const { data, error } = await supabase
                 .from('threads')
@@ -260,7 +397,9 @@ exports.threads = {
                     description: description || null,
                     unit_price: unit_price !== undefined && unit_price !== '' && unit_price !== null ? parseFloat(unit_price) : null,
                     quantity: quantity !== undefined && quantity !== '' && quantity !== null ? parseFloat(quantity) : 0,
-                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10
+                    low_stock_threshold: low_stock_threshold !== undefined && low_stock_threshold !== '' && low_stock_threshold !== null ? parseFloat(low_stock_threshold) : 10,
+                    images: images || [],
+                    vendors: vendors || []
                 })
                 .eq('id', id)
                 .select()

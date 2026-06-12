@@ -19,14 +19,14 @@ exports.listDresses = async (req, res) => {
 
 exports.createDress = async (req, res) => {
     try {
-        const { code, name } = req.body;
+        const { code, name, description } = req.body;
         if (!code || !name) {
             return res.status(400).json({ error: 'Code and name are required' });
         }
 
         const { data, error } = await supabase
             .from('art_dresses')
-            .insert([{ code: code.trim().toUpperCase(), name: name.trim() }])
+            .insert([{ code: code.trim().toUpperCase(), name: name.trim(), description: description ? description.trim() : null }])
             .select()
             .single();
 
@@ -45,14 +45,14 @@ exports.createDress = async (req, res) => {
 exports.updateDress = async (req, res) => {
     try {
         const { id } = req.params;
-        const { code, name } = req.body;
+        const { code, name, description } = req.body;
         if (!code || !name) {
             return res.status(400).json({ error: 'Code and name are required' });
         }
 
         const { data, error } = await supabase
             .from('art_dresses')
-            .update({ code: code.trim().toUpperCase(), name: name.trim(), updated_at: new Date() })
+            .update({ code: code.trim().toUpperCase(), name: name.trim(), description: description ? description.trim() : null, updated_at: new Date() })
             .eq('id', id)
             .select()
             .single();

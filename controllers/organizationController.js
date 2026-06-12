@@ -4,6 +4,42 @@ const { logAction } = require('../utils/logger');
 
 const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase();
 
+// Helper to generate next customer code (CN001, CN002, etc.)
+async function generateNextCustomerCodeLocal() {
+  try {
+      const { data, error } = await supabase
+          .from('organizations')
+          .select('customer_code')
+          .not('customer_code', 'is', null);
+
+      if (error) {
+          console.error('Error fetching customer codes:', error.message);
+          return 'CN001';
+      }
+
+      let maxNum = 0;
+      if (data && data.length > 0) {
+          data.forEach(item => {
+              const c = item.customer_code;
+              if (c && c.startsWith('CN')) {
+                  const numPart = c.substring(2);
+                  const num = parseInt(numPart, 10);
+                  if (!isNaN(num) && num > maxNum) {
+                      maxNum = num;
+                  }
+              }
+          });
+      }
+
+      const nextNum = maxNum + 1;
+      const padded = String(nextNum).padStart(3, '0');
+      return `CN${padded}`;
+  } catch (err) {
+      console.error('Exception in generateNextCustomerCodeLocal:', err.message);
+      return 'CN001';
+  }
+}
+
 // --- Organizations Management ---
 
 exports.getOrganizations = async (req, res) => {
@@ -11,7 +47,7 @@ exports.getOrganizations = async (req, res) => {
     const { industryId } = req.query;
     let query = supabase
       .from('organizations')
-      .select('*, industries(name)')
+      .select('*, industries(name), relationship_manager:relationship_manager_id(id, full_name, employee_id), assigned_operator:assigned_operator_id(id, full_name, employee_id)')
       .order('created_at', { ascending: false });
 
     if (industryId) {
@@ -29,7 +65,7 @@ exports.getOrganizations = async (req, res) => {
 };
 
 exports.createOrganization = async (req, res) => {
-  const { name, address, username, password, industry_id } = req.body;
+  const { name, address, username, password, industry_id, relationship_manager_id, customer_code } = req.body;
   
   try {
     // 1. Validate credentials if provided
@@ -38,7 +74,6 @@ exports.createOrganization = async (req, res) => {
     }
 
     // 2. Create User Profile first
-    // In multi-industry, we can still use the same role ID or create a generic 'ORG_ADMIN' role
     const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
     const { data: userData, error: userError } = await supabase
       .from('user_profiles')
@@ -54,6 +89,12 @@ exports.createOrganization = async (req, res) => {
 
     if (userError) throw userError;
 
+    // Generate next customer code if not provided
+    let finalCustomerCode = customer_code;
+    if (!finalCustomerCode || finalCustomerCode.trim() === '') {
+      finalCustomerCode = await generateNextCustomerCodeLocal();
+    }
+
     // 3. Create Organization and link to user
     const { data, error } = await supabase
       .from('organizations')
@@ -61,7 +102,9 @@ exports.createOrganization = async (req, res) => {
         name, 
         address, 
         user_id: userData.id,
-        industry_id: industry_id || 1 // Default to 1 (School) for backward compatibility
+        industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
+        customer_code: finalCustomerCode,
+        relationship_manager_id: relationship_manager_id || null
       }])
       .select()
       .single();
@@ -82,11 +125,11 @@ exports.createOrganization = async (req, res) => {
 
 exports.updateOrganization = async (req, res) => {
     const { id } = req.params;
-    const { name, address, industry_id, assigned_staff_id } = req.body;
+    const { name, address, industry_id, relationship_manager_id, assigned_operator_id, customer_code } = req.body;
     try {
       const { data, error } = await supabase
         .from('organizations')
-        .update({ name, address, industry_id, assigned_staff_id })
+        .update({ name, address, industry_id, relationship_manager_id, assigned_operator_id, customer_code })
         .eq('id', id)
         .select()
         .single();
@@ -110,6 +153,11 @@ exports.getOrganizationDetails = async (req, res) => {
       .from('departments')
       .select('*')
       .eq('organization_id', id);
+
+    const enrichedDepartments = (departments || []).map(d => ({
+      ...d,
+      division: d.section
+    }));
 
     // 2. Get Members and Measurement Status
     const { data: members } = await supabase
@@ -145,16 +193,23 @@ exports.getOrganizationDetails = async (req, res) => {
                pending++;
            }
        });
-    }
+     }
+
+    // 3. Get Orders
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('*, quotations!inner(id, quotation_no, title, final_quote_value, organization_id)')
+      .eq('quotations.organization_id', id);
 
     res.json({
       success: true,
-      departments: departments || [],
+      departments: enrichedDepartments,
       measurements: {
         total: members ? members.length : 0,
         completed,
         pending
-      }
+      },
+      orders: orders || []
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

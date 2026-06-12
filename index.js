@@ -29,11 +29,22 @@ app.use('/api/user', userRoutes); // Alias for consistency with some frontend ca
 app.use('/api/employees', require('./routes/employee.js'));
 app.use('/api/measurements', require('./routes/measurement.js'));
 app.use('/api/products', require('./routes/product.js'));
+app.use('/api/product-types', require('./routes/productType.js'));
+app.use('/api/art-number-hub', require('./routes/artNumberHub.js'));
 app.use('/api/templates', require('./routes/template.js'));
+app.use('/api/staff-measurements', require('./routes/staffMeasurement.js'));
 app.use('/api/inventory', require('./routes/inventory.js'));
 app.use('/api/dashboard', require('./routes/dashboard.js'));
 app.use('/api/size-charts', require('./routes/size-charts.js'));
 app.use('/api/audit', require('./routes/audit.js'));
+app.use('/api/quotations', require('./routes/quotation.js'));
+app.use('/api/payments', require('./routes/payment.js'));
+app.use('/api/orders', require('./routes/order.js'));
+app.use('/api/sam-management', require('./routes/samManagement.js'));
+app.use('/api/company-settings', require('./routes/companySettings.js'));
+app.use('/api/vendors', require('./routes/vendors.js'));
+app.use('/api/leads', require('./routes/leads.js'));
+
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

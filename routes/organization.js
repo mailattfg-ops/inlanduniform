@@ -7,6 +7,9 @@ router.use(authMiddleware);
 
 // Organization management
 router.get('/', checkPermission(['manage_schools', 'view_schools']), organizationController.getOrganizations);
+router.get('/:id/details', checkPermission(['manage_schools', 'view_schools']), organizationController.getOrganizationDetails);
+router.get('/:id/staff', checkPermission(['manage_schools', 'view_schools']), organizationController.getAssignedStaff);
+router.post('/:id/staff', checkPermission(['manage_schools']), organizationController.assignStaff);
 router.post('/', checkPermission(['manage_schools']), organizationController.createOrganization);
 router.put('/:id', checkPermission(['manage_schools']), organizationController.updateOrganization);
 router.delete('/:id', checkPermission(['manage_schools']), organizationController.deleteOrganization);

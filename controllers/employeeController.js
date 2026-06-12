@@ -194,3 +194,39 @@ exports.updateEmployee = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+exports.getMyOrganizations = async (req, res) => {
+  const { id } = req.params; // employee DB id
+  try {
+    const { data, error } = await supabase
+      .from('organization_staff')
+      .select(`
+        id,
+        assigned_at,
+        allowed_measurement_fields,
+        organizations (
+          id,
+          name,
+          address,
+          industry_id,
+          industries ( name )
+        )
+      `)
+      .eq('employee_id', id)
+      .order('assigned_at', { ascending: false });
+
+    if (error) throw error;
+
+    // Flatten for convenience: pull organization fields up one level
+    const result = (data || []).map(row => ({
+      assignment_id: row.id,
+      assigned_at: row.assigned_at,
+      allowed_measurement_fields: row.allowed_measurement_fields || {},
+      ...row.organizations
+    }));
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};

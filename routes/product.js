@@ -6,8 +6,12 @@ const { authMiddleware, checkPermission } = require('../middleware/authMiddlewar
 router.use(authMiddleware);
 
 router.get('/', productController.listProducts);
+router.get('/next-design-number', productController.getNextDesignNumber);
 router.post('/', checkPermission('manage_system'), productController.createProduct);
 router.put('/:id', checkPermission('manage_system'), productController.updateProduct);
 router.delete('/:id', checkPermission('manage_system'), productController.deleteProduct);
+
+router.get('/:id/variants', productController.getProductVariants);
+router.post('/:id/variants', checkPermission('manage_system'), productController.createProductVariant);
 
 module.exports = router;

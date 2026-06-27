@@ -77,11 +77,25 @@ module.exports = {
     },
 
     create: async (req, res) => {
-        const { name, phone, industry_id, address, assigned_staff_id, status } = req.body;
+        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
         try {
+            let remarksJson = [];
+            if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
+                const now = new Date();
+                const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                remarksJson = [{
+                    date: dateStr,
+                    time: timeStr,
+                    text: remarks.trim()
+                }];
+            } else if (Array.isArray(remarks)) {
+                remarksJson = remarks;
+            }
+
             const lead_code = await generateNextLeadCodeLocal();
             const { data, error } = await supabase
                 .from('leads')
@@ -92,7 +106,8 @@ module.exports = {
                     industry_id: industry_id || null,
                     address: address || null,
                     assigned_staff_id: assigned_staff_id || null,
-                    status: status || 'New'
+                    status: status || 'New',
+                    remarks: remarksJson
                 }])
                 .select(`
                     *,
@@ -110,22 +125,39 @@ module.exports = {
 
     update: async (req, res) => {
         const { id } = req.params;
-        const { name, phone, industry_id, address, assigned_staff_id, status } = req.body;
+        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
         try {
+            const updateFields = {
+                name,
+                phone: phone || null,
+                industry_id: industry_id || null,
+                address: address || null,
+                assigned_staff_id: assigned_staff_id || null,
+                status: status || 'New',
+                updated_at: new Date()
+            };
+
+            if (remarks !== undefined) {
+                if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
+                    const now = new Date();
+                    const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                    const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                    updateFields.remarks = [{
+                        date: dateStr,
+                        time: timeStr,
+                        text: remarks.trim()
+                    }];
+                } else {
+                    updateFields.remarks = remarks;
+                }
+            }
+
             const { data, error } = await supabase
                 .from('leads')
-                .update({
-                    name,
-                    phone: phone || null,
-                    industry_id: industry_id || null,
-                    address: address || null,
-                    assigned_staff_id: assigned_staff_id || null,
-                    status: status || 'New',
-                    updated_at: new Date()
-                })
+                .update(updateFields)
                 .eq('id', id)
                 .select(`
                     *,
@@ -254,6 +286,67 @@ module.exports = {
                     password
                 }
             });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    addRemark: async (req, res) => {
+        const { id } = req.params;
+        const { text } = req.body;
+
+        if (!text || text.trim() === '') {
+            return res.status(400).json({ error: 'Remark text is required' });
+        }
+
+        try {
+            const { data: lead, error: fetchError } = await supabase
+                .from('leads')
+                .select('remarks')
+                .eq('id', id)
+                .single();
+
+            if (fetchError || !lead) {
+                return res.status(404).json({ error: 'Lead not found' });
+            }
+
+            let remarksList = [];
+            if (Array.isArray(lead.remarks)) {
+                remarksList = lead.remarks;
+            } else if (typeof lead.remarks === 'string' && lead.remarks.trim() !== '') {
+                remarksList = [{
+                    date: 'Previous Entry',
+                    time: '',
+                    text: lead.remarks
+                }];
+            }
+
+            const now = new Date();
+            const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+            const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+            remarksList.push({
+                date: dateStr,
+                time: timeStr,
+                text: text.trim()
+            });
+
+            const { data, error } = await supabase
+                .from('leads')
+                .update({
+                    remarks: remarksList,
+                    updated_at: new Date()
+                })
+                .eq('id', id)
+                .select(`
+                    *,
+                    industries ( id, name ),
+                    employees ( id, full_name, employee_id )
+                `)
+                .single();
+
+            if (error) throw error;
+            res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

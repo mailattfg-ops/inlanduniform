@@ -13,5 +13,6 @@ router.post('/', leadController.create);
 router.put('/:id', leadController.update);
 router.delete('/:id', leadController.delete);
 router.post('/:id/convert', leadController.convertLeadToCustomer);
+router.post('/:id/remarks', leadController.addRemark);
 
 module.exports = router;

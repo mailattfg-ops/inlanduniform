@@ -13,7 +13,8 @@ const DEFAULT_SETTINGS = {
   account_no: '50200076116064',
   branch_name: 'MAJESTIC CENTER',
   ifsc_code: 'HDFC0001255',
-  upi_id: '7902 499 991'
+  upi_id: '7902 499 991',
+  qr_image: null
 };
 
 exports.getSettings = async (req, res) => {
@@ -52,7 +53,8 @@ exports.updateSettings = async (req, res) => {
     account_no,
     branch_name,
     ifsc_code,
-    upi_id
+    upi_id,
+    qr_image
   } = req.body;
 
   try {
@@ -70,6 +72,7 @@ exports.updateSettings = async (req, res) => {
         branch_name,
         ifsc_code,
         upi_id,
+        qr_image,
         updated_at: new Date().toISOString()
       })
       .select()

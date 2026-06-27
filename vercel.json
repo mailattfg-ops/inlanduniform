@@ -15,5 +15,11 @@
             "src": "/(.*)",
             "dest": "index.js"
         }
+    ],
+    "crons": [
+        {
+            "path": "/api/ping",
+            "schedule": "0 0 * * *"
+        }
     ]
 }

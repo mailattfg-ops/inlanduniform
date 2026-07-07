@@ -1052,7 +1052,7 @@ exports.getSharePDF = async (req, res) => {
             return res.status(404).send('Quotation not found.');
         }
 
-        let rawHtml = data.pdf_html;
+        let rawHtml = null; // Always compile dynamically to reflect latest company settings & QR image
 
         if (!rawHtml) {
             // If status is not Approved, we do not expose/generate the public PDF
@@ -1095,7 +1095,8 @@ exports.getSharePDF = async (req, res) => {
                 account_no: '50200076116064',
                 branch_name: 'MAJESTIC CENTER',
                 ifsc_code: 'HDFC0001255',
-                upi_id: '7902 499 991'
+                upi_id: '7902 499 991',
+                qr_image: null
             };
 
             try {
@@ -1142,8 +1143,32 @@ exports.getSharePDF = async (req, res) => {
                 const totalPersons = depts.reduce((sum, d) => sum + (Number(d.persons) || 0), 0);
                 const totalSetsQty = depts.reduce((sum, d) => sum + ((Number(d.persons) || 0) * (Number(d.sets) || 0)), 0);
                 
+                // Predefined ordering list
+                const sortOrder = [
+                    'Class1', 'Class2', 'Class3', 'Class4', 'Class5', 'Class6',
+                    'Class7', 'Class8', 'Class9', 'Class10', 'Class11', 'Class12',
+                    'C1', 'C2', 'Corporate'
+                ];
+                
+                // Sort departments
+                const sortedDepts = [...depts].sort((a, b) => {
+                    const nameA = (a.name || '').trim();
+                    const nameB = (b.name || '').trim();
+                    
+                    const indexA = sortOrder.indexOf(nameA);
+                    const indexB = sortOrder.indexOf(nameB);
+                    
+                    if (indexA !== -1 && indexB !== -1) {
+                        return indexA - indexB;
+                    }
+                    if (indexA !== -1) return -1;
+                    if (indexB !== -1) return 1;
+                    
+                    return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+                });
+
                 let deptRows = '';
-                depts.forEach(dept => {
+                sortedDepts.forEach(dept => {
                     const dName = dept.name || 'Department';
                     const dDivision = dept.division || '—';
                     const dPersons = Number(dept.persons) || 0;
@@ -1445,6 +1470,14 @@ exports.getSharePDF = async (req, res) => {
                 <p class="mt-1"><span class="text-gray-400">UPI Pay No:</span> <span class="font-mono text-[#2d8d9b] font-black">${companySettings.upi_id}</span></p>
               </div>
             </div>
+
+            <!-- PAYMENT QR CODE -->
+            ${companySettings.qr_image ? `
+            <div class="mt-4 p-4 bg-white border border-gray-150 rounded-2xl flex flex-col items-center justify-center text-center">
+              <p class="text-[8px] font-black text-gray-450 uppercase tracking-widest mb-2">Scan QR Code to Pay</p>
+              <img src="${companySettings.qr_image}" alt="Payment QR Code" style="width: 120px; height: 120px; object-fit: contain;" />
+            </div>
+            ` : ''}
 
             <!-- SIGNATURES BLOCK -->
             <div class="grid grid-cols-2 gap-12 mt-16 pt-8 border-t border-gray-100 text-xs">

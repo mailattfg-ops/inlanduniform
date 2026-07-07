@@ -51,6 +51,18 @@ app.get('/api/user/profile', authMiddleware, (req, res) => {
   res.json({ user: req.user });
 });
 
+app.get('/api/ping', async (req, res) => {
+  try {
+    const supabase = require('./config/supabase');
+    const { data, error } = await supabase.from('user_types').select('id').limit(1);
+    if (error) throw error;
+    res.json({ success: true, message: 'Ping successful, database is active', data });
+  } catch (err) {
+    console.error('Ping failed:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/', (req, res) => {
   res.json({ message: 'Welcome to the Backend API - V3' });
 });

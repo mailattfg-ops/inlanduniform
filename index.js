@@ -1,8 +1,9 @@
 console.log('[INDEX] Booting...');
-setInterval(() => {}, 60000); // Keep-alive anchor
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const pingSupabase = require('./scripts/ping_supabase');
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 const { authMiddleware } = require('./middleware/authMiddleware');
@@ -45,21 +46,17 @@ app.use('/api/company-settings', require('./routes/companySettings.js'));
 app.use('/api/vendors', require('./routes/vendors.js'));
 app.use('/api/leads', require('./routes/leads.js'));
 
-
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {
   res.json({ user: req.user });
 });
 
 app.get('/api/ping', async (req, res) => {
-  try {
-    const supabase = require('./config/supabase');
-    const { data, error } = await supabase.from('user_types').select('id').limit(1);
-    if (error) throw error;
-    res.json({ success: true, message: 'Ping successful, database is active', data });
-  } catch (err) {
-    console.error('Ping failed:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+  const success = await pingSupabase();
+  if (success) {
+    res.json({ success: true, message: 'Ping successful, database is active' });
+  } else {
+    res.status(500).json({ success: false, error: 'Ping failed' });
   }
 });
 
@@ -67,11 +64,24 @@ app.get('/', (req, res) => {
   res.json({ message: 'Welcome to the Backend API - V3' });
 });
 
+// Periodic database keep-alive ping when running as standalone server
+if (require.main === module) {
+  const PING_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
+  setInterval(() => {
+    pingSupabase();
+  }, PING_INTERVAL);
+
+  setTimeout(() => {
+    pingSupabase();
+  }, 5000);
+
+  console.log('[INDEX] Attempting to listen on port', PORT);
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+  console.log('[INDEX] Bootstrap complete');
+}
+
 // Export app for Vercel serverless environment
 module.exports = app;
 
-console.log('[INDEX] Attempting to listen on port', PORT);
-const server = app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-console.log('[INDEX] Bootstrap complete');

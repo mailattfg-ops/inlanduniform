@@ -25,11 +25,24 @@ const authMiddleware = async (req, res, next) => {
  */
 const checkPermission = (required) => {
   return (req, res, next) => {
-    const userPermissions = req.user?.permissions || [];
+    const userRole = req.user?.role || '';
+    const userPermissions = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
     const requiredList = Array.isArray(required) ? required : [required];
     
-    // Admin bypass
-    if (userPermissions.includes('all')) return next();
+    // Admin role, Branch Manager/Staff, or 'all' permission bypass
+    if (
+      userRole === 'Admin' || 
+      userRole === 'Super Admin' || 
+      userRole === 'SuperAdmin' || 
+      userPermissions.includes('all')
+    ) {
+      return next();
+    }
+
+    // Branch Managers and Branch Staff have read permission for employee lists
+    if ((userRole === 'Branch Manager' || userRole === 'Branch Staff') && requiredList.includes('view_employees')) {
+      return next();
+    }
     
     // Check if user has ANY of the required permissions
     const hasPerm = requiredList.some(p => userPermissions.includes(p));

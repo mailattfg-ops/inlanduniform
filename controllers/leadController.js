@@ -1,6 +1,13 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
 
+// Helper to check global admin
+const isGlobalAdmin = (user) => {
+    if (!user) return false;
+    const role = user.role || '';
+    return role === 'Admin' || role === 'Super Admin' || role === 'SuperAdmin';
+};
+
 // Helper to generate next lead code (LN001, LN002, etc.)
 async function generateNextLeadCodeLocal() {
     try {
@@ -40,17 +47,26 @@ async function generateNextLeadCodeLocal() {
 module.exports = {
     list: async (req, res) => {
         try {
-            const { data, error } = await supabase
+            const isAdmin = isGlobalAdmin(req.user);
+            const userBranchId = req.user?.branchId;
+
+            let query = supabase
                 .from('leads')
                 .select(`
                     *,
                     industries ( id, name ),
                     employees ( id, full_name, employee_id )
-                `)
-                .order('created_at', { ascending: false });
+                `);
+
+            // Non-admin branch accounts ONLY see leads strictly belonging to their branch
+            if (!isAdmin && userBranchId) {
+                query = query.eq('branch_id', userBranchId);
+            }
+
+            const { data, error } = await query.order('created_at', { ascending: false });
 
             if (error) throw error;
-            res.json(data);
+            res.json(data || []);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -77,11 +93,17 @@ module.exports = {
     },
 
     create: async (req, res) => {
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
+        const { name, phone, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
         try {
+            const isAdmin = isGlobalAdmin(req.user);
+            const userBranchId = req.user?.branchId;
+
+            // Automatically associate lead with the branch user's branch
+            const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || null);
+
             let remarksJson = [];
             if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
                 const now = new Date();
@@ -106,6 +128,7 @@ module.exports = {
                     industry_id: industry_id || null,
                     address: address || null,
                     assigned_staff_id: assigned_staff_id || null,
+                    branch_id: targetBranchId,
                     status: status || 'New',
                     remarks: remarksJson
                 }])
@@ -125,7 +148,7 @@ module.exports = {
 
     update: async (req, res) => {
         const { id } = req.params;
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
+        const { name, phone, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
@@ -139,6 +162,10 @@ module.exports = {
                 status: status || 'New',
                 updated_at: new Date()
             };
+
+            if (branch_id !== undefined) {
+                updateFields.branch_id = branch_id;
+            }
 
             if (remarks !== undefined) {
                 if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
@@ -227,7 +254,6 @@ module.exports = {
             if (userError) throw userError;
 
             // 4. Generate customer code
-            // Inline fetching next customer code
             let customerCode = 'CN001';
             const { data: customerCodes, error: codesError } = await supabase
                 .from('organizations')
@@ -257,10 +283,11 @@ module.exports = {
                     name: lead.name,
                     address: lead.address || null,
                     user_id: userData.id,
-                    industry_id: lead.industry_id || 1, // Default to 1 (School)
+                    industry_id: lead.industry_id || 1,
                     customer_code: customerCode,
                     relationship_manager_id: null,
-                    assigned_operator_id: lead.assigned_staff_id || null
+                    assigned_operator_id: lead.assigned_staff_id || null,
+                    branch_id: lead.branch_id || null
                 }])
                 .select()
                 .single();

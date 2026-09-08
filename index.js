@@ -45,6 +45,11 @@ app.use('/api/sam-management', require('./routes/samManagement.js'));
 app.use('/api/company-settings', require('./routes/companySettings.js'));
 app.use('/api/vendors', require('./routes/vendors.js'));
 app.use('/api/leads', require('./routes/leads.js'));
+app.use('/api/branches', require('./routes/branches.js'));
+app.use('/api/job-cards', require('./routes/jobCard.js'));
+app.use('/api/invoices', require('./routes/invoices.js'));
+app.use('/api/delivery-challans', require('./routes/deliveryChallans.js'));
+app.use('/api/measurement-tokens', require('./routes/measurementTokens.js'));
 
 // Protected routes example
 app.get('/api/user/profile', authMiddleware, (req, res) => {

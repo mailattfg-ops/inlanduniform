@@ -45,10 +45,18 @@ async function generateNextCustomerCodeLocal() {
 exports.getOrganizations = async (req, res) => {
   try {
     const { industryId } = req.query;
+    const userRole = req.user?.role || '';
+    const userBranchId = req.user?.branchId;
+    const isAdmin = userRole === 'Admin' || userRole === 'Super Admin' || userRole === 'SuperAdmin';
+
     let query = supabase
       .from('organizations')
       .select('*, industries(name), relationship_manager:relationship_manager_id(id, full_name, employee_id), assigned_operator:assigned_operator_id(id, full_name, employee_id)')
       .order('created_at', { ascending: false });
+
+    if (!isAdmin && userBranchId) {
+      query = query.eq('branch_id', userBranchId);
+    }
 
     if (industryId) {
       query = query.eq('industry_id', industryId);

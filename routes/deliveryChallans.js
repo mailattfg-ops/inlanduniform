@@ -3,6 +3,7 @@ const router = express.Router();
 const deliveryChallanController = require('../controllers/deliveryChallanController');
 const { authMiddleware } = require('../middleware/authMiddleware');
 
+router.get('/', authMiddleware, deliveryChallanController.listDeliveryChallans);
 router.post('/', authMiddleware, deliveryChallanController.createDeliveryChallan);
 router.get('/:id', authMiddleware, deliveryChallanController.getDeliveryChallanDetails);
 

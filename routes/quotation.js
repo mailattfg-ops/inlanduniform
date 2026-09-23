@@ -25,16 +25,16 @@ router.put('/design-numbers/:id', authMiddleware, checkPermission(['manage_produ
 // Get single quotation details
 router.get('/:id', authMiddleware, quotationController.getQuotationDetails);
 
-// Create quotation
-router.post('/', authMiddleware, checkPermission(['manage_quotations']), quotationController.createQuotation);
+// Create quotation (Branch Staff with branch_sales, Branch Manager with manage_quotations, Admin)
+router.post('/', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.createQuotation);
 
-// Update quotation
-router.put('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.updateQuotation);
+// Update quotation (if not locked, allowed for staff and managers)
+router.put('/:id', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.updateQuotation);
 
-// Delete quotation
+// Delete quotation (Restricted strictly to managers/admins)
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);
 
 // Calculate metrics for organization members & sizing live
-router.get('/calculate/:orgId', authMiddleware, checkPermission(['manage_quotations']), quotationController.calculateOrgMeasurements);
+router.get('/calculate/:orgId', authMiddleware, checkPermission(['manage_quotations', 'branch_sales', 'view_quotations']), quotationController.calculateOrgMeasurements);
 
 module.exports = router;

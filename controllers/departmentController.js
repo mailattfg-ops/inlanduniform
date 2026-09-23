@@ -13,9 +13,9 @@ exports.getDepartments = async (req, res) => {
       .order('created_at', { ascending: false });
 
     // Strict Enforcement logic
-    const role = user.role?.toLowerCase();
-    if (role === 'school' || role === 'organization' || role === 'entity') {
-      const userOrgId = user.schoolId || user.organizationId;
+    const role = (user.role || '').toLowerCase();
+    const userOrgId = user.organizationId || user.schoolId;
+    if (role === 'school' || role === 'organization' || role === 'organisation' || role === 'entity' || role === 'student' || role === 'member' || userOrgId) {
       if (!userOrgId) {
         return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
       }

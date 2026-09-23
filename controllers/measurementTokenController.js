@@ -44,7 +44,7 @@ exports.createToken = async (req, res) => {
                 alteration_details: alteration_details || '',
                 unique_composite_id,
                 status: 'Assigned',
-                created_by: req.user?.id || null
+                created_by: req.user?.id && /^\d+$/.test(String(req.user.id)) ? parseInt(req.user.id, 10) : null
             }])
             .select()
             .single();

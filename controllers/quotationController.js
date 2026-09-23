@@ -364,16 +364,34 @@ async function findOrCreateGroupDesignNumber(designCodes) {
     return newGDN.id;
 }
 
-// 1. List all quotations
+// 1. List all quotations (with orders join and branch isolation)
 exports.listQuotations = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'Super Admin' || req.user?.role === 'SuperAdmin' || (req.user?.permissions || []).includes('all');
+        const userBranchId = req.user?.branchId;
+        const userOrgId = req.user?.organizationId;
+        const userRole = (req.user?.role || '').toLowerCase();
+
+        // If caller is an individual entity / student, they should not view wholesale commercial quotations
+        if (userRole === 'entity' || userRole === 'student' || userRole === 'member' || req.user?.memberId) {
+            return res.json([]);
+        }
+
+        let query = supabase
             .from('quotations')
-            .select('*, organizations(name), group_design_number:group_design_numbers(code)')
+            .select('*, organizations(name, branch_id), group_design_number:group_design_numbers(code), orders(id, order_no, status, branch_id)')
             .order('created_at', { ascending: false });
 
+        if (userOrgId) {
+            // Strictly scope to this organization's quotations
+            query = query.eq('organization_id', userOrgId);
+        } else if (!isAdmin && userBranchId) {
+            query = query.or(`branch_id.eq.${userBranchId},branch_id.is.null`);
+        }
+
+        const { data, error } = await query;
         if (error) throw error;
-        res.json(data);
+        res.json(data || []);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -394,6 +412,17 @@ exports.getQuotationDetails = async (req, res) => {
         if (quoteError) throw quoteError;
         if (!quotation) {
             return res.status(404).json({ error: 'Quotation not found' });
+        }
+
+        const userOrgId = req.user?.organizationId;
+        const userRole = (req.user?.role || '').toLowerCase();
+
+        if (userRole === 'entity' || userRole === 'student' || userRole === 'member' || req.user?.memberId) {
+            return res.status(403).json({ error: 'Access Denied: Entity members cannot view wholesale quotations' });
+        }
+
+        if (userOrgId && String(quotation.organization_id) !== String(userOrgId)) {
+            return res.status(403).json({ error: "Access Denied: You cannot view another organization's quotation" });
         }
 
         // Fetch all items within this quotation
@@ -618,6 +647,7 @@ exports.createQuotation = async (req, res) => {
                 quotation_no: finalQuotationNo,
                 title: title.trim(),
                 organization_id,
+                branch_id: req.user?.branchId || null,
                 estimated_expenses: estimated_expenses || 0,
                 total_estimated_time: total_estimated_time || '',
                 production_days_estimate: production_days_estimate || 0,
@@ -941,12 +971,18 @@ exports.updateQuotation = async (req, res) => {
             }
         }
 
-        // Retrieve existing quotation to preserve its group_design_number_id if needed
+        // Retrieve existing quotation to preserve its group_design_number_id and enforce PRD M5.3 lock
         const { data: existingQuote } = await supabase
             .from('quotations')
-            .select('group_design_number_id')
+            .select('group_design_number_id, status')
             .eq('id', id)
             .maybeSingle();
+
+        if (existingQuote && existingQuote.status === 'Approved') {
+            return res.status(400).json({ 
+                error: 'Approved quotations are locked and cannot be modified. Please duplicate or create a new revision.' 
+            });
+        }
 
         // Find or create group design number (with smart nested resolve and auto-fallback generation)
         const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(
@@ -1023,7 +1059,8 @@ exports.updateQuotation = async (req, res) => {
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');
-            await logAction(req.user.id, 'UPDATE', 'quotation', id, { 
+            const actionLabel = quote.status === 'Approved' ? 'QUOTATION_APPROVED' : 'UPDATE';
+            await logAction(req.user.id, actionLabel, 'quotation', id, { 
                 quotation_no: quote.quotation_no, 
                 final_quote_value: quote.final_quote_value,
                 status: quote.status

@@ -20,8 +20,15 @@ exports.listStudents = async (req, res) => {
         departments(*)
       `);
 
-    const role = user.role?.toLowerCase();
-    if (role === 'school' || role === 'organization' || role === 'entity') {
+    const role = (user.role || '').toLowerCase();
+    if (role === 'entity' || role === 'student' || role === 'member' || user.memberId) {
+      // Entity / Member should ONLY see their own record!
+      if (user.memberId) {
+        query = query.eq('id', user.memberId);
+      } else {
+        query = query.eq('user_id', user.id);
+      }
+    } else if (role === 'school' || role === 'organization' || role === 'organisation' || user.organizationId) {
       if (!user.organizationId) {
         return res.status(403).json({ error: 'Your account is not correctly linked to an organization record.' });
       }
@@ -45,11 +52,17 @@ exports.listStudents = async (req, res) => {
         return res.json([]);
     }
 
-    // 2. Aggregate Measurement Statuses (Prioritize Pending over Approved)
-    const { data: measurements } = await supabase
+    // 2. Aggregate Measurement Statuses for loaded members (Prioritize Pending over Approved)
+    const memberIds = members.map(m => m.id).filter(Boolean);
+    let measurements = [];
+    if (memberIds.length > 0) {
+      const { data: mData } = await supabase
         .from('measurements')
         .select('member_id, status')
+        .in('member_id', memberIds)
         .order('recorded_at', { ascending: false });
+      measurements = mData || [];
+    }
     
     const statusMap = {};
     if (measurements) {
@@ -177,13 +190,22 @@ exports.createStudent = async (req, res) => {
 
 exports.deleteStudent = async (req, res) => {
   const { id } = req.params;
+  const userOrgId = req.user?.organizationId;
   try {
-    // 1. Get user_id before deleting student
+    // 1. Get user_id and organization_id before deleting student
     const { data: student } = await supabase
         .from('registry_members')
-        .select('user_id')
+        .select('user_id, organization_id')
         .eq('id', id)
         .single();
+    
+    if (!student) {
+        return res.status(404).json({ error: 'Member not found' });
+    }
+
+    if (userOrgId && String(student.organization_id) !== String(userOrgId)) {
+        return res.status(403).json({ error: 'Access Denied: You cannot delete members from another organization.' });
+    }
     
     // 2. Delete student record
     const { error: sError } = await supabase.from('registry_members').delete().eq('id', id);

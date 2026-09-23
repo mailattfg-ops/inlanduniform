@@ -69,7 +69,7 @@ exports.createBranch = async (req, res) => {
                     name: manager_name || `${name} Manager`,
                     email: manager_email.trim().toLowerCase(),
                     password_plain: manager_password,
-                    role: 'Branch Manager',
+                    role: (tier === 'Factory') ? 'Factory PO Handler' : 'Branch Manager',
                     is_active: true
                 }]);
         }
@@ -201,7 +201,7 @@ exports.getBranchInventory = async (req, res) => {
 
 exports.adjustBranchInventory = async (req, res) => {
     try {
-        const { branch_id, item_type, item_name, item_code, quantity, type, notes } = req.body;
+        const { branch_id, item_type, item_name, item_code, quantity, type, notes, vendor_bill_no, lump_no, batch_no } = req.body;
         const isAdmin = isGlobalAdmin(req.user);
         const userBranchId = req.user?.branchId;
 
@@ -215,6 +215,16 @@ exports.adjustBranchInventory = async (req, res) => {
         const qtyNum = parseFloat(quantity);
         const change = type === 'OUT' ? -qtyNum : qtyNum;
 
+        // PRD M6.2: Batch Number = Vendor Bill Number + Lump Number on purchase inward
+        let finalBatchCode = item_code || '';
+        if (type === 'IN') {
+            if (vendor_bill_no && lump_no) {
+                finalBatchCode = `${vendor_bill_no.trim()}-${lump_no.trim()}`;
+            } else if (batch_no) {
+                finalBatchCode = batch_no.trim();
+            }
+        }
+
         // Check if item exists in branch_inventory
         const { data: existing } = await supabase
             .from('branch_inventory')
@@ -227,12 +237,16 @@ exports.adjustBranchInventory = async (req, res) => {
         let updated;
         if (existing) {
             const newQty = Math.max(0, parseFloat(existing.quantity || 0) + change);
+            const updatePayload = {
+                quantity: newQty,
+                updated_at: new Date().toISOString()
+            };
+            if (finalBatchCode) {
+                updatePayload.item_code = finalBatchCode;
+            }
             const { data, error } = await supabase
                 .from('branch_inventory')
-                .update({
-                    quantity: newQty,
-                    updated_at: new Date().toISOString()
-                })
+                .update(updatePayload)
                 .eq('id', existing.id)
                 .select()
                 .single();
@@ -245,7 +259,7 @@ exports.adjustBranchInventory = async (req, res) => {
                     branch_id: targetBranchId,
                     item_type,
                     item_name,
-                    item_code: item_code || '',
+                    item_code: finalBatchCode,
                     quantity: Math.max(0, change),
                     unit: 'units',
                     updated_at: new Date().toISOString()
@@ -256,7 +270,30 @@ exports.adjustBranchInventory = async (req, res) => {
             updated = data;
         }
 
-        res.json(updated);
+        // PRD M1.7 Audit trail for stock movement
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'BranchInventory',
+                entity_id: updated?.id || targetBranchId,
+                action: type === 'IN' ? 'STOCK_INWARD_BATCH' : 'STOCK_OUTWARD',
+                performed_by: req.user?.id && /^\d+$/.test(String(req.user.id)) ? parseInt(req.user.id, 10) : null,
+                details: {
+                    branch_id: targetBranchId,
+                    item_type,
+                    item_name,
+                    batch_no: finalBatchCode,
+                    vendor_bill_no: vendor_bill_no || null,
+                    lump_no: lump_no || null,
+                    quantity: qtyNum,
+                    type,
+                    notes
+                }
+            }]);
+        } catch (logErr) {
+            console.error('[BranchInventory] Log failed:', logErr.message);
+        }
+
+        res.json({ ...updated, batch_no: finalBatchCode, vendor_bill_no, lump_no });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

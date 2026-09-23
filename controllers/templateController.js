@@ -2,7 +2,7 @@ const supabase = require('../config/supabase');
 
 exports.listTemplates = async (req, res) => {
     try {
-        const { orgId } = req.query;
+        const { orgId, deptId } = req.query;
         let query = supabase
             .from('industry_templates')
             .select('*, organizations(name)');
@@ -13,7 +13,19 @@ exports.listTemplates = async (req, res) => {
 
         const { data, error } = await query.order('name');
         if (error) throw error;
-        res.json(data);
+
+        let results = data || [];
+        if (deptId && results.length > 0) {
+            results = results.filter(t => {
+                if (!t.department_ids) return false;
+                if (Array.isArray(t.department_ids)) {
+                    return t.department_ids.map(String).includes(String(deptId));
+                }
+                return String(t.department_ids).includes(String(deptId));
+            });
+        }
+
+        res.json(results);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

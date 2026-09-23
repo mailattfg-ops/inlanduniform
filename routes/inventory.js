@@ -29,6 +29,9 @@ router.delete('/threads/:id', requireAdmin, inventoryController.threads.delete);
 
 
 
+// PRD M7.6 & M12.5 Barcode / Item Lookup for Invoicing & Counter Sales
+router.get('/lookup', inventoryController.lookupItem);
+
 // Stock & Thresholds
 router.get('/stock', inventoryController.stocks.list);
 router.post('/stock/adjust', requireAdmin, inventoryController.stocks.adjust);

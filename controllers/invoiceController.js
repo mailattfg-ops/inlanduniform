@@ -58,7 +58,7 @@ exports.createInvoice = async (req, res) => {
                 paid_amount: totalAmount, // Default counter sale as paid
                 payment_status: 'Fully Paid',
                 notes: notes || '',
-                created_by: req.user?.id || null,
+                created_by: req.user?.id && /^\d+$/.test(String(req.user.id)) ? parseInt(req.user.id, 10) : null,
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString()
             }])
@@ -85,20 +85,78 @@ exports.createInvoice = async (req, res) => {
 
         if (itemsError) throw itemsError;
 
+        // Log Invoice creation to record_activity_logs (PRD M1.7)
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'Invoice',
+                entity_id: invoice.id,
+                action: 'INVOICE_CREATED',
+                performed_by: invoice.created_by,
+                details: {
+                    invoice_no: invoice.invoice_no,
+                    customer_name: invoice.customer_name,
+                    order_id: invoice.order_id,
+                    total_amount: invoice.total_amount,
+                    items_count: items.length
+                }
+            }]);
+        } catch (logErr) {
+            console.error('[Invoice] Activity log failed:', logErr.message);
+        }
+
         res.status(201).json({ ...invoice, items: invoiceItemsPayload });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// 2. List Invoices
+// 2. List Invoices (with Branch Isolation)
 exports.listInvoices = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'Super Admin' || req.user?.role === 'SuperAdmin' || (req.user?.permissions || []).includes('all');
+        const userBranchId = req.user?.branchId;
+        const userOrgId = req.user?.organizationId;
+        const userRole = (req.user?.role || '').toLowerCase();
+
+        if (userRole === 'entity' || userRole === 'student' || userRole === 'member' || req.user?.memberId) {
+            return res.json([]);
+        }
+
+        let query = supabase
             .from('invoices')
             .select('*, invoice_items(*)')
             .order('created_at', { ascending: false });
 
+        if (userOrgId) {
+            // Fetch quotation IDs and order IDs for this organization
+            const { data: orgQuotes } = await supabase
+                .from('quotations')
+                .select('id')
+                .eq('organization_id', userOrgId);
+            const quoteIds = (orgQuotes || []).map(q => q.id);
+
+            let orderIds = [];
+            if (quoteIds.length > 0) {
+                const { data: orgOrders } = await supabase
+                    .from('orders')
+                    .select('id')
+                    .in('quotation_id', quoteIds);
+                orderIds = (orgOrders || []).map(o => o.id);
+            }
+
+            if (quoteIds.length > 0 || orderIds.length > 0) {
+                const orConditions = [];
+                if (quoteIds.length > 0) orConditions.push(`quotation_id.in.(${quoteIds.join(',')})`);
+                if (orderIds.length > 0) orConditions.push(`order_id.in.(${orderIds.join(',')})`);
+                query = query.or(orConditions.join(','));
+            } else {
+                return res.json([]);
+            }
+        } else if (!isAdmin && userBranchId) {
+            query = query.eq('branch_id', userBranchId);
+        }
+
+        const { data, error } = await query;
         if (error) throw error;
         res.json(data || []);
     } catch (err) {
@@ -130,6 +188,20 @@ exports.updateInvoice = async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Log Invoice update
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'Invoice',
+                entity_id: id,
+                action: 'INVOICE_UPDATED',
+                performed_by: req.user?.id || null,
+                details: { invoice_no: data?.invoice_no, payment_status, paid_amount, notes }
+            }]);
+        } catch (logErr) {
+            console.error('[Invoice] Activity log failed:', logErr.message);
+        }
+
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -145,12 +217,34 @@ exports.deleteInvoice = async (req, res) => {
         }
 
         const { id } = req.params;
+
+        // Fetch invoice before deletion for audit record
+        const { data: existingInv } = await supabase
+            .from('invoices')
+            .select('invoice_no, total_amount')
+            .eq('id', id)
+            .maybeSingle();
+
         const { error } = await supabase
             .from('invoices')
             .delete()
             .eq('id', id);
 
         if (error) throw error;
+
+        // Log Invoice deletion
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'Invoice',
+                entity_id: id,
+                action: 'INVOICE_DELETED',
+                performed_by: req.user?.id || null,
+                details: { invoice_no: existingInv?.invoice_no, total_amount: existingInv?.total_amount }
+            }]);
+        } catch (logErr) {
+            console.error('[Invoice] Activity log failed:', logErr.message);
+        }
+
         res.json({ success: true, message: 'Invoice deleted successfully.' });
     } catch (err) {
         res.status(500).json({ error: err.message });

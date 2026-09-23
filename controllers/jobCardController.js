@@ -106,6 +106,8 @@ function isolateGarmentMeasurements(
     "sweater",
     "vest",
     "waistcoat",
+    "blouse",
+    "tunic",
   ];
   const bottomKeywords = [
     "pant",
@@ -119,6 +121,10 @@ function isolateGarmentMeasurements(
     "short",
     "shorts",
     "track pant",
+    "cargo",
+    "jeans",
+    "pyjama",
+    "pajama",
   ];
 
   const isCardTop = cardNames.some((cn) =>
@@ -128,53 +134,34 @@ function isolateGarmentMeasurements(
     bottomKeywords.some((kw) => cn.includes(kw)),
   );
 
-  const topMetricNames = new Set([
-    "chest",
-    "bust",
-    "shoulder",
-    "sleeve",
-    "sleeve length",
-    "top length",
-    "length",
-    "collar",
-    "neck",
-    "armhole",
-    "bicep",
-    "cuff",
-    "front cross",
-    "back cross",
-    "height",
-    "body length",
+  // Strictly exclusive to leg/bottom garments (never for tops)
+  const bottomExclusive = new Set([
+    "inseam", "outseam", "thigh", "knee", "bottom hem", "ankle",
+    "crotch", "rise", "leg length", "leg opening", "calf"
   ]);
-  const bottomMetricNames = new Set([
-    "waist",
-    "hip",
-    "bottom length",
-    "inseam",
-    "outseam",
-    "thigh",
-    "knee",
-    "bottom hem",
-    "hem",
-    "rise",
-    "crotch",
-    "leg length",
-    "height",
+  // Strictly exclusive to torso/arms (never for pants/bottoms)
+  const topExclusive = new Set([
+    "chest", "bust", "shoulder", "sleeve", "sleeve length", "top length",
+    "collar", "neck", "armhole", "bicep", "cuff", "front cross", "back cross"
   ]);
 
-  const entries = Object.entries(dynamicData).filter(
-    ([k]) => !k.startsWith("_"),
-  );
-  const nestedEntries = entries.filter(
-    ([, v]) => v && typeof v === "object" && !Array.isArray(v),
-  );
+  const reservedKeys = new Set([
+    "strategy", "chart_id", "chart_name", "chart_unit", "selected_size",
+    "assigned_dimensions", "fabric", "fabrics", "button", "thread", "custom_measurements"
+  ]);
 
-  if (nestedEntries.length > 0) {
-    // 1. Exact or partial match with the Job Card product name
+  // Identify true garment groups
+  const garmentGroups = Object.entries(dynamicData).filter(([k, v]) => {
+    if (k.startsWith("_")) return false;
+    if (reservedKeys.has(k.toLowerCase())) return false;
+    return v && typeof v === "object" && !Array.isArray(v);
+  });
+
+  if (garmentGroups.length > 0) {
     let matchedGroup = null;
     let matchedGroupName = "";
 
-    for (const [groupName, groupData] of nestedEntries) {
+    for (const [groupName, groupData] of garmentGroups) {
       const gNameLower = groupName.toLowerCase().trim();
       const directMatch = cardNames.some(
         (cn) => gNameLower.includes(cn) || cn.includes(gNameLower),
@@ -186,9 +173,8 @@ function isolateGarmentMeasurements(
       }
     }
 
-    // 2. Category alignment (Top vs Bottom)
     if (!matchedGroup) {
-      for (const [groupName, groupData] of nestedEntries) {
+      for (const [groupName, groupData] of garmentGroups) {
         const gNameLower = groupName.toLowerCase().trim();
         const isGroupTop = topKeywords.some((kw) => gNameLower.includes(kw));
         const isGroupBottom = bottomKeywords.some((kw) =>
@@ -208,25 +194,21 @@ function isolateGarmentMeasurements(
       }
     }
 
-    if (!matchedGroup && nestedEntries.length === 1) {
-      matchedGroup = nestedEntries[0][1];
-      matchedGroupName = nestedEntries[0][0];
+    if (!matchedGroup && garmentGroups.length === 1) {
+      matchedGroup = garmentGroups[0][1];
+      matchedGroupName = garmentGroups[0][0];
     }
 
     if (matchedGroup) {
       const isolated = {};
       Object.entries(matchedGroup).forEach(([k, v]) => {
         if (
-          k !== "strategy" &&
-          k !== "chart_id" &&
-          k !== "chart_name" &&
-          k !== "chart_unit" &&
-          k !== "selected_size" &&
-          k !== "assigned_dimensions" &&
+          !reservedKeys.has(k.toLowerCase()) &&
           !k.startsWith("_") &&
           v !== undefined &&
           v !== null &&
-          v !== ""
+          v !== "" &&
+          typeof v !== "object"
         ) {
           isolated[k] = v;
         }
@@ -256,27 +238,19 @@ function isolateGarmentMeasurements(
 
   // Fallback: Flat structure
   const isolated = {};
-  entries.forEach(([mKey, mVal]) => {
-    if (mKey === "strategy" || mKey.startsWith("_")) return;
+  Object.entries(dynamicData).forEach(([mKey, mVal]) => {
+    if (mKey.startsWith("_") || reservedKeys.has(mKey.toLowerCase())) {
+      if (mKey === "selected_size" || mKey === "assigned_dimensions") {
+        isolated[mKey] = mVal;
+      }
+      return;
+    }
     const mKeyLower = mKey.toLowerCase().trim();
 
-    if (isCardTop && !isCardBottom) {
-      if (
-        topMetricNames.has(mKeyLower) ||
-        topKeywords.some((kw) => mKeyLower.includes(kw))
-      ) {
-        isolated[mKey] = mVal;
-      }
-    } else if (isCardBottom && !isCardTop) {
-      if (
-        bottomMetricNames.has(mKeyLower) ||
-        bottomKeywords.some((kw) => mKeyLower.includes(kw))
-      ) {
-        isolated[mKey] = mVal;
-      }
-    } else {
-      isolated[mKey] = mVal;
-    }
+    if (isCardTop && !isCardBottom && bottomExclusive.has(mKeyLower)) return;
+    if (isCardBottom && !isCardTop && topExclusive.has(mKeyLower)) return;
+
+    isolated[mKey] = mVal;
   });
 
   return isolated;
@@ -654,7 +628,7 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
       const { data: pData } = await supabase
         .from("products")
         .select(
-          "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+          "id, name, art_number, button_id, button_count, thread_id, thread_count, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
         )
         .eq("id", candidateProductId)
         .maybeSingle();
@@ -667,29 +641,50 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     }
   }
 
-  // Fallback product lookup by design_number or item_name
+  // Fallback product lookup by art_number, design_number or item_name
   if (!product && jobCard?.design_number) {
-    try {
-      const { data: dNum } = await supabase
-        .from("design_numbers")
-        .select("id, code")
-        .eq("code", jobCard.design_number.trim())
-        .maybeSingle();
-      if (dNum) {
-        const { data: pByDNum } = await supabase
+    const rawDn = jobCard.design_number.trim();
+    // 1. Try matching art_number prefix if rawDn starts with gender-dress-pattern (e.g. 1-4J012)
+    const artMatch = rawDn.match(/^([0-9]+-[A-Za-z0-9]+)/);
+    if (artMatch) {
+      try {
+        const { data: pByArt } = await supabase
           .from("products")
           .select(
-            "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+            "id, name, art_number, button_id, button_count, thread_id, thread_count, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
           )
-          .eq("design_number_id", dNum.id)
+          .eq("art_number", artMatch[1])
           .maybeSingle();
-        if (pByDNum) product = pByDNum;
+        if (pByArt) product = pByArt;
+      } catch (artErr) {
+        console.warn("[JobCardController] Product lookup by art_number caught:", artErr.message);
       }
-    } catch (dnErr) {
-      console.warn(
-        "[JobCardController] Product lookup by design_number caught:",
-        dnErr.message,
-      );
+    }
+
+    // 2. Try matching design_numbers code (e.g. DNS-0001)
+    if (!product) {
+      try {
+        const { data: dNum } = await supabase
+          .from("design_numbers")
+          .select("id, code")
+          .eq("code", rawDn)
+          .maybeSingle();
+        if (dNum) {
+          const { data: pByDNum } = await supabase
+            .from("products")
+            .select(
+              "id, name, art_number, button_id, button_count, thread_id, thread_count, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+            )
+            .eq("design_number_id", dNum.id)
+            .maybeSingle();
+          if (pByDNum) product = pByDNum;
+        }
+      } catch (dnErr) {
+        console.warn(
+          "[JobCardController] Product lookup by design_number caught:",
+          dnErr.message,
+        );
+      }
     }
   }
 
@@ -698,7 +693,7 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
       const { data: pByName } = await supabase
         .from("products")
         .select(
-          "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+          "id, name, art_number, button_id, button_count, thread_id, thread_count, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
         )
         .ilike("name", jobCard.item_name.trim())
         .maybeSingle();
@@ -1042,6 +1037,86 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
 
   const allList = [mainObj, att1Obj, att2Obj].filter(Boolean);
 
+  // Resolve Button & Thread specifications
+  let buttonObj = null;
+  const buttonId = sb.button_id || qItemSb?.button_id || product?.button_id || null;
+  const buttonCount = parseFloat(sb.button_count || qItemSb?.button_count || product?.button_count || 0) || 0;
+  if (buttonId) {
+    try {
+      const { data: bData } = await supabase
+        .from("buttons")
+        .select("id, code, name, description")
+        .eq("id", buttonId)
+        .maybeSingle();
+      if (bData) {
+        buttonObj = {
+          id: bData.id,
+          code: bData.code || `BTN-${bData.id}`,
+          name: bData.name,
+          description: bData.description,
+          count: buttonCount,
+        };
+      }
+    } catch (bErr) {
+      console.warn("[JobCardController] Button lookup caught:", bErr.message);
+    }
+  }
+  if (!buttonObj && (buttonId || buttonCount > 0)) {
+    buttonObj = {
+      id: buttonId || null,
+      code: buttonId ? `BTN-${buttonId}` : "BTN-STD",
+      name: sb.button_name || "Standard Matching Buttons",
+      description: null,
+      count: buttonCount,
+    };
+  }
+
+  let threadObj = null;
+  const threadId = sb.thread_id || qItemSb?.thread_id || product?.thread_id || null;
+  const threadCount = parseFloat(sb.thread_count || qItemSb?.thread_count || product?.thread_count || 0) || 0;
+  if (threadId) {
+    try {
+      const { data: tData } = await supabase
+        .from("threads")
+        .select("id, code, name, description")
+        .eq("id", threadId)
+        .maybeSingle();
+      if (tData) {
+        threadObj = {
+          id: tData.id,
+          code: tData.code || `THR-${tData.id}`,
+          name: tData.name,
+          description: tData.description,
+          count: threadCount,
+        };
+      }
+    } catch (tErr) {
+      console.warn("[JobCardController] Thread lookup caught:", tErr.message);
+    }
+  }
+  if (!threadObj && (threadId || threadCount > 0)) {
+    threadObj = {
+      id: threadId || null,
+      code: threadId ? `THR-${threadId}` : "THR-STD",
+      name: sb.thread_name || "Color Matched Stitching Thread",
+      description: null,
+      count: threadCount,
+    };
+  }
+
+  // Resolve Art Number & Design Number
+  let resolvedArtNumber = product?.art_number || sb.art_number || qItemSb?.art_number || null;
+  if (!resolvedArtNumber && jobCard?.design_number) {
+    const artM = jobCard.design_number.trim().match(/^([0-9]+-[A-Za-z0-9]+)/);
+    if (artM) resolvedArtNumber = artM[1];
+  }
+
+  let resolvedDesignNumber =
+    product?.design_numbers?.code ||
+    (jobCard?.design_number && jobCard.design_number.trim().startsWith("DNS-") ? jobCard.design_number.trim() : null) ||
+    (sb.design_number && sb.design_number.trim().startsWith("DNS-") ? sb.design_number.trim() : null) ||
+    "DNS-STANDARD";
+
   return {
     code: finalMainCode,
     number: finalMainCode,
@@ -1055,6 +1130,10 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     all: allList,
     product_id: product?.id || null,
     product_name: product?.name || null,
+    art_number: resolvedArtNumber,
+    design_number: resolvedDesignNumber,
+    button: buttonObj,
+    thread: threadObj,
   };
 }
 
@@ -1676,8 +1755,29 @@ exports.createJobCardFromOrder = async (req, res) => {
     const holdReason = holdReasons.length > 0 ? holdReasons.join(" | ") : null;
     const poHandlerAction = holdReasons.length > 0 ? "Hold" : "Pending";
 
+    // Auto-resolve true DNS code and Art Number
+    const finalDesignNumber =
+      resolvedFab.design_number ||
+      (design_number && design_number.trim().startsWith("DNS-") ? design_number.trim() : "DNS-STANDARD");
+    const finalArtNumber =
+      resolvedFab.art_number ||
+      size_breakdown?.art_number ||
+      (design_number ? (design_number.match(/^([0-9]+-[A-Za-z0-9]+)/)?.[1] || null) : null);
+
     const enrichedSizeBreakdown = {
       ...(size_breakdown || {}),
+      art_number: finalArtNumber,
+      design_number: finalDesignNumber,
+      button_id: resolvedFab.button?.id || size_breakdown?.button_id || null,
+      button_code: resolvedFab.button?.code || null,
+      button_name: resolvedFab.button?.name || null,
+      button_count: resolvedFab.button?.count || size_breakdown?.button_count || null,
+      button: resolvedFab.button || null,
+      thread_id: resolvedFab.thread?.id || size_breakdown?.thread_id || null,
+      thread_code: resolvedFab.thread?.code || null,
+      thread_name: resolvedFab.thread?.name || null,
+      thread_count: resolvedFab.thread?.count || size_breakdown?.thread_count || null,
+      thread: resolvedFab.thread || null,
       fabric_id: fabricReadiness.fabricId || resolvedFabricId || null,
       fabric_name: fabricReadiness.fabricName || resolvedFabricName || null,
       fabric_code: resolvedFab.code || null,
@@ -1713,7 +1813,7 @@ exports.createJobCardFromOrder = async (req, res) => {
           order_id,
           item_id: item_id || null,
           item_name,
-          design_number: design_number || "",
+          design_number: finalDesignNumber,
           quantity: quantity || 1,
           size_breakdown: enrichedSizeBreakdown,
           status: initialStatus,
@@ -2095,8 +2195,37 @@ exports.listJobCards = async (req, res) => {
         (sum, l) => sum + (parseFloat(l.issued_meters) || 0),
         0,
       );
+      // Resolve clean Art Number and Design Number for both new and legacy cards
+      let artNumber = jc.size_breakdown?.art_number || null;
+      let cleanDesignNumber = jc.design_number || 'DNS-STANDARD';
+
+      if (cleanDesignNumber && cleanDesignNumber.includes(' - ')) {
+        const parts = cleanDesignNumber.split(' - ');
+        if (!artNumber && parts[0]) {
+          artNumber = parts[0].trim();
+        }
+        cleanDesignNumber = (jc.size_breakdown?.design_number && jc.size_breakdown.design_number.startsWith('DNS-'))
+          ? jc.size_breakdown.design_number
+          : 'DNS-STANDARD';
+      } else if (cleanDesignNumber && /^([0-9]+-[A-Za-z0-9]+)/.test(cleanDesignNumber.trim()) && !cleanDesignNumber.startsWith('DNS-')) {
+        if (!artNumber) artNumber = cleanDesignNumber.trim();
+        cleanDesignNumber = 'DNS-STANDARD';
+      }
+
       return {
         ...jc,
+        art_number: artNumber,
+        clean_design_number: cleanDesignNumber,
+        button: jc.size_breakdown?.button || (jc.size_breakdown?.button_code || jc.size_breakdown?.button_name ? {
+          code: jc.size_breakdown.button_code,
+          name: jc.size_breakdown.button_name,
+          count: jc.size_breakdown.button_count || 0
+        } : null),
+        thread: jc.size_breakdown?.thread || (jc.size_breakdown?.thread_code || jc.size_breakdown?.thread_name ? {
+          code: jc.size_breakdown.thread_code,
+          name: jc.size_breakdown.thread_name,
+          count: jc.size_breakdown.thread_count || 0
+        } : null),
         is_fabric_issued: isFabricIssued,
         fabric_issued_meters: totalFabricIssued,
         fabric_issue_details: logs[0] || null,

@@ -233,9 +233,47 @@ module.exports = {
                 return res.status(400).json({ error: 'Lead is already converted to a customer' });
             }
 
-            // 2. Generate Organization Admin credentials
-            const username = `cust_${lead.lead_code.toLowerCase().replace(/[^a-z0-9]/g, '') || Math.random().toString(36).substring(7)}`;
+            // 2. Generate Organization Admin credentials with uniqueness guarantee
+            const cleanLeadCode = (lead.lead_code || `id${lead.id}`).toLowerCase().replace(/[^a-z0-9]/g, '');
+            const baseUsername = `cust_${cleanLeadCode || Math.random().toString(36).substring(7)}`;
+            let username = baseUsername;
+            let email = username;
             const password = crypto.randomBytes(4).toString('hex').toUpperCase();
+
+            // Check if username/email already exists in user_profiles to avoid unique constraint violation
+            let { data: existingUser } = await supabase
+                .from('user_profiles')
+                .select('id')
+                .or(`email.eq.${email},username.eq.${username}`)
+                .maybeSingle();
+
+            if (existingUser) {
+                // Check if this existing user is orphaned (not linked to any existing organization)
+                const { data: linkedOrg } = await supabase
+                    .from('organizations')
+                    .select('id')
+                    .eq('user_id', existingUser.id)
+                    .maybeSingle();
+
+                if (!linkedOrg) {
+                    // Orphaned user profile from a previous failed lead conversion attempt - clean up
+                    await supabase.from('user_profiles').delete().eq('id', existingUser.id);
+                    existingUser = null;
+                }
+            }
+
+            let userSuffix = 1;
+            while (existingUser) {
+                username = `${baseUsername}_${userSuffix}`;
+                email = username;
+                const { data: checkCollision } = await supabase
+                    .from('user_profiles')
+                    .select('id')
+                    .or(`email.eq.${email},username.eq.${username}`)
+                    .maybeSingle();
+                existingUser = checkCollision;
+                userSuffix++;
+            }
 
             // 3. Create User Profile
             const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
@@ -244,22 +282,26 @@ module.exports = {
                 .insert([{
                     full_name: lead.name,
                     username: username,
-                    email: username,
+                    email: email,
                     password: password,
                     user_type_id: ORG_ROLE_ID
                 }])
                 .select()
                 .single();
 
-            if (userError) throw userError;
+            if (userError) {
+                console.error('[convertLeadToCustomer] userError:', userError);
+                throw userError;
+            }
 
-            // 4. Generate customer code
+            // 4. Generate customer code with collision check
             let customerCode = 'CN001';
             const { data: customerCodes, error: codesError } = await supabase
                 .from('organizations')
                 .select('customer_code')
                 .not('customer_code', 'is', null);
 
+            let nextNum = 1;
             if (!codesError && customerCodes && customerCodes.length > 0) {
                 let maxNum = 0;
                 customerCodes.forEach(item => {
@@ -272,8 +314,26 @@ module.exports = {
                         }
                     }
                 });
-                const nextNum = maxNum + 1;
+                nextNum = maxNum + 1;
                 customerCode = `CN${String(nextNum).padStart(3, '0')}`;
+            }
+
+            // Verify customer_code is strictly unique
+            let { data: codeCollision } = await supabase
+                .from('organizations')
+                .select('id')
+                .eq('customer_code', customerCode)
+                .maybeSingle();
+
+            while (codeCollision) {
+                nextNum++;
+                customerCode = `CN${String(nextNum).padStart(3, '0')}`;
+                const { data: nextCodeCheck } = await supabase
+                    .from('organizations')
+                    .select('id')
+                    .eq('customer_code', customerCode)
+                    .maybeSingle();
+                codeCollision = nextCodeCheck;
             }
 
             // 5. Create Organization / Customer
@@ -285,7 +345,7 @@ module.exports = {
                     user_id: userData.id,
                     industry_id: lead.industry_id || 1,
                     customer_code: customerCode,
-                    relationship_manager_id: null,
+                    relationship_manager_id: lead.assigned_staff_id || null,
                     assigned_operator_id: lead.assigned_staff_id || null,
                     branch_id: lead.branch_id || null
                 }])
@@ -295,6 +355,7 @@ module.exports = {
             if (orgError) {
                 // Rollback user creation
                 await supabase.from('user_profiles').delete().eq('id', userData.id);
+                console.error('[convertLeadToCustomer] orgError:', orgError);
                 throw orgError;
             }
 
@@ -314,6 +375,7 @@ module.exports = {
                 }
             });
         } catch (err) {
+            console.error('[convertLeadToCustomer] Exception:', err);
             res.status(500).json({ error: err.message });
         }
     },

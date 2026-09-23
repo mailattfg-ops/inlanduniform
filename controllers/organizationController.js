@@ -90,6 +90,17 @@ exports.createOrganization = async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required for organization registration.' });
     }
 
+    // Check if username/email already taken in user_profiles
+    const { data: existingUser } = await supabase
+      .from('user_profiles')
+      .select('id')
+      .or(`email.eq.${username},username.eq.${username}`)
+      .maybeSingle();
+
+    if (existingUser) {
+      return res.status(400).json({ error: `Username "${username}" is already in use. Please choose a different username.` });
+    }
+
     // 2. Create User Profile first
     const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
     const { data: userData, error: userError } = await supabase

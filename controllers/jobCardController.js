@@ -950,14 +950,47 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     shade: finalMainShade,
   };
 
-  // Finalize Attachment 1 - ONLY if genuine length or fabric is specified
+  // Helper to determine if an attachment fabric was genuinely selected/specified in quotation or product
+  const isRealFabricSpecified = (id, name, code) => {
+    if (id && String(id).trim() !== "" && String(id) !== "null" && String(id) !== "undefined") return true;
+    if (name && typeof name === "string") {
+      const clean = name.toLowerCase().trim();
+      if (
+        clean &&
+        clean !== "null" &&
+        clean !== "undefined" &&
+        clean !== "optional..." &&
+        clean !== "optional" &&
+        clean !== "none" &&
+        clean !== "n/a" &&
+        !clean.includes("attachment fabric") &&
+        !clean.includes("att1-std") &&
+        !clean.includes("att2-std")
+      ) {
+        return true;
+      }
+    }
+    if (code && typeof code === "string") {
+      const clean = code.toLowerCase().trim();
+      if (
+        clean &&
+        clean !== "null" &&
+        clean !== "undefined" &&
+        clean !== "optional" &&
+        clean !== "none" &&
+        clean !== "n/a" &&
+        !clean.includes("att1-std") &&
+        !clean.includes("att2-std")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Finalize Attachment 1 - ONLY if genuine fabric was selected and length > 0
   let att1Obj = null;
-  const hasRealAtt1 =
-    finalAtt1Length > 0 ||
-    att1Id ||
-    (att1Name &&
-      !att1Name.toLowerCase().includes("attachment fabric 1") &&
-      !att1Name.toLowerCase().includes("att1-std"));
+  const hasRealAtt1 = isRealFabricSpecified(att1Id, att1Name, att1Code);
 
   if (hasRealAtt1 && finalAtt1Length > 0) {
     const matchedAtt1 =
@@ -981,14 +1014,9 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     };
   }
 
-  // Finalize Attachment 2 - ONLY if genuine length or fabric is specified
+  // Finalize Attachment 2 - ONLY if genuine fabric was selected and length > 0
   let att2Obj = null;
-  const hasRealAtt2 =
-    finalAtt2Length > 0 ||
-    att2Id ||
-    (att2Name &&
-      !att2Name.toLowerCase().includes("attachment fabric 2") &&
-      !att2Name.toLowerCase().includes("att2-std"));
+  const hasRealAtt2 = isRealFabricSpecified(att2Id, att2Name, att2Code);
 
   if (hasRealAtt2 && finalAtt2Length > 0) {
     const matchedAtt2 =
@@ -2804,7 +2832,29 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
             ? catAtt1Meters
             : 0;
 
-      if ((att1Id || att1Name || att1Meters > 0) && att1Meters > 0) {
+      const isRealFab = (id, name) => {
+        if (id && String(id).trim() !== "" && String(id) !== "null" && String(id) !== "undefined") return true;
+        if (name && typeof name === "string") {
+          const clean = name.toLowerCase().trim();
+          if (
+            clean &&
+            clean !== "null" &&
+            clean !== "undefined" &&
+            clean !== "optional..." &&
+            clean !== "optional" &&
+            clean !== "none" &&
+            clean !== "n/a" &&
+            !clean.includes("attachment fabric") &&
+            !clean.includes("att1-std") &&
+            !clean.includes("att2-std")
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      if (isRealFab(att1Id, att1Name) && att1Meters > 0) {
         const matchedAtt1 = findStockFabric(att1Id, att1Name);
         const a1ReqMeters = parseFloat((pQty * att1Meters).toFixed(2));
         const a1SafetyMargin = parseFloat((a1ReqMeters * 0.1).toFixed(2));
@@ -2862,7 +2912,7 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
             ? catAtt2Meters
             : 0;
 
-      if ((att2Id || att2Name || att2Meters > 0) && att2Meters > 0) {
+      if (isRealFab(att2Id, att2Name) && att2Meters > 0) {
         const matchedAtt2 = findStockFabric(att2Id, att2Name);
         const a2ReqMeters = parseFloat((pQty * att2Meters).toFixed(2));
         const a2SafetyMargin = parseFloat((a2ReqMeters * 0.1).toFixed(2));

@@ -552,21 +552,50 @@ async function syncJobCardsForOrder(order_id) {
   }
 }
 
+// Helper: Extract materials metadata from text string
+function parseMaterialsMetadataLocal(rawText) {
+  if (!rawText)
+    return {
+      main_fabric_id: null,
+      attachment_fabric1_id: null,
+      attachment_fabric2_id: null,
+    };
+  let main_fabric_id = null;
+  let attachment_fabric1_id = null;
+  let attachment_fabric2_id = null;
+
+  const mainMatch = rawText.match(/\[MainFabricId:\s*([^\]]+)\]/);
+  if (mainMatch) main_fabric_id = mainMatch[1].trim();
+
+  const att1Match = rawText.match(/\[AttachmentFabric1Id:\s*([^\]]+)\]/);
+  if (att1Match) attachment_fabric1_id = att1Match[1].trim();
+
+  const att2Match = rawText.match(/\[AttachmentFabric2Id:\s*([^\]]+)\]/);
+  if (att2Match) attachment_fabric2_id = att2Match[1].trim();
+
+  return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id };
+}
+
 // Helper: Resolve all fabrics (Main Fabric, Attachment Fabric 1, Attachment Fabric 2)
-// with code/number, name, cut length per piece, and shade
+// Cross-checking with Product Master, Quotation/Order Item, and Class/Department specs
 async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
   const sb = sizeBreakdown || jobCard?.size_breakdown || {};
+  let qItem = null;
   let qItemSb = null;
 
+  // 1. Fetch parent Quotation Item
   if (jobCard?.item_id) {
     try {
-      const { data: qItem } = await supabase
+      const { data: itemData } = await supabase
         .from("quotation_items")
-        .select("size_breakdown")
+        .select(
+          "id, product_type_id, quantity, size_breakdown, product_types(name)",
+        )
         .eq("id", jobCard.item_id)
         .maybeSingle();
-      if (qItem?.size_breakdown) {
-        qItemSb = qItem.size_breakdown;
+      if (itemData) {
+        qItem = itemData;
+        qItemSb = itemData.size_breakdown || {};
       }
     } catch (qErr) {
       console.warn(
@@ -576,12 +605,150 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     }
   }
 
-  // 1. Main fabric attributes
+  // Fallback quotation item lookup from order if item_id was not directly set
+  if (!qItem && jobCard?.order_id) {
+    try {
+      const { data: orderData } = await supabase
+        .from("orders")
+        .select(
+          "id, quotation_id, quotations(id, quotation_items(id, product_type_id, size_breakdown, product_types(name)))",
+        )
+        .eq("id", jobCard.order_id)
+        .maybeSingle();
+      const allQItems = orderData?.quotations?.quotation_items || [];
+      if (allQItems.length > 0) {
+        const matched = allQItems.find(
+          (it) =>
+            (sb.product_id &&
+              it.size_breakdown?.product_id === sb.product_id) ||
+            (jobCard.item_name &&
+              it.product_types?.name &&
+              it.product_types.name.toLowerCase() ===
+                jobCard.item_name.toLowerCase()) ||
+            (jobCard.item_name &&
+              it.size_breakdown?.product_name &&
+              it.size_breakdown.product_name.toLowerCase() ===
+                jobCard.item_name.toLowerCase()),
+        );
+        if (matched) {
+          qItem = matched;
+          qItemSb = matched.size_breakdown || {};
+        } else if (allQItems.length === 1) {
+          qItem = allQItems[0];
+          qItemSb = allQItems[0].size_breakdown || {};
+        }
+      }
+    } catch (ordErr) {
+      console.warn(
+        "[JobCardController] Order quotation items lookup caught:",
+        ordErr.message,
+      );
+    }
+  }
+
+  // 2. Fetch Product Master details from products table
+  let product = null;
+  const candidateProductId = sb.product_id || qItemSb?.product_id || null;
+  if (candidateProductId) {
+    try {
+      const { data: pData } = await supabase
+        .from("products")
+        .select(
+          "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+        )
+        .eq("id", candidateProductId)
+        .maybeSingle();
+      if (pData) product = pData;
+    } catch (pErr) {
+      console.warn(
+        "[JobCardController] Product lookup by ID caught:",
+        pErr.message,
+      );
+    }
+  }
+
+  // Fallback product lookup by design_number or item_name
+  if (!product && jobCard?.design_number) {
+    try {
+      const { data: dNum } = await supabase
+        .from("design_numbers")
+        .select("id, code")
+        .eq("code", jobCard.design_number.trim())
+        .maybeSingle();
+      if (dNum) {
+        const { data: pByDNum } = await supabase
+          .from("products")
+          .select(
+            "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+          )
+          .eq("design_number_id", dNum.id)
+          .maybeSingle();
+        if (pByDNum) product = pByDNum;
+      }
+    } catch (dnErr) {
+      console.warn(
+        "[JobCardController] Product lookup by design_number caught:",
+        dnErr.message,
+      );
+    }
+  }
+
+  if (!product && jobCard?.item_name) {
+    try {
+      const { data: pByName } = await supabase
+        .from("products")
+        .select(
+          "id, name, main_fabric, attachment_fabric1, attachment_fabric2, class_fabric_consumption, materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, sam_value, design_number_id, design_numbers(code)",
+        )
+        .ilike("name", jobCard.item_name.trim())
+        .maybeSingle();
+      if (pByName) product = pByName;
+    } catch (pnErr) {
+      console.warn(
+        "[JobCardController] Product lookup by name caught:",
+        pnErr.message,
+      );
+    }
+  }
+
+  // 3. Resolve Class / Department Specific Fabric Consumption
+  let classConsumption = null;
+  const deptName =
+    sb.department_name ||
+    sb.class_name ||
+    qItemSb?.department_name ||
+    qItemSb?.class_name ||
+    null;
+
+  if (
+    product?.class_fabric_consumption &&
+    typeof product.class_fabric_consumption === "object"
+  ) {
+    if (deptName && product.class_fabric_consumption[deptName]) {
+      classConsumption = product.class_fabric_consumption[deptName];
+    } else if (deptName) {
+      const cleanDept = deptName.toLowerCase().trim();
+      const matchedKey = Object.keys(product.class_fabric_consumption).find(
+        (k) =>
+          cleanDept.includes(k.toLowerCase().trim()) ||
+          k.toLowerCase().trim().includes(cleanDept),
+      );
+      if (matchedKey)
+        classConsumption = product.class_fabric_consumption[matchedKey];
+    }
+  }
+
+  // Parse materials text from product
+  const parsedMaterials = parseMaterialsMetadataLocal(product?.materials);
+
+  // 4. Resolve Main Fabric attributes & Cut Length
   let mainId =
     sb.fabric_id ||
     sb.main_fabric_id ||
     qItemSb?.fabric_id ||
     qItemSb?.main_fabric_id ||
+    product?.main_fabric_id ||
+    parsedMaterials.main_fabric_id ||
     null;
   let mainName =
     sb.fabric_name ||
@@ -589,50 +756,132 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     qItemSb?.fabric_name ||
     qItemSb?.main_fabric_name ||
     null;
-  let mainMeters = parseFloat(
-    sb.main_fabric_meters ||
-      sb.consumption ||
-      qItemSb?.main_fabric_meters ||
-      1.25,
-  );
   let mainCode = sb.fabric_code || qItemSb?.fabric_code || null;
   let mainShade = sb.shade || sb.fabric_shade || qItemSb?.shade || null;
 
-  // 2. Attachment fabric 1 attributes
+  // Cross-check Main Fabric Cut Length per Piece:
+  // Order quotation item > Department/Class consumption > Product master > Job Card breakdown > 1.25 fallback
+  const qItemMainMeters =
+    qItemSb?.main_fabric_meters !== undefined &&
+    qItemSb?.main_fabric_meters !== null
+      ? parseFloat(qItemSb.main_fabric_meters)
+      : NaN;
+  const classMainMeters =
+    classConsumption?.main_fabric !== undefined &&
+    classConsumption?.main_fabric !== null
+      ? parseFloat(classConsumption.main_fabric)
+      : NaN;
+  const prodMainMeters =
+    product?.main_fabric !== undefined && product?.main_fabric !== null
+      ? parseFloat(product.main_fabric)
+      : NaN;
+  const sbMainMeters =
+    sb.main_fabric_meters !== undefined && sb.main_fabric_meters !== null
+      ? parseFloat(sb.main_fabric_meters)
+      : parseFloat(sb.consumption);
+
+  let finalMainLength = 1.25;
+  if (!isNaN(qItemMainMeters) && qItemMainMeters > 0) {
+    finalMainLength = qItemMainMeters;
+  } else if (!isNaN(classMainMeters) && classMainMeters > 0) {
+    finalMainLength = classMainMeters;
+  } else if (!isNaN(prodMainMeters) && prodMainMeters > 0) {
+    finalMainLength = prodMainMeters;
+  } else if (!isNaN(sbMainMeters) && sbMainMeters > 0) {
+    finalMainLength = sbMainMeters;
+  }
+
+  // 5. Resolve Attachment Fabric 1 attributes & Cut Length
   let att1Id =
-    sb.attachment_fabric1_id || qItemSb?.attachment_fabric1_id || null;
+    sb.attachment_fabric1_id ||
+    qItemSb?.attachment_fabric1_id ||
+    product?.attachment_fabric1_id ||
+    parsedMaterials.attachment_fabric1_id ||
+    null;
   let att1Name =
     sb.attachment_fabric1_name || qItemSb?.attachment_fabric1_name || null;
-  let att1Meters =
-    sb.attachment_fabric1_meters !== undefined &&
-    sb.attachment_fabric1_meters !== null
-      ? parseFloat(sb.attachment_fabric1_meters)
-      : qItemSb?.attachment_fabric1_meters !== undefined &&
-          qItemSb?.attachment_fabric1_meters !== null
-        ? parseFloat(qItemSb.attachment_fabric1_meters)
-        : null;
   let att1Code =
     sb.attachment_fabric1_code || qItemSb?.attachment_fabric1_code || null;
   let att1Shade =
     sb.attachment_fabric1_shade || qItemSb?.attachment_fabric1_shade || null;
 
-  // 3. Attachment fabric 2 attributes
+  const qItemAtt1Meters =
+    qItemSb?.attachment_fabric1_meters !== undefined &&
+    qItemSb?.attachment_fabric1_meters !== null
+      ? parseFloat(qItemSb.attachment_fabric1_meters)
+      : NaN;
+  const classAtt1Meters =
+    classConsumption?.attachment_fabric1 !== undefined &&
+    classConsumption?.attachment_fabric1 !== null
+      ? parseFloat(classConsumption.attachment_fabric1)
+      : NaN;
+  const prodAtt1Meters =
+    product?.attachment_fabric1 !== undefined &&
+    product?.attachment_fabric1 !== null
+      ? parseFloat(product.attachment_fabric1)
+      : NaN;
+  const sbAtt1Meters =
+    sb.attachment_fabric1_meters !== undefined &&
+    sb.attachment_fabric1_meters !== null
+      ? parseFloat(sb.attachment_fabric1_meters)
+      : NaN;
+
+  let finalAtt1Length = 0;
+  if (!isNaN(qItemAtt1Meters) && qItemAtt1Meters > 0) {
+    finalAtt1Length = qItemAtt1Meters;
+  } else if (!isNaN(classAtt1Meters) && classAtt1Meters > 0) {
+    finalAtt1Length = classAtt1Meters;
+  } else if (!isNaN(prodAtt1Meters) && prodAtt1Meters > 0) {
+    finalAtt1Length = prodAtt1Meters;
+  } else if (!isNaN(sbAtt1Meters) && sbAtt1Meters > 0) {
+    finalAtt1Length = sbAtt1Meters;
+  }
+
+  // 6. Resolve Attachment Fabric 2 attributes & Cut Length
   let att2Id =
-    sb.attachment_fabric2_id || qItemSb?.attachment_fabric2_id || null;
+    sb.attachment_fabric2_id ||
+    qItemSb?.attachment_fabric2_id ||
+    product?.attachment_fabric2_id ||
+    parsedMaterials.attachment_fabric2_id ||
+    null;
   let att2Name =
     sb.attachment_fabric2_name || qItemSb?.attachment_fabric2_name || null;
-  let att2Meters =
-    sb.attachment_fabric2_meters !== undefined &&
-    sb.attachment_fabric2_meters !== null
-      ? parseFloat(sb.attachment_fabric2_meters)
-      : qItemSb?.attachment_fabric2_meters !== undefined &&
-          qItemSb?.attachment_fabric2_meters !== null
-        ? parseFloat(qItemSb.attachment_fabric2_meters)
-        : null;
   let att2Code =
     sb.attachment_fabric2_code || qItemSb?.attachment_fabric2_code || null;
   let att2Shade =
     sb.attachment_fabric2_shade || qItemSb?.attachment_fabric2_shade || null;
+
+  const qItemAtt2Meters =
+    qItemSb?.attachment_fabric2_meters !== undefined &&
+    qItemSb?.attachment_fabric2_meters !== null
+      ? parseFloat(qItemSb.attachment_fabric2_meters)
+      : NaN;
+  const classAtt2Meters =
+    classConsumption?.attachment_fabric2 !== undefined &&
+    classConsumption?.attachment_fabric2 !== null
+      ? parseFloat(classConsumption.attachment_fabric2)
+      : NaN;
+  const prodAtt2Meters =
+    product?.attachment_fabric2 !== undefined &&
+    product?.attachment_fabric2 !== null
+      ? parseFloat(product.attachment_fabric2)
+      : NaN;
+  const sbAtt2Meters =
+    sb.attachment_fabric2_meters !== undefined &&
+    sb.attachment_fabric2_meters !== null
+      ? parseFloat(sb.attachment_fabric2_meters)
+      : NaN;
+
+  let finalAtt2Length = 0;
+  if (!isNaN(qItemAtt2Meters) && qItemAtt2Meters > 0) {
+    finalAtt2Length = qItemAtt2Meters;
+  } else if (!isNaN(classAtt2Meters) && classAtt2Meters > 0) {
+    finalAtt2Length = classAtt2Meters;
+  } else if (!isNaN(prodAtt2Meters) && prodAtt2Meters > 0) {
+    finalAtt2Length = prodAtt2Meters;
+  } else if (!isNaN(sbAtt2Meters) && sbAtt2Meters > 0) {
+    finalAtt2Length = sbAtt2Meters;
+  }
 
   // Query fabrics table for all referenced IDs or names
   const fabIds = [mainId, att1Id, att2Id].filter(Boolean);
@@ -676,17 +925,19 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     }
   }
 
-  // Resolve Main
+  // Finalize Main Fabric
   const matchedMain =
     (mainId && fabMap[String(mainId)]) ||
     (mainName && fabMap[mainName.toLowerCase().trim()]);
   const finalMainCode =
     matchedMain?.code || mainCode || (mainId ? `FAB-${mainId}` : "FAB-STD");
   const finalMainName =
-    matchedMain?.name || mainName || "Standard Production Fabric";
+    matchedMain?.name ||
+    mainName ||
+    (product?.name
+      ? `${product.name} Production Fabric`
+      : "Standard Production Fabric");
   const finalMainShade = matchedMain?.shade || mainShade || null;
-  const finalMainLength =
-    isNaN(mainMeters) || mainMeters <= 0 ? 1.25 : mainMeters;
 
   const mainObj = {
     role: "Main Fabric",
@@ -699,9 +950,16 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     shade: finalMainShade,
   };
 
-  // Resolve Attachment 1
+  // Finalize Attachment 1 - ONLY if genuine length or fabric is specified
   let att1Obj = null;
-  if (att1Id || att1Name || (att1Meters !== null && att1Meters > 0)) {
+  const hasRealAtt1 =
+    finalAtt1Length > 0 ||
+    att1Id ||
+    (att1Name &&
+      !att1Name.toLowerCase().includes("attachment fabric 1") &&
+      !att1Name.toLowerCase().includes("att1-std"));
+
+  if (hasRealAtt1 && finalAtt1Length > 0) {
     const matchedAtt1 =
       (att1Id && fabMap[String(att1Id)]) ||
       (att1Name && fabMap[att1Name.toLowerCase().trim()]);
@@ -710,8 +968,6 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     const finalAtt1Name =
       matchedAtt1?.name || att1Name || "Attachment Fabric 1";
     const finalAtt1Shade = matchedAtt1?.shade || att1Shade || null;
-    const finalAtt1Length =
-      att1Meters !== null && !isNaN(att1Meters) ? att1Meters : 0;
 
     att1Obj = {
       role: "Attachment Fabric 1",
@@ -725,9 +981,16 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     };
   }
 
-  // Resolve Attachment 2
+  // Finalize Attachment 2 - ONLY if genuine length or fabric is specified
   let att2Obj = null;
-  if (att2Id || att2Name || (att2Meters !== null && att2Meters > 0)) {
+  const hasRealAtt2 =
+    finalAtt2Length > 0 ||
+    att2Id ||
+    (att2Name &&
+      !att2Name.toLowerCase().includes("attachment fabric 2") &&
+      !att2Name.toLowerCase().includes("att2-std"));
+
+  if (hasRealAtt2 && finalAtt2Length > 0) {
     const matchedAtt2 =
       (att2Id && fabMap[String(att2Id)]) ||
       (att2Name && fabMap[att2Name.toLowerCase().trim()]);
@@ -736,8 +999,6 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     const finalAtt2Name =
       matchedAtt2?.name || att2Name || "Attachment Fabric 2";
     const finalAtt2Shade = matchedAtt2?.shade || att2Shade || null;
-    const finalAtt2Length =
-      att2Meters !== null && !isNaN(att2Meters) ? att2Meters : 0;
 
     att2Obj = {
       role: "Attachment Fabric 2",
@@ -764,6 +1025,8 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     attachment1: att1Obj,
     attachment2: att2Obj,
     all: allList,
+    product_id: product?.id || null,
+    product_name: product?.name || null,
   };
 }
 
@@ -1041,7 +1304,26 @@ async function generateChildJobCardsForJobCard(jobCard, options = {}) {
               _pieces_for_member: memberQty,
               _piece_index: pIdx,
               _fabric: fabricSpecObj,
+              _fabrics: fabricSpecObj.all,
             },
+            fabric_code: fabricSpecObj.code,
+            fabric_name: fabricSpecObj.name,
+            fabric_length: fabricSpecObj.length,
+            fabric_meters: fabricSpecObj.length,
+            fabric_shade: fabricSpecObj.shade,
+            attachment1_name: fabricSpecObj.attachment1?.name || null,
+            attachment1_code: fabricSpecObj.attachment1?.code || null,
+            attachment1_number: fabricSpecObj.attachment1?.code || null,
+            attachment1_length: fabricSpecObj.attachment1?.length || null,
+            attachment1_meters: fabricSpecObj.attachment1?.length || null,
+            attachment1_shade: fabricSpecObj.attachment1?.shade || null,
+            attachment2_name: fabricSpecObj.attachment2?.name || null,
+            attachment2_code: fabricSpecObj.attachment2?.code || null,
+            attachment2_number: fabricSpecObj.attachment2?.code || null,
+            attachment2_length: fabricSpecObj.attachment2?.length || null,
+            attachment2_meters: fabricSpecObj.attachment2?.length || null,
+            attachment2_shade: fabricSpecObj.attachment2?.shade || null,
+            fabrics: fabricSpecObj.all,
             sequence_no: seq,
             stage: "Cutting",
             status: "In Production",
@@ -1073,7 +1355,26 @@ async function generateChildJobCardsForJobCard(jobCard, options = {}) {
           admission_no: null,
           custom_measurements: {
             _fabric: fabricSpecObj,
+            _fabrics: fabricSpecObj.all,
           },
+          fabric_code: fabricSpecObj.code,
+          fabric_name: fabricSpecObj.name,
+          fabric_length: fabricSpecObj.length,
+          fabric_meters: fabricSpecObj.length,
+          fabric_shade: fabricSpecObj.shade,
+          attachment1_name: fabricSpecObj.attachment1?.name || null,
+          attachment1_code: fabricSpecObj.attachment1?.code || null,
+          attachment1_number: fabricSpecObj.attachment1?.code || null,
+          attachment1_length: fabricSpecObj.attachment1?.length || null,
+          attachment1_meters: fabricSpecObj.attachment1?.length || null,
+          attachment1_shade: fabricSpecObj.attachment1?.shade || null,
+          attachment2_name: fabricSpecObj.attachment2?.name || null,
+          attachment2_code: fabricSpecObj.attachment2?.code || null,
+          attachment2_number: fabricSpecObj.attachment2?.code || null,
+          attachment2_length: fabricSpecObj.attachment2?.length || null,
+          attachment2_meters: fabricSpecObj.attachment2?.length || null,
+          attachment2_shade: fabricSpecObj.attachment2?.shade || null,
+          fabrics: fabricSpecObj.all,
           sequence_no: seq,
           stage: "Cutting",
           status: "In Production",
@@ -1118,7 +1419,26 @@ async function generateChildJobCardsForJobCard(jobCard, options = {}) {
             admission_no: null,
             custom_measurements: {
               _fabric: fabricSpecObj,
+              _fabrics: fabricSpecObj.all,
             },
+            fabric_code: fabricSpecObj.code,
+            fabric_name: fabricSpecObj.name,
+            fabric_length: fabricSpecObj.length,
+            fabric_meters: fabricSpecObj.length,
+            fabric_shade: fabricSpecObj.shade,
+            attachment1_name: fabricSpecObj.attachment1?.name || null,
+            attachment1_code: fabricSpecObj.attachment1?.code || null,
+            attachment1_number: fabricSpecObj.attachment1?.code || null,
+            attachment1_length: fabricSpecObj.attachment1?.length || null,
+            attachment1_meters: fabricSpecObj.attachment1?.length || null,
+            attachment1_shade: fabricSpecObj.attachment1?.shade || null,
+            attachment2_name: fabricSpecObj.attachment2?.name || null,
+            attachment2_code: fabricSpecObj.attachment2?.code || null,
+            attachment2_number: fabricSpecObj.attachment2?.code || null,
+            attachment2_length: fabricSpecObj.attachment2?.length || null,
+            attachment2_meters: fabricSpecObj.attachment2?.length || null,
+            attachment2_shade: fabricSpecObj.attachment2?.shade || null,
+            fabrics: fabricSpecObj.all,
             sequence_no: seq,
             stage: "Cutting",
             status: "In Production",
@@ -1147,7 +1467,26 @@ async function generateChildJobCardsForJobCard(jobCard, options = {}) {
           admission_no: null,
           custom_measurements: {
             _fabric: fabricSpecObj,
+            _fabrics: fabricSpecObj.all,
           },
+          fabric_code: fabricSpecObj.code,
+          fabric_name: fabricSpecObj.name,
+          fabric_length: fabricSpecObj.length,
+          fabric_meters: fabricSpecObj.length,
+          fabric_shade: fabricSpecObj.shade,
+          attachment1_name: fabricSpecObj.attachment1?.name || null,
+          attachment1_code: fabricSpecObj.attachment1?.code || null,
+          attachment1_number: fabricSpecObj.attachment1?.code || null,
+          attachment1_length: fabricSpecObj.attachment1?.length || null,
+          attachment1_meters: fabricSpecObj.attachment1?.length || null,
+          attachment1_shade: fabricSpecObj.attachment1?.shade || null,
+          attachment2_name: fabricSpecObj.attachment2?.name || null,
+          attachment2_code: fabricSpecObj.attachment2?.code || null,
+          attachment2_number: fabricSpecObj.attachment2?.code || null,
+          attachment2_length: fabricSpecObj.attachment2?.length || null,
+          attachment2_meters: fabricSpecObj.attachment2?.length || null,
+          attachment2_shade: fabricSpecObj.attachment2?.shade || null,
+          fabrics: fabricSpecObj.all,
           sequence_no: seq,
           stage: "Cutting",
           status: "In Production",
@@ -1255,28 +1594,25 @@ exports.createJobCardFromOrder = async (req, res) => {
     const isMeasurementsPending = readiness.isMeasurementsPending;
     const pendingMeasurementsCount = readiness.pendingCount;
 
-    // Resolve fabric info from size_breakdown or item
-    let resolvedFabricId = size_breakdown?.fabric_id;
-    let resolvedFabricName = size_breakdown?.fabric_name;
-    let consumptionPerPc = parseFloat(
-      size_breakdown?.main_fabric_meters || 1.25,
+    // Resolve fabric info cross-checking with product, quotation, and class/dept specs
+    const stubJc = {
+      order_id,
+      item_id,
+      item_name,
+      design_number,
+      size_breakdown,
+      quantity,
+    };
+    const resolvedFab = await resolveAllFabricsForJobCard(
+      stubJc,
+      size_breakdown,
     );
 
-    if (!resolvedFabricId && item_id) {
-      const { data: qItem } = await supabase
-        .from("quotation_items")
-        .select("size_breakdown")
-        .eq("id", item_id)
-        .maybeSingle();
-      if (qItem?.size_breakdown) {
-        resolvedFabricId = resolvedFabricId || qItem.size_breakdown.fabric_id;
-        resolvedFabricName =
-          resolvedFabricName || qItem.size_breakdown.fabric_name;
-        consumptionPerPc = parseFloat(
-          qItem.size_breakdown.main_fabric_meters || consumptionPerPc,
-        );
-      }
-    }
+    let resolvedFabricId =
+      resolvedFab.main?.id || size_breakdown?.fabric_id || null;
+    let resolvedFabricName =
+      resolvedFab.name || size_breakdown?.fabric_name || null;
+    let consumptionPerPc = resolvedFab.length || 1.25;
 
     // Evaluate live fabric/material readiness (PRD M9.8)
     const fabricReadiness = await checkFabricReadiness(
@@ -1316,7 +1652,22 @@ exports.createJobCardFromOrder = async (req, res) => {
       ...(size_breakdown || {}),
       fabric_id: fabricReadiness.fabricId || resolvedFabricId || null,
       fabric_name: fabricReadiness.fabricName || resolvedFabricName || null,
+      fabric_code: resolvedFab.code || null,
+      fabric_shade: resolvedFab.shade || null,
       main_fabric_meters: consumptionPerPc,
+      attachment_fabric1_id: resolvedFab.attachment1?.id || null,
+      attachment_fabric1_name: resolvedFab.attachment1?.name || null,
+      attachment_fabric1_code: resolvedFab.attachment1?.code || null,
+      attachment_fabric1_meters: resolvedFab.attachment1?.length || null,
+      attachment_fabric1_shade: resolvedFab.attachment1?.shade || null,
+      attachment_fabric2_id: resolvedFab.attachment2?.id || null,
+      attachment_fabric2_name: resolvedFab.attachment2?.name || null,
+      attachment_fabric2_code: resolvedFab.attachment2?.code || null,
+      attachment_fabric2_meters: resolvedFab.attachment2?.length || null,
+      attachment_fabric2_shade: resolvedFab.attachment2?.shade || null,
+      product_id: resolvedFab.product_id || size_breakdown?.product_id || null,
+      product_name:
+        resolvedFab.product_name || size_breakdown?.product_name || null,
       required_fabric_meters: fabricReadiness.requiredMeters,
       available_fabric_meters: fabricReadiness.availableMeters,
       measurement_readiness: isMeasurementsPending
@@ -2381,9 +2732,17 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
       const mFabId = prod.fabric_id || catProd?.main_fabric_id;
       const mFabName =
         prod.fabric_name ||
-        catProd?.main_fabric ||
-        `${prod.product_name} Production Fabric`;
-      const mConsumption = parseFloat(prod.consumption) || 1.25;
+        (catProd?.name ? `${catProd.name} Production Fabric` : `${prod.product_name} Production Fabric`);
+      const catMainMeters =
+        catProd?.main_fabric !== undefined && catProd?.main_fabric !== null
+          ? parseFloat(catProd.main_fabric)
+          : NaN;
+      const mConsumption =
+        !isNaN(parseFloat(prod.consumption)) && parseFloat(prod.consumption) > 0
+          ? parseFloat(prod.consumption)
+          : !isNaN(catMainMeters) && catMainMeters > 0
+            ? catMainMeters
+            : 1.25;
       const matchedMain = findStockFabric(mFabId, mFabName);
 
       const mReqMeters = parseFloat((pQty * mConsumption).toFixed(2));
@@ -2430,12 +2789,20 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
       const att1Id =
         prod.attachment_fabric1_id || catProd?.attachment_fabric1_id;
       const att1Name =
-        prod.attachment_fabric1_name || catProd?.attachment_fabric1;
-      const att1Meters = parseFloat(
-        prod.attachment_fabric1_meters ||
-          catProd?.attachment_fabric1_meters ||
-          0,
-      );
+        prod.attachment_fabric1_name ||
+        (catProd?.attachment_fabric1_id ? "Attachment Fabric 1" : null);
+      const catAtt1Meters =
+        catProd?.attachment_fabric1 !== undefined &&
+        catProd?.attachment_fabric1 !== null
+          ? parseFloat(catProd.attachment_fabric1)
+          : NaN;
+      const att1Meters =
+        !isNaN(parseFloat(prod.attachment_fabric1_meters)) &&
+        parseFloat(prod.attachment_fabric1_meters) > 0
+          ? parseFloat(prod.attachment_fabric1_meters)
+          : !isNaN(catAtt1Meters) && catAtt1Meters > 0
+            ? catAtt1Meters
+            : 0;
 
       if ((att1Id || att1Name || att1Meters > 0) && att1Meters > 0) {
         const matchedAtt1 = findStockFabric(att1Id, att1Name);
@@ -2480,12 +2847,20 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
       const att2Id =
         prod.attachment_fabric2_id || catProd?.attachment_fabric2_id;
       const att2Name =
-        prod.attachment_fabric2_name || catProd?.attachment_fabric2;
-      const att2Meters = parseFloat(
-        prod.attachment_fabric2_meters ||
-          catProd?.attachment_fabric2_meters ||
-          0,
-      );
+        prod.attachment_fabric2_name ||
+        (catProd?.attachment_fabric2_id ? "Attachment Fabric 2" : null);
+      const catAtt2Meters =
+        catProd?.attachment_fabric2 !== undefined &&
+        catProd?.attachment_fabric2 !== null
+          ? parseFloat(catProd.attachment_fabric2)
+          : NaN;
+      const att2Meters =
+        !isNaN(parseFloat(prod.attachment_fabric2_meters)) &&
+        parseFloat(prod.attachment_fabric2_meters) > 0
+          ? parseFloat(prod.attachment_fabric2_meters)
+          : !isNaN(catAtt2Meters) && catAtt2Meters > 0
+            ? catAtt2Meters
+            : 0;
 
       if ((att2Id || att2Name || att2Meters > 0) && att2Meters > 0) {
         const matchedAtt2 = findStockFabric(att2Id, att2Name);
@@ -3352,75 +3727,52 @@ exports.getChildJobCards = async (req, res) => {
     const enrichPiece = (p) => {
       const fMeta = p.custom_measurements?._fabric || {};
       const mainMeta = fMeta.main || {};
-      const att1Meta = fMeta.attachment1 || null;
-      const att2Meta = fMeta.attachment2 || null;
 
+      // Authoritative Main Fabric from product/order cross-check
       const fabCode =
-        p.fabric_code || fMeta.code || mainMeta.code || resolvedFabrics.code;
+        resolvedFabrics.code ||
+        p.fabric_code ||
+        fMeta.code ||
+        mainMeta.code ||
+        "FAB-STD";
       const fabName =
-        p.fabric_name || fMeta.name || mainMeta.name || resolvedFabrics.name;
+        resolvedFabrics.name ||
+        p.fabric_name ||
+        fMeta.name ||
+        mainMeta.name ||
+        "Standard Production Fabric";
       const fabLength =
+        resolvedFabrics.length ||
         p.fabric_length ||
         p.fabric_meters ||
-        fMeta.length ||
-        mainMeta.length ||
-        resolvedFabrics.length;
+        1.25;
       const fabShade =
+        resolvedFabrics.shade ||
         p.fabric_shade ||
         fMeta.shade ||
         mainMeta.shade ||
-        resolvedFabrics.shade;
-
-      const att1Name =
-        p.attachment1_name ||
-        att1Meta?.name ||
-        resolvedFabrics.attachment1?.name ||
-        null;
-      const att1Code =
-        p.attachment1_code ||
-        att1Meta?.code ||
-        resolvedFabrics.attachment1?.code ||
-        null;
-      const att1Length =
-        p.attachment1_length ||
-        p.attachment1_meters ||
-        att1Meta?.length ||
-        resolvedFabrics.attachment1?.length ||
-        null;
-      const att1Shade =
-        p.attachment1_shade ||
-        att1Meta?.shade ||
-        resolvedFabrics.attachment1?.shade ||
         null;
 
-      const att2Name =
-        p.attachment2_name ||
-        att2Meta?.name ||
-        resolvedFabrics.attachment2?.name ||
-        null;
-      const att2Code =
-        p.attachment2_code ||
-        att2Meta?.code ||
-        resolvedFabrics.attachment2?.code ||
-        null;
-      const att2Length =
-        p.attachment2_length ||
-        p.attachment2_meters ||
-        att2Meta?.length ||
-        resolvedFabrics.attachment2?.length ||
-        null;
-      const att2Shade =
-        p.attachment2_shade ||
-        att2Meta?.shade ||
-        resolvedFabrics.attachment2?.shade ||
-        null;
+      // Attachment 1 - ONLY if resolvedFabrics has genuine attachment1 configured
+      const att1Obj = resolvedFabrics.attachment1;
+      const att1Name = att1Obj ? att1Obj.name : null;
+      const att1Code = att1Obj ? att1Obj.code : null;
+      const att1Length = att1Obj ? att1Obj.length : null;
+      const att1Shade = att1Obj ? att1Obj.shade : null;
+
+      // Attachment 2 - ONLY if resolvedFabrics has genuine attachment2 configured
+      const att2Obj = resolvedFabrics.attachment2;
+      const att2Name = att2Obj ? att2Obj.name : null;
+      const att2Code = att2Obj ? att2Obj.code : null;
+      const att2Length = att2Obj ? att2Obj.length : null;
+      const att2Shade = att2Obj ? att2Obj.shade : null;
 
       const allFabrics =
-        Array.isArray(p.fabrics) && p.fabrics.length > 0
-          ? p.fabrics
-          : Array.isArray(fMeta.all) && fMeta.all.length > 0
-            ? fMeta.all
-            : resolvedFabrics.all;
+        Array.isArray(resolvedFabrics.all) && resolvedFabrics.all.length > 0
+          ? resolvedFabrics.all
+          : Array.isArray(p.fabrics) && p.fabrics.length > 0
+            ? p.fabrics
+            : [];
 
       return {
         ...p,
@@ -3718,76 +4070,45 @@ exports.scanChildBarcode = async (req, res) => {
       jcSb,
     );
 
-    const mainMeta = fMeta.main || {};
-    const att1Meta = fMeta.attachment1 || null;
-    const att2Meta = fMeta.attachment2 || null;
-
     const fabCode =
-      piece.fabric_code || fMeta.code || mainMeta.code || resolvedFabrics.code;
+      resolvedFabrics.code ||
+      piece.fabric_code ||
+      fMeta.code ||
+      "FAB-STD";
     const fabName =
-      piece.fabric_name || fMeta.name || mainMeta.name || resolvedFabrics.name;
+      resolvedFabrics.name ||
+      piece.fabric_name ||
+      fMeta.name ||
+      "Standard Production Fabric";
     const fabLength =
+      resolvedFabrics.length ||
       piece.fabric_length ||
       piece.fabric_meters ||
-      fMeta.length ||
-      mainMeta.length ||
-      resolvedFabrics.length;
+      1.25;
     const fabShade =
+      resolvedFabrics.shade ||
       piece.fabric_shade ||
       fMeta.shade ||
-      mainMeta.shade ||
-      resolvedFabrics.shade;
-
-    const att1Name =
-      piece.attachment1_name ||
-      att1Meta?.name ||
-      resolvedFabrics.attachment1?.name ||
-      null;
-    const att1Code =
-      piece.attachment1_code ||
-      att1Meta?.code ||
-      resolvedFabrics.attachment1?.code ||
-      null;
-    const att1Length =
-      piece.attachment1_length ||
-      piece.attachment1_meters ||
-      att1Meta?.length ||
-      resolvedFabrics.attachment1?.length ||
-      null;
-    const att1Shade =
-      piece.attachment1_shade ||
-      att1Meta?.shade ||
-      resolvedFabrics.attachment1?.shade ||
       null;
 
-    const att2Name =
-      piece.attachment2_name ||
-      att2Meta?.name ||
-      resolvedFabrics.attachment2?.name ||
-      null;
-    const att2Code =
-      piece.attachment2_code ||
-      att2Meta?.code ||
-      resolvedFabrics.attachment2?.code ||
-      null;
-    const att2Length =
-      piece.attachment2_length ||
-      piece.attachment2_meters ||
-      att2Meta?.length ||
-      resolvedFabrics.attachment2?.length ||
-      null;
-    const att2Shade =
-      piece.attachment2_shade ||
-      att2Meta?.shade ||
-      resolvedFabrics.attachment2?.shade ||
-      null;
+    const att1Obj = resolvedFabrics.attachment1;
+    const att1Name = att1Obj ? att1Obj.name : null;
+    const att1Code = att1Obj ? att1Obj.code : null;
+    const att1Length = att1Obj ? att1Obj.length : null;
+    const att1Shade = att1Obj ? att1Obj.shade : null;
+
+    const att2Obj = resolvedFabrics.attachment2;
+    const att2Name = att2Obj ? att2Obj.name : null;
+    const att2Code = att2Obj ? att2Obj.code : null;
+    const att2Length = att2Obj ? att2Obj.length : null;
+    const att2Shade = att2Obj ? att2Obj.shade : null;
 
     const allFabrics =
-      Array.isArray(piece.fabrics) && piece.fabrics.length > 0
-        ? piece.fabrics
-        : Array.isArray(fMeta.all) && fMeta.all.length > 0
-          ? fMeta.all
-          : resolvedFabrics.all;
+      Array.isArray(resolvedFabrics.all) && resolvedFabrics.all.length > 0
+        ? resolvedFabrics.all
+        : Array.isArray(piece.fabrics) && piece.fabrics.length > 0
+          ? piece.fabrics
+          : [];
 
     res.json({
       ...piece,

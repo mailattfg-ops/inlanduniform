@@ -222,6 +222,12 @@ ALTER TABLE IF EXISTS public.child_job_cards
   ADD COLUMN IF NOT EXISTS fabric_name TEXT,
   ADD COLUMN IF NOT EXISTS fabric_length NUMERIC;
 
+-- 18. Add email column to leads table
+ALTER TABLE IF EXISTS public.leads
+  ADD COLUMN IF NOT EXISTS email TEXT;
+
 NOTIFY pgrst, 'reload schema';
+
+
 
 

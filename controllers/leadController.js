@@ -93,7 +93,7 @@ module.exports = {
     },
 
     create: async (req, res) => {
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
+        const { name, phone, email, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
@@ -119,25 +119,44 @@ module.exports = {
             }
 
             const lead_code = await generateNextLeadCodeLocal();
-            const { data, error } = await supabase
+            const insertPayload = {
+                lead_code,
+                name,
+                phone: phone || null,
+                email: email && email.trim() ? email.trim() : null,
+                industry_id: industry_id || null,
+                address: address || null,
+                assigned_staff_id: assigned_staff_id || null,
+                branch_id: targetBranchId,
+                status: status || 'New',
+                remarks: remarksJson
+            };
+
+            let { data, error } = await supabase
                 .from('leads')
-                .insert([{
-                    lead_code,
-                    name,
-                    phone: phone || null,
-                    industry_id: industry_id || null,
-                    address: address || null,
-                    assigned_staff_id: assigned_staff_id || null,
-                    branch_id: targetBranchId,
-                    status: status || 'New',
-                    remarks: remarksJson
-                }])
+                .insert([insertPayload])
                 .select(`
                     *,
                     industries ( id, name ),
                     employees ( id, full_name, employee_id )
                 `)
                 .single();
+
+            if (error && error.message && error.message.toLowerCase().includes('email')) {
+                // If Supabase schema does not have 'email' column yet, retry without email
+                delete insertPayload.email;
+                const retry = await supabase
+                    .from('leads')
+                    .insert([insertPayload])
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .single();
+                data = retry.data;
+                error = retry.error;
+            }
 
             if (error) throw error;
             res.json(data);
@@ -148,7 +167,7 @@ module.exports = {
 
     update: async (req, res) => {
         const { id } = req.params;
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
+        const { name, phone, email, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
@@ -162,6 +181,10 @@ module.exports = {
                 status: status || 'New',
                 updated_at: new Date()
             };
+
+            if (email !== undefined) {
+                updateFields.email = email && email.trim() ? email.trim() : null;
+            }
 
             if (branch_id !== undefined) {
                 updateFields.branch_id = branch_id;
@@ -182,7 +205,7 @@ module.exports = {
                 }
             }
 
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('leads')
                 .update(updateFields)
                 .eq('id', id)
@@ -192,6 +215,23 @@ module.exports = {
                     employees ( id, full_name, employee_id )
                 `)
                 .single();
+
+            if (error && error.message && error.message.toLowerCase().includes('email')) {
+                // If Supabase schema does not have 'email' column yet, retry without email
+                delete updateFields.email;
+                const retry = await supabase
+                    .from('leads')
+                    .update(updateFields)
+                    .eq('id', id)
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .single();
+                data = retry.data;
+                error = retry.error;
+            }
 
             if (error) throw error;
             res.json(data);
@@ -237,7 +277,7 @@ module.exports = {
             const cleanLeadCode = (lead.lead_code || `id${lead.id}`).toLowerCase().replace(/[^a-z0-9]/g, '');
             const baseUsername = `cust_${cleanLeadCode || Math.random().toString(36).substring(7)}`;
             let username = baseUsername;
-            let email = username;
+            let email = (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : username;
             const password = crypto.randomBytes(4).toString('hex').toUpperCase();
 
             // Check if username/email already exists in user_profiles to avoid unique constraint violation
@@ -265,7 +305,12 @@ module.exports = {
             let userSuffix = 1;
             while (existingUser) {
                 username = `${baseUsername}_${userSuffix}`;
-                email = username;
+                if (lead.email && lead.email.trim()) {
+                    const parts = lead.email.trim().toLowerCase().split('@');
+                    email = parts.length === 2 ? `${parts[0]}+${userSuffix}@${parts[1]}` : `${username}@customer.local`;
+                } else {
+                    email = username;
+                }
                 const { data: checkCollision } = await supabase
                     .from('user_profiles')
                     .select('id')
@@ -371,6 +416,7 @@ module.exports = {
                 organization: orgData,
                 credentials: {
                     username,
+                    email,
                     password
                 }
             });

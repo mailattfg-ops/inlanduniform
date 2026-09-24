@@ -146,6 +146,17 @@ exports.getStats = async (req, res) => {
         const { count: totalProducts } = await supabase.from('products').select('*', { count: 'exact', head: true });
         const { count: totalFabrics } = await supabase.from('fabrics').select('*', { count: 'exact', head: true });
         const { count: totalButtons } = await supabase.from('buttons').select('*', { count: 'exact', head: true });
+        let totalTrims = 0;
+        try {
+            const { count: trimsCount, error: trimsErr } = await supabase.from('trims').select('*', { count: 'exact', head: true });
+            if (!trimsErr && trimsCount !== null) {
+                totalTrims = trimsCount;
+            } else {
+                totalTrims = totalButtons || 0;
+            }
+        } catch {
+            totalTrims = totalButtons || 0;
+        }
 
         const firstDayOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
         const { count: newMembersThisMonth, error: growthError } = await supabase
@@ -163,7 +174,7 @@ exports.getStats = async (req, res) => {
             totalMembers: totalMembers || 0,
             totalOrganizations: totalOrgs || 0,
             totalMeasurements: totalMeasurements || 0,
-            totalInventory: (totalFabrics || 0) + (totalButtons || 0),
+            totalInventory: (totalFabrics || 0) + (totalTrims || 0),
             totalProducts: totalProducts || 0,
             newMembersThisMonth: newMembersThisMonth || 0,
             reach: reach || 87 

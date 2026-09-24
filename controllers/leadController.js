@@ -63,19 +63,29 @@ module.exports = {
                 query = query.eq('branch_id', userBranchId);
             }
 
-            const { data, error } = await query.order('created_at', { ascending: false });
+            let { data, error } = await query.order('created_at', { ascending: false });
 
-            if (error) throw error;
+            if (error) {
+                console.warn('Leads join query failed, falling back to plain select:', error.message);
+                let fallbackQuery = supabase.from('leads').select('*');
+                if (!isAdmin && userBranchId) {
+                    fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                }
+                const fallbackRes = await fallbackQuery.order('created_at', { ascending: false });
+                if (fallbackRes.error) throw fallbackRes.error;
+                data = fallbackRes.data;
+            }
             res.json(data || []);
         } catch (err) {
-            res.status(500).json({ error: err.message });
+            console.error('LEADS CONTROLLER CATCH:', err);
+            res.status(500).json({ error: err.message || err.details || JSON.stringify(err) });
         }
     },
 
     getDetails: async (req, res) => {
         const { id } = req.params;
         try {
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('leads')
                 .select(`
                     *,
@@ -85,7 +95,12 @@ module.exports = {
                 .eq('id', id)
                 .single();
 
-            if (error) throw error;
+            if (error) {
+                console.warn('Lead getDetails join query failed, falling back to plain select:', error.message);
+                const fallbackRes = await supabase.from('leads').select('*').eq('id', id).single();
+                if (fallbackRes.error) throw fallbackRes.error;
+                data = fallbackRes.data;
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });

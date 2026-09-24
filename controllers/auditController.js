@@ -29,7 +29,7 @@ exports.getAuditLogs = async (req, res) => {
             entity_type: l.entity_type,
             user: l.performer?.full_name || 'System / External',
             details: JSON.stringify(l.details),
-            time: new Date(l.created_at).toLocaleString(),
+            time: l.created_at,
             created_at: l.created_at
         }));
 

@@ -27,6 +27,18 @@ router.post('/threads', requireAdmin, inventoryController.threads.create);
 router.put('/threads/:id', requireAdmin, inventoryController.threads.update);
 router.delete('/threads/:id', requireAdmin, inventoryController.threads.delete);
 
+// Trim Categories (Dynamic Trims Master)
+router.get('/trim-categories', inventoryController.trimCategories.list);
+router.post('/trim-categories', requireAdmin, inventoryController.trimCategories.create);
+router.put('/trim-categories/:id', requireAdmin, inventoryController.trimCategories.update);
+router.delete('/trim-categories/:id', requireAdmin, inventoryController.trimCategories.delete);
+
+// Unified Trims Catalog & Items
+router.get('/trims', inventoryController.trims.list);
+router.post('/trims', requireAdmin, inventoryController.trims.create);
+router.put('/trims/:id', requireAdmin, inventoryController.trims.update);
+router.delete('/trims/:id', requireAdmin, inventoryController.trims.delete);
+
 
 
 // PRD M7.6 & M12.5 Barcode / Item Lookup for Invoicing & Counter Sales

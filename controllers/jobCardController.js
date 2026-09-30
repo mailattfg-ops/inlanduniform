@@ -1,5 +1,5 @@
 const supabase = require("../config/supabase");
-const { toSafeInt, isUuid } = require("../utils/sanitize");
+const { toSafeInt } = require("../utils/sanitize");
 
 const VALID_STANDARD_SIZES = new Set([
   "XXS",
@@ -644,8 +644,8 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
   // Fallback product lookup by art_number, design_number or item_name
   if (!product && jobCard?.design_number) {
     const rawDn = jobCard.design_number.trim();
-    // 1. Try matching art_number prefix if rawDn starts with gender-dress-pattern (e.g. 1-4J012)
-    const artMatch = rawDn.match(/^([0-9]+-[A-Za-z0-9]+)/);
+    // 1. Try matching art_number prefix if rawDn starts with prefix-gender-pattern (e.g. 4J-1-012) or legacy formats (e.g. 1-4J012, 4J-1012)
+    const artMatch = rawDn.match(/^([A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+|[A-Za-z0-9]+-[A-Za-z0-9]+)/);
     if (artMatch) {
       try {
         const { data: pByArt } = await supabase

@@ -12,6 +12,10 @@ router.put('/:id', authMiddleware, checkPermission(['manage_system']), branchCon
 router.get('/users/:branchId', authMiddleware, branchController.listBranchUsers);
 router.post('/users', authMiddleware, checkPermission(['manage_system']), branchController.createBranchUser);
 
+// Branch Employees / Staff Directory
+router.get('/employees/all', authMiddleware, branchController.listBranchEmployees);
+router.get('/:branchId/employees', authMiddleware, branchController.listBranchEmployees);
+
 // Branch-Specific Stock & Inventory
 router.get('/inventory/:branchId', authMiddleware, branchController.getBranchInventory);
 router.post('/inventory/adjust', authMiddleware, branchController.adjustBranchInventory);

@@ -267,7 +267,21 @@ exports.buttons = {
         .select("*")
         .order("code", { ascending: true });
       if (error) throw error;
-      res.json(data);
+      if (data && data.length > 0) {
+        return res.json(data);
+      }
+      // Fallback to trims table for Button category
+      const { data: trimButtons, error: trimError } = await supabase
+        .from("trims")
+        .select("*, trim_categories(name)");
+      if (!trimError && trimButtons && trimButtons.length > 0) {
+        const filtered = trimButtons.filter(t => 
+          (t.trim_categories?.name || '').toLowerCase() === 'button' ||
+          (t.name || '').toLowerCase().includes('button')
+        );
+        return res.json(filtered.length > 0 ? filtered : trimButtons);
+      }
+      res.json(data || []);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -425,7 +439,28 @@ exports.threads = {
         .select("*")
         .order("code", { ascending: true });
       if (error) throw error;
-      res.json(data);
+      if (data && data.length > 0) {
+        return res.json(data.map(t => ({
+          ...t,
+          uom: t.uom || 'Cones'
+        })));
+      }
+      // Fallback to trims table for Thread category
+      const { data: trimThreads, error: trimError } = await supabase
+        .from("trims")
+        .select("*, trim_categories(name, default_uom)");
+      if (!trimError && trimThreads && trimThreads.length > 0) {
+        const filtered = trimThreads.filter(t => 
+          (t.trim_categories?.name || '').toLowerCase() === 'thread' ||
+          (t.name || '').toLowerCase().includes('thread')
+        );
+        const listToReturn = filtered.length > 0 ? filtered : trimThreads;
+        return res.json(listToReturn.map(t => ({
+          ...t,
+          uom: t.uom || t.trim_categories?.default_uom || 'Cones'
+        })));
+      }
+      res.json(data || []);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -589,16 +624,21 @@ exports.trimCategories = {
         .order("name", { ascending: true });
 
       if (error) {
+        console.error('❌ [DATABASE ERROR] Table "trim_categories" query failed:');
+        console.error('  Code:', error.code, '| Message:', error.message);
         if (error.code === "42P01") {
-          return res.json({
+          console.error('  Hint: Table public.trim_categories does not exist in database.');
+          return res.status(404).json({
             error: "SCHEMA_MISSING",
             message: "trim_categories table not created yet.",
           });
         }
-        throw error;
+        return res.status(500).json({ error: error.message, code: error.code });
       }
+      // Live data directly from database! If table is blank, returns []
       res.json(data || []);
     } catch (err) {
+      console.error('❌ [DATABASE ERROR] trimCategories.list exception:', err.message);
       res.status(500).json({ error: err.message });
     }
   },
@@ -718,16 +758,30 @@ exports.trims = {
 
       const { data, error } = await query;
       if (error) {
+        console.error('❌ [DATABASE ERROR] Table "trims" query failed:');
+        console.error('  Code:', error.code, '| Message:', error.message);
         if (error.code === "42P01") {
-          return res.json({
+          console.error('  Hint: Table public.trims does not exist in database.');
+          return res.status(404).json({
             error: "SCHEMA_MISSING",
             message: "trims table not created yet.",
           });
         }
-        throw error;
+        return res.status(500).json({ error: error.message, code: error.code });
       }
-      res.json(data || []);
+      // Live data directly from database! Enrich thread UOM with 'Cones' if not specified
+      const enriched = (data || []).map(t => {
+        const catName = (t.category?.name || t.trim_categories?.name || '').toLowerCase();
+        const isThread = catName.includes('thread') || (t.name || '').toLowerCase().includes('thread') || (t.code || '').toUpperCase().startsWith('THR-');
+        const defaultUom = t.category?.default_uom || (isThread ? 'Cones' : 'Pcs');
+        return {
+          ...t,
+          uom: (isThread && (!t.uom || t.uom.toLowerCase() === 'pcs')) ? defaultUom : (t.uom || defaultUom)
+        };
+      });
+      res.json(enriched);
     } catch (err) {
+      console.error('❌ [DATABASE ERROR] trims.list exception:', err.message);
       res.status(500).json({ error: err.message });
     }
   },

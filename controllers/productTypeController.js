@@ -8,8 +8,9 @@ exports.listProductTypes = async (req, res) => {
             .order('name', { ascending: true });
 
         if (error) throw error;
-        res.json(data);
+        res.json(data || []);
     } catch (err) {
+        console.error('[ProductTypes] listProductTypes error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };

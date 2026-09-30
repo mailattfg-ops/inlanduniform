@@ -22,6 +22,15 @@ router.post('/patterns', authMiddleware, checkPermission(['manage_products']), c
 router.put('/patterns/:id', authMiddleware, checkPermission(['manage_products']), controller.updatePattern);
 router.delete('/patterns/:id', authMiddleware, checkPermission(['manage_products']), controller.deletePattern);
 
+// --- FITS MASTER ---
+router.get('/fits', controller.listFits);
+router.post('/fits', authMiddleware, checkPermission(['manage_products']), controller.createFit);
+router.put('/fits/:id', authMiddleware, checkPermission(['manage_products']), controller.updateFit);
+router.delete('/fits/:id', authMiddleware, checkPermission(['manage_products']), controller.deleteFit);
+
+// --- COMBINED MASTER DATA ---
+router.get('/master-data', controller.getMasterData);
+
 // --- COMBINED ART NUMBERS ---
 router.get('/art-numbers', controller.listArtNumbers);
 router.post('/art-numbers', authMiddleware, checkPermission(['manage_products']), controller.createArtNumber);

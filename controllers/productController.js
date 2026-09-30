@@ -1,18 +1,27 @@
 const supabase = require('../config/supabase');
 
 const parseMaterialsMetadata = (rawText) => {
-    if (!rawText) return { main_fabric_id: null, attachment_fabric1_id: null, attachment_fabric2_id: null, cleanMaterials: '' };
+    if (!rawText) return { main_fabric_id: null, attachment_fabric1_id: null, attachment_fabric2_id: null, main_fabric_meters: null, cleanMaterials: '' };
     
     let text = rawText;
     let main_fabric_id = null;
     let attachment_fabric1_id = null;
     let attachment_fabric2_id = null;
+    let main_fabric_meters = null;
 
     // Parse main_fabric_id
     const mainMatch = text.match(/\[MainFabricId:\s*([^\]]+)\]/);
     if (mainMatch) {
         main_fabric_id = mainMatch[1];
         text = text.replace(/\[MainFabricId:\s*([^\]]+)\]/, '').trim();
+    }
+
+    // Parse main_fabric_meters
+    const mainMetersMatch = text.match(/\[MainFabricMeters:\s*([^\]]+)\]/);
+    if (mainMetersMatch) {
+        const parsed = parseFloat(mainMetersMatch[1]);
+        if (!isNaN(parsed)) main_fabric_meters = parsed;
+        text = text.replace(/\[MainFabricMeters:\s*([^\]]+)\]/, '').trim();
     }
     
     // Parse attachment_fabric1_id
@@ -29,14 +38,17 @@ const parseMaterialsMetadata = (rawText) => {
         text = text.replace(/\[AttachmentFabric2Id:\s*([^\]]+)\]/, '').trim();
     }
 
-    return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, cleanMaterials: text };
+    return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters, cleanMaterials: text };
 };
 
-const serializeMaterialsMetadata = (materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id) => {
+const serializeMaterialsMetadata = (materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters) => {
     let text = materials || '';
     if (main_fabric_id) text = `[MainFabricId: ${main_fabric_id}] ${text}`;
     if (attachment_fabric1_id) text = `[AttachmentFabric1Id: ${attachment_fabric1_id}] ${text}`;
     if (attachment_fabric2_id) text = `[AttachmentFabric2Id: ${attachment_fabric2_id}] ${text}`;
+    if (main_fabric_meters !== undefined && main_fabric_meters !== null && main_fabric_meters !== '') {
+        text = `[MainFabricMeters: ${main_fabric_meters}] ${text}`;
+    }
     return text.trim();
 };
 
@@ -65,67 +77,176 @@ async function findOrCreateProductDesignNumber(code) {
 }
 
 
-async function registerArtNumberInHub(art_number, base_size, fit) {
+async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
     if (!art_number) return;
     try {
         const parts = art_number.split('-');
-        if (parts.length !== 2) return;
-        
-        const genderCode = parts[0];
-        const rest = parts[1]; // e.g. "4J012"
-        
-        // 1. Fetch gender
-        const { data: genderData } = await supabase
+        let dressCode = null;
+        let genderCode = null;
+        let patternCode = null;
+        let fitCode = null;
+        let artAllowance = allowance || null;
+
+        // 5-part: [DressPrefix]-[Gender]-[Pattern]-[Fit]-[Allowance] (e.g. 4J-1-012-R-2)
+        if (parts.length === 5) {
+            dressCode = parts[0];
+            genderCode = parts[1];
+            patternCode = parts[2];
+            fitCode = parts[3].toUpperCase();
+            artAllowance = parts[4];
+        } else if (parts.length === 4) {
+            // A) Option 1 with allowance: [DressPrefix]-[GenderPattern]-[Fit]-[Allowance] (e.g. 4J-1012-R-2)
+            // B) Legacy 4-part: [DressPrefix]-[Gender]-[Pattern]-[Fit] (e.g. 4J-1-012-R)
+            if (parts[2].length <= 2 && isNaN(Number(parts[2]))) {
+                dressCode = parts[0];
+                const middle = parts[1];
+                genderCode = middle.slice(0, 1);
+                patternCode = middle.slice(1);
+                fitCode = parts[2].toUpperCase();
+                artAllowance = parts[3];
+            } else {
+                dressCode = parts[0];
+                genderCode = parts[1];
+                patternCode = parts[2];
+                fitCode = parts[3].toUpperCase();
+            }
+        } else if (parts.length === 3) {
+            dressCode = parts[0];
+            const middle = parts[1];
+            const lastPart = parts[2];
+
+            // If lastPart starts with fit letters (S, R, L, etc.) followed optionally by allowance (e.g. R2, R1.5, R)
+            const fitMatch = lastPart.match(/^([A-Za-z]+)(.*)$/);
+            if (fitMatch && isNaN(Number(lastPart))) {
+                fitCode = fitMatch[1].toUpperCase();
+                if (fitMatch[2] && !artAllowance) {
+                    artAllowance = fitMatch[2].trim();
+                }
+                genderCode = middle.slice(0, 1);
+                patternCode = middle.slice(1);
+            } else {
+                // Legacy: [DressPrefix]-[Gender]-[Pattern] (e.g. 4J-1-012)
+                genderCode = parts[1];
+                patternCode = parts[2];
+                if (fit) {
+                    fitCode = fit.trim().slice(0, 1).toUpperCase();
+                }
+            }
+        } else if (parts.length === 2) {
+            // Check if parts[0] is Dress Prefix (e.g. 4J-1012)
+            const { data: dMatch } = await supabase.from('art_dresses').select('id, code').eq('code', parts[0]).maybeSingle();
+            if (dMatch) {
+                dressCode = dMatch.code;
+                const rest = parts[1];
+                const { data: genders } = await supabase.from('art_genders').select('id, code');
+                if (genders) {
+                    for (const g of genders) {
+                        if (rest.startsWith(g.code)) {
+                            genderCode = g.code;
+                            patternCode = rest.slice(g.code.length);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Legacy: [GenderCode]-[DressPrefix][PatternCode] (e.g. 1-4J012)
+                genderCode = parts[0];
+                const rest = parts[1];
+                const { data: dresses } = await supabase.from('art_dresses').select('id, code');
+                if (dresses) {
+                    for (const d of dresses) {
+                        if (rest.startsWith(d.code)) {
+                            dressCode = d.code;
+                            patternCode = rest.slice(d.code.length);
+                            break;
+                        }
+                    }
+                }
+            }
+            if (fit) {
+                fitCode = fit.trim().slice(0, 1).toUpperCase();
+            }
+        }
+
+        if (!dressCode || !genderCode || !patternCode) return;
+
+        // 1. Fetch dress
+        const { data: foundDress } = await supabase
+            .from('art_dresses')
+            .select('id')
+            .eq('code', dressCode)
+            .maybeSingle();
+
+        // 2. Fetch gender
+        const { data: foundGender } = await supabase
             .from('art_genders')
             .select('id')
             .eq('code', genderCode)
-            .single();
-            
-        if (!genderData) return;
-        
-        // 2. Fetch all dresses to find prefix match
-        const { data: dresses } = await supabase
-            .from('art_dresses')
-            .select('id, code');
-            
-        if (!dresses) return;
-        
-        let foundDress = null;
-        let foundPattern = null;
-        
-        for (const d of dresses) {
-            if (rest.startsWith(d.code)) {
-                const remainder = rest.slice(d.code.length);
-                
-                // 3. Fetch matching pattern
-                const { data: patternData } = await supabase
-                    .from('art_patterns')
-                    .select('id')
-                    .eq('code', remainder)
-                    .single();
-                    
-                if (patternData) {
-                    foundDress = d;
-                    foundPattern = patternData;
-                    break;
-                }
+            .maybeSingle();
+
+        // 3. Fetch pattern
+        let { data: foundPattern } = await supabase
+            .from('art_patterns')
+            .select('id')
+            .eq('code', patternCode)
+            .maybeSingle();
+
+        if (!foundPattern && patternCode) {
+            const { data: newPat } = await supabase
+                .from('art_patterns')
+                .insert([{ code: patternCode, name: `Pattern ${patternCode}` }])
+                .select('id')
+                .maybeSingle();
+            foundPattern = newPat;
+        }
+
+        // 4. Fetch / resolve fit
+        let foundFitId = null;
+        if (fitCode) {
+            let { data: foundFit } = await supabase
+                .from('art_fits')
+                .select('id, name')
+                .eq('code', fitCode)
+                .maybeSingle();
+
+            if (!foundFit && fitCode) {
+                const fitName = fitCode === 'S' ? 'Slim Fit' : (fitCode === 'L' ? 'Loose Fit' : 'Regular Fit');
+                const { data: newFit } = await supabase
+                    .from('art_fits')
+                    .insert([{ code: fitCode, name: fitName }])
+                    .select('id, name')
+                    .maybeSingle();
+                foundFit = newFit;
+            }
+            if (foundFit) {
+                foundFitId = foundFit.id;
+                if (!fit) fit = foundFit.name;
             }
         }
-        
-        if (foundDress && foundPattern) {
+
+        if (foundDress && foundGender && foundPattern) {
+            const artInsertData = {
+                dress_id: foundDress.id,
+                gender_id: foundGender.id,
+                pattern_id: foundPattern.id,
+                fit_id: foundFitId,
+                code: art_number,
+                art_number: art_number,
+                base_size: base_size || null,
+                fit: fit || null,
+                allowance: artAllowance ? String(artAllowance).trim() : null
+            };
             const { error: insertError } = await supabase
                 .from('art_numbers')
-                .insert([{
-                    dress_id: foundDress.id,
-                    gender_id: genderData.id,
-                    pattern_id: foundPattern.id,
-                    code: art_number,
-                    base_size: base_size || null,
-                    fit: fit || null
-                }]);
-                
+                .insert([artInsertData]);
+
             if (insertError && insertError.code !== '23505') {
-                console.error('Error inserting art number into hub:', insertError.message);
+                if (insertError.message?.includes('allowance')) {
+                    delete artInsertData.allowance;
+                    await supabase.from('art_numbers').insert([artInsertData]);
+                } else {
+                    console.error('Error inserting art number into hub:', insertError.message);
+                }
             }
         }
     } catch (err) {
@@ -144,26 +265,158 @@ exports.listProducts = async (req, res) => {
             `)
             .order('created_at', { ascending: false });
 
-        if (prodError) throw prodError;
+        if (prodError) {
+            console.error('❌ [DATABASE ERROR] Table "products" query failed:');
+            console.error('  Code:', prodError.code, '| Message:', prodError.message);
+            if (prodError.code === '42P01') {
+                console.error('  Hint: Table public.products is missing in database.');
+            } else if (prodError.code === '42703') {
+                console.error('  Hint: A referenced column does not exist on products or joined tables.');
+            }
+            return res.status(500).json({ error: prodError.message, code: prodError.code });
+        }
 
         const formatted = (products || []).map(p => {
             const meta = parseMaterialsMetadata(p.materials);
+            const resolvedMainFabric = (p.main_fabric !== null && p.main_fabric !== undefined && p.main_fabric !== '')
+                ? Number(p.main_fabric)
+                : (p.class_fabric_consumption?._base_main_fabric !== undefined && p.class_fabric_consumption?._base_main_fabric !== null && p.class_fabric_consumption?._base_main_fabric !== ''
+                    ? Number(p.class_fabric_consumption._base_main_fabric)
+                    : (meta.main_fabric_meters !== null ? Number(meta.main_fabric_meters) : (p.class_fabric_consumption?.Corporate?.main_fabric ? Number(p.class_fabric_consumption.Corporate.main_fabric) : null)));
+
             return {
                 ...p,
+                main_fabric: resolvedMainFabric,
+                main_fabric_meters: resolvedMainFabric,
                 design_number: p.design_number_ref?.code || null,
                 design_number_ref: undefined,
-                main_fabric_id: meta.main_fabric_id,
-                attachment_fabric1_id: meta.attachment_fabric1_id,
-                attachment_fabric2_id: meta.attachment_fabric2_id,
+                main_fabric_id: p.main_fabric_id || meta.main_fabric_id || p.class_fabric_consumption?._base_main_fabric_id || null,
+                attachment_fabric1_id: p.attachment_fabric1_id || meta.attachment_fabric1_id,
+                attachment_fabric2_id: p.attachment_fabric2_id || meta.attachment_fabric2_id,
+                trims: Array.isArray(p.trims) && p.trims.length > 0 ? p.trims : (p.class_fabric_consumption?._base_trims || []),
+                attachment_fabrics: Array.isArray(p.attachment_fabrics) && p.attachment_fabrics.length > 0 ? p.attachment_fabrics : (p.class_fabric_consumption?._base_attachment_fabrics || []),
                 materials: meta.cleanMaterials
             };
         });
 
+        // Live data directly from database! If table is blank, returns []
         res.json(formatted || []);
     } catch (err) {
+        console.error('❌ [DATABASE ERROR] listProducts caught exception:', err.message);
         res.status(500).json({ error: err.message });
     }
 };
+
+async function safeInsertProduct(payload) {
+    let currentPayload = { ...payload };
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const { data, error } = await supabase
+            .from('products')
+            .insert([currentPayload])
+            .select()
+            .single();
+
+        if (!error) return { data, error: null };
+
+        // Handle missing column in schema cache
+        const missingColMatch = error.message && error.message.match(/Could not find the '([^']+)' column of 'products'/i);
+        if (missingColMatch && missingColMatch[1] && currentPayload[missingColMatch[1]] !== undefined) {
+            console.warn(`Column '${missingColMatch[1]}' not found in products table schema cache. Omitting and retrying...`);
+            delete currentPayload[missingColMatch[1]];
+            continue;
+        }
+
+        // Handle foreign key constraint violations
+        if (error.code === '23503' || (error.message && error.message.includes('foreign key constraint'))) {
+            if (error.message.includes('button_id') && currentPayload.button_id !== undefined) {
+                console.warn('Foreign key violation on button_id. Omitting button_id and retrying...');
+                delete currentPayload.button_id;
+                continue;
+            }
+            if (error.message.includes('thread_id') && currentPayload.thread_id !== undefined) {
+                console.warn('Foreign key violation on thread_id. Omitting thread_id and retrying...');
+                delete currentPayload.thread_id;
+                continue;
+            }
+            if ((error.message.includes('main_fabric_id') || error.message.includes('fabric')) && currentPayload.main_fabric_id !== undefined) {
+                console.warn('Foreign key violation on fabric. Omitting main_fabric_id and retrying...');
+                delete currentPayload.main_fabric_id;
+                delete currentPayload.attachment_fabric1_id;
+                delete currentPayload.attachment_fabric2_id;
+                continue;
+            }
+            if (error.message.includes('product_type_id') && currentPayload.product_type_id !== undefined) {
+                console.warn('Foreign key violation on product_type_id. Omitting product_type_id and retrying...');
+                delete currentPayload.product_type_id;
+                continue;
+            }
+            if (error.message.includes('size_chart_id') && currentPayload.size_chart_id !== undefined) {
+                console.warn('Foreign key violation on size_chart_id. Omitting size_chart_id and retrying...');
+                delete currentPayload.size_chart_id;
+                continue;
+            }
+        }
+
+        return { data: null, error };
+    }
+    return { data: null, error: new Error('Max retry attempts reached inserting product') };
+}
+
+async function safeUpdateProduct(id, payload) {
+    let currentPayload = { ...payload };
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const { data, error } = await supabase
+            .from('products')
+            .update(currentPayload)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (!error) return { data, error: null };
+
+        // Handle missing column in schema cache
+        const missingColMatch = error.message && error.message.match(/Could not find the '([^']+)' column of 'products'/i);
+        if (missingColMatch && missingColMatch[1] && currentPayload[missingColMatch[1]] !== undefined) {
+            console.warn(`Column '${missingColMatch[1]}' not found in products table schema cache. Omitting and retrying...`);
+            delete currentPayload[missingColMatch[1]];
+            continue;
+        }
+
+        // Handle foreign key constraint violations
+        if (error.code === '23503' || (error.message && error.message.includes('foreign key constraint'))) {
+            if (error.message.includes('button_id') && currentPayload.button_id !== undefined) {
+                console.warn('Foreign key violation on button_id. Omitting button_id and retrying...');
+                delete currentPayload.button_id;
+                continue;
+            }
+            if (error.message.includes('thread_id') && currentPayload.thread_id !== undefined) {
+                console.warn('Foreign key violation on thread_id. Omitting thread_id and retrying...');
+                delete currentPayload.thread_id;
+                continue;
+            }
+            if ((error.message.includes('main_fabric_id') || error.message.includes('fabric')) && currentPayload.main_fabric_id !== undefined) {
+                console.warn('Foreign key violation on fabric. Omitting main_fabric_id and retrying...');
+                delete currentPayload.main_fabric_id;
+                delete currentPayload.attachment_fabric1_id;
+                delete currentPayload.attachment_fabric2_id;
+                continue;
+            }
+            if (error.message.includes('product_type_id') && currentPayload.product_type_id !== undefined) {
+                console.warn('Foreign key violation on product_type_id. Omitting product_type_id and retrying...');
+                delete currentPayload.product_type_id;
+                continue;
+            }
+            if (error.message.includes('size_chart_id') && currentPayload.size_chart_id !== undefined) {
+                console.warn('Foreign key violation on size_chart_id. Omitting size_chart_id and retrying...');
+                delete currentPayload.size_chart_id;
+                continue;
+            }
+        }
+
+        return { data: null, error };
+    }
+    return { data: null, error: new Error('Max retry attempts reached updating product') };
+}
 
 exports.createProduct = async (req, res) => {
     try {
@@ -171,7 +424,8 @@ exports.createProduct = async (req, res) => {
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
-            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks
+            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
+            trims, attachment_fabrics, allowance
         } = req.body;
         
         if (!design_number || design_number.trim() === '') {
@@ -182,46 +436,88 @@ exports.createProduct = async (req, res) => {
 
         const designNumberId = await findOrCreateProductDesignNumber(design_number);
 
+        // Map dynamic trims counts and preserve valid button_id/thread_id
+        if (Array.isArray(trims) && trims.length > 0) {
+            const btnTrim = trims.find(t => (t.uom || '').toLowerCase() === 'pcs' || (t.name || '').toLowerCase().includes('button') || String(t.trim_id).includes('btn'));
+            if (btnTrim) {
+                if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
+            }
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            if (thrTrim) {
+                if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
+            }
+        }
+
+        // Validate button_id and thread_id against their respective tables to prevent FK constraint failures
+        if (button_id) {
+            const { data: btnMatch } = await supabase.from('buttons').select('id').eq('id', button_id).maybeSingle();
+            if (!btnMatch) button_id = null;
+        }
+        if (thread_id) {
+            const { data: thrMatch } = await supabase.from('threads').select('id').eq('id', thread_id).maybeSingle();
+            if (!thrMatch) thread_id = null;
+        }
+
+        if (Array.isArray(attachment_fabrics) && attachment_fabrics.length > 0) {
+            if (attachment_fabrics[0]) {
+                if (attachment_fabric1 === undefined || attachment_fabric1 === null) attachment_fabric1 = attachment_fabrics[0].meters;
+                if (!attachment_fabric1_id) attachment_fabric1_id = attachment_fabrics[0].fabric_id || null;
+            }
+            if (attachment_fabrics[1]) {
+                if (attachment_fabric2 === undefined || attachment_fabric2 === null) attachment_fabric2 = attachment_fabrics[1].meters;
+                if (!attachment_fabric2_id) attachment_fabric2_id = attachment_fabrics[1].fabric_id || null;
+            }
+        }
+
+        // Store dynamic trims and attachment fabrics inside class_fabric_consumption metadata
+        const enrichedClassConsumption = {
+            ...(class_fabric_consumption || {}),
+            _base_main_fabric: (main_fabric !== undefined && main_fabric !== null && main_fabric !== '') ? parseFloat(main_fabric) : ((class_fabric_consumption && class_fabric_consumption._base_main_fabric) || null),
+            _base_main_fabric_id: main_fabric_id || null,
+            _base_trims: Array.isArray(trims) ? trims : ((class_fabric_consumption && class_fabric_consumption._base_trims) || []),
+            _base_attachment_fabrics: Array.isArray(attachment_fabrics) ? attachment_fabrics : ((class_fabric_consumption && class_fabric_consumption._base_attachment_fabrics) || [])
+        };
+
         const serializedMaterials = serializeMaterialsMetadata(
             materials,
             main_fabric_id,
             attachment_fabric1_id,
-            attachment_fabric2_id
+            attachment_fabric2_id,
+            main_fabric
         );
         
-        const { data, error } = await supabase
-            .from('products')
-            .insert([{ 
-                name, 
-                art_number, 
-                gender, 
-                measurements, 
-                materials: serializedMaterials, 
-                entry_methods, 
-                size_chart_id, 
-                category, 
-                product_type_id, 
-                sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
-                retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
-                main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
-                attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
-                attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
-                button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
-                thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
-                button_id: button_id || null,
-                thread_id: thread_id || null,
-                base_size: base_size || null,
-                fit: fit || null,
-                images: images || [],
-                design_number_id: designNumberId,
-                other_sizes: other_sizes || null,
-                other_fits: other_fits || null,
-                measurement_type: measurement_type || null,
-                class_fabric_consumption: class_fabric_consumption || {},
-                remarks: remarks || null
-            }])
-            .select()
-            .single();
+        const insertPayload = { 
+            name, 
+            art_number, 
+            gender, 
+            measurements, 
+            materials: serializedMaterials, 
+            entry_methods, 
+            size_chart_id, 
+            category, 
+            product_type_id, 
+            sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
+            retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+            main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
+            attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
+            attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,
+            button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
+            thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
+            button_id: button_id || null,
+            thread_id: thread_id || null,
+            base_size: base_size || null,
+            fit: fit || null,
+            allowance: allowance !== undefined && allowance !== null && allowance !== '' ? String(allowance).trim() : null,
+            images: images || [],
+            design_number_id: designNumberId,
+            other_sizes: other_sizes || null,
+            other_fits: other_fits || null,
+            measurement_type: measurement_type || null,
+            class_fabric_consumption: enrichedClassConsumption,
+            remarks: remarks || null
+        };
+
+        const { data, error } = await safeInsertProduct(insertPayload);
 
         if (error) {
             if (error.code === '23505') {
@@ -238,30 +534,46 @@ exports.createProduct = async (req, res) => {
         if (art_number) {
             try {
                 const artParts = art_number.split('-');
-                if (artParts.length === 2) {
+                let patternCode = null;
+                if (artParts.length === 3) {
+                    patternCode = artParts[2];
+                } else if (artParts.length === 2) {
                     const { data: allDresses } = await supabase.from('art_dresses').select('code');
-                    const rest = artParts[1];
-                    let patternCode = rest;
-                    if (allDresses) {
-                        for (const d of allDresses) {
-                            if (rest.startsWith(d.code)) {
-                                patternCode = rest.slice(d.code.length);
-                                break;
+                    const isFirstDress = allDresses?.some(d => d.code === artParts[0]);
+                    if (isFirstDress) {
+                        const rest = artParts[1];
+                        const { data: allGenders } = await supabase.from('art_genders').select('code');
+                        if (allGenders) {
+                            for (const g of allGenders) {
+                                if (rest.startsWith(g.code)) {
+                                    patternCode = rest.slice(g.code.length);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        const rest = artParts[1];
+                        if (allDresses) {
+                            for (const d of allDresses) {
+                                if (rest.startsWith(d.code)) {
+                                    patternCode = rest.slice(d.code.length);
+                                    break;
+                                }
                             }
                         }
                     }
-                    if (patternCode) {
-                        const { data: existingPattern } = await supabase
-                            .from('art_patterns')
-                            .select('id')
-                            .eq('code', patternCode)
-                            .maybeSingle();
-                        if (!existingPattern) {
-                            await supabase.from('art_patterns').insert([{
-                                code: patternCode,
-                                name: `Pattern ${patternCode}`
-                            }]);
-                        }
+                }
+                if (patternCode) {
+                    const { data: existingPattern } = await supabase
+                        .from('art_patterns')
+                        .select('id')
+                        .eq('code', patternCode)
+                        .maybeSingle();
+                    if (!existingPattern) {
+                        await supabase.from('art_patterns').insert([{
+                            code: patternCode,
+                            name: `Pattern ${patternCode}`
+                        }]);
                     }
                 }
             } catch (patternErr) {
@@ -270,7 +582,7 @@ exports.createProduct = async (req, res) => {
         }
 
         // Register in Art Number Hub
-        await registerArtNumberInHub(data.art_number, data.base_size, data.fit);
+        await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
 
         res.json(data);
     } catch (err) {
@@ -281,20 +593,63 @@ exports.createProduct = async (req, res) => {
 exports.updateProduct = async (req, res) => {
     try {
         const { id } = req.params;
-        const { 
+        let { 
             name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
-            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks
+            other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
+            trims, attachment_fabrics, allowance
         } = req.body;
         
         const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
+
+        // Map dynamic trims counts and preserve valid button_id/thread_id
+        if (Array.isArray(trims) && trims.length > 0) {
+            const btnTrim = trims.find(t => (t.uom || '').toLowerCase() === 'pcs' || (t.name || '').toLowerCase().includes('button') || String(t.trim_id).includes('btn'));
+            if (btnTrim) {
+                if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
+            }
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            if (thrTrim) {
+                if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
+            }
+        }
+
+        // Validate button_id and thread_id against their respective tables
+        if (button_id) {
+            const { data: btnMatch } = await supabase.from('buttons').select('id').eq('id', button_id).maybeSingle();
+            if (!btnMatch) button_id = null;
+        }
+        if (thread_id) {
+            const { data: thrMatch } = await supabase.from('threads').select('id').eq('id', thread_id).maybeSingle();
+            if (!thrMatch) thread_id = null;
+        }
+
+        if (Array.isArray(attachment_fabrics) && attachment_fabrics.length > 0) {
+            if (attachment_fabrics[0]) {
+                if (attachment_fabric1 === undefined || attachment_fabric1 === null) attachment_fabric1 = attachment_fabrics[0].meters;
+                if (!attachment_fabric1_id) attachment_fabric1_id = attachment_fabrics[0].fabric_id || null;
+            }
+            if (attachment_fabrics[1]) {
+                if (attachment_fabric2 === undefined || attachment_fabric2 === null) attachment_fabric2 = attachment_fabrics[1].meters;
+                if (!attachment_fabric2_id) attachment_fabric2_id = attachment_fabrics[1].fabric_id || null;
+            }
+        }
+
+        const enrichedClassConsumption = {
+            ...(class_fabric_consumption || {}),
+            _base_main_fabric: (main_fabric !== undefined && main_fabric !== null && main_fabric !== '') ? parseFloat(main_fabric) : ((class_fabric_consumption && class_fabric_consumption._base_main_fabric) || null),
+            _base_main_fabric_id: main_fabric_id || null,
+            _base_trims: Array.isArray(trims) ? trims : ((class_fabric_consumption && class_fabric_consumption._base_trims) || []),
+            _base_attachment_fabrics: Array.isArray(attachment_fabrics) ? attachment_fabrics : ((class_fabric_consumption && class_fabric_consumption._base_attachment_fabrics) || [])
+        };
 
         const serializedMaterials = serializeMaterialsMetadata(
             materials,
             main_fabric_id,
             attachment_fabric1_id,
-            attachment_fabric2_id
+            attachment_fabric2_id,
+            main_fabric
         );
 
         // Fetch current base product values to detect button/thread changes
@@ -353,42 +708,40 @@ exports.updateProduct = async (req, res) => {
             }
 
             // Keep the base product's button/thread unchanged (don't overwrite)
-            const { data, error } = await supabase
-                .from('products')
-                .update({ 
-                    name, 
-                    art_number, 
-                    gender, 
-                    measurements, 
-                    materials: serializedMaterials, 
-                    entry_methods, 
-                    size_chart_id,
-                    category,
-                    product_type_id,
-                    sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
-                    retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
-                    main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
-                    attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
-                    attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
-                    // Keep base button/thread unchanged - they belong to the base design number
-                    button_count: currentProduct?.button_count !== undefined ? currentProduct.button_count : 0,
-                    thread_count: currentProduct?.thread_count !== undefined ? currentProduct.thread_count : 0,
-                    button_id: normCurButtonId,
-                    thread_id: normCurThreadId,
-                    base_size: base_size || null,
-                    fit: fit || null,
-                    images: images || [],
-                    design_number_id: designNumberId || currentProduct?.design_number_id || null,
-                    other_sizes: other_sizes || null,
-                    other_fits: other_fits || null,
-                    measurement_type: measurement_type || null,
-                    class_fabric_consumption: class_fabric_consumption || {},
-                    remarks: remarks || null,
-                    updated_at: new Date() 
-                })
-                .eq('id', id)
-                .select()
-                .single();
+            const updatePayload1 = { 
+                name, 
+                art_number, 
+                gender, 
+                measurements, 
+                materials: serializedMaterials, 
+                entry_methods, 
+                size_chart_id,
+                category,
+                product_type_id, 
+                sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
+                retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+                main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
+                attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
+                attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,
+                // Keep base button/thread unchanged - they belong to the base design number
+                button_count: currentProduct?.button_count !== undefined ? currentProduct.button_count : 0,
+                thread_count: currentProduct?.thread_count !== undefined ? currentProduct.thread_count : 0,
+                button_id: normCurButtonId,
+                thread_id: normCurThreadId,
+                base_size: base_size || null,
+                fit: fit || null,
+                allowance: allowance !== undefined && allowance !== null && allowance !== '' ? String(allowance).trim() : null,
+                images: images || [],
+                design_number_id: designNumberId || currentProduct?.design_number_id || null,
+                other_sizes: other_sizes || null,
+                other_fits: other_fits || null,
+                measurement_type: measurement_type || null,
+                class_fabric_consumption: enrichedClassConsumption,
+                remarks: remarks || null,
+                updated_at: new Date() 
+            };
+
+            const { data, error } = await safeUpdateProduct(id, updatePayload1);
 
             if (error) {
                 if (error.code === '23505') {
@@ -399,46 +752,44 @@ exports.updateProduct = async (req, res) => {
 
             const { logAction } = require('../utils/logger');
             await logAction(req.user.id, 'UPDATE', 'product', id, { name: data.name });
-            await registerArtNumberInHub(data.art_number, data.base_size, data.fit);
+            await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
             return res.json({ ...data, variant_created: true });
         }
         
         // No button/thread change – regular update
-        const { data, error } = await supabase
-            .from('products')
-            .update({ 
-                name, 
-                art_number, 
-                gender, 
-                measurements, 
-                materials: serializedMaterials, 
-                entry_methods, 
-                size_chart_id,
-                category,
-                product_type_id,
-                sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
-                retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
-                main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseInt(main_fabric, 10) : 0,
-                attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseInt(attachment_fabric1, 10) : null,
-                attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseInt(attachment_fabric2, 10) : null,
-                button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
-                thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
-                button_id: button_id || null,
-                thread_id: thread_id || null,
-                base_size: base_size || null,
-                fit: fit || null,
-                images: images || [],
-                design_number_id: designNumberId,
-                other_sizes: other_sizes || null,
-                other_fits: other_fits || null,
-                measurement_type: measurement_type || null,
-                class_fabric_consumption: class_fabric_consumption || {},
-                remarks: remarks || null,
-                updated_at: new Date() 
-            })
-            .eq('id', id)
-            .select()
-            .single();
+        const updatePayload2 = { 
+            name, 
+            art_number, 
+            gender, 
+            measurements, 
+            materials: serializedMaterials, 
+            entry_methods, 
+            size_chart_id, 
+            category, 
+            product_type_id, 
+            sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
+            retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+            main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
+            attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
+            attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,
+            button_count: button_count !== '' && button_count !== null && button_count !== undefined ? parseInt(button_count, 10) : 0,
+            thread_count: thread_count !== '' && thread_count !== null && thread_count !== undefined ? parseInt(thread_count, 10) : 0,
+            button_id: button_id || null,
+            thread_id: thread_id || null,
+            base_size: base_size || null,
+            fit: fit || null,
+            allowance: allowance !== undefined && allowance !== null && allowance !== '' ? String(allowance).trim() : null,
+            images: images || [],
+            design_number_id: designNumberId,
+            other_sizes: other_sizes || null,
+            other_fits: other_fits || null,
+            measurement_type: measurement_type || null,
+            class_fabric_consumption: enrichedClassConsumption,
+            remarks: remarks || null,
+            updated_at: new Date() 
+        };
+
+        const { data, error } = await safeUpdateProduct(id, updatePayload2);
 
         if (error) {
             if (error.code === '23505') {
@@ -452,7 +803,7 @@ exports.updateProduct = async (req, res) => {
         await logAction(req.user.id, 'UPDATE', 'product', id, { name: data.name });
 
         // Register in Art Number Hub (handles new edit updates)
-        await registerArtNumberInHub(data.art_number, data.base_size, data.fit);
+        await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
 
         res.json(data);
     } catch (err) {

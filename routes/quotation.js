@@ -21,6 +21,9 @@ router.get('/design-numbers', authMiddleware, quotationController.listDesignNumb
 // Update individual design number details
 router.put('/design-numbers/:id', authMiddleware, checkPermission(['manage_products']), quotationController.updateDesignNumber);
 
+// Preview or resolve design number based on product + fabrics + trims combination
+router.post('/resolve-design-number', authMiddleware, quotationController.resolveDesignNumber);
+
 
 // Get single quotation details
 router.get('/:id', authMiddleware, quotationController.getQuotationDetails);

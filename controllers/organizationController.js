@@ -47,11 +47,16 @@ exports.getOrganizations = async (req, res) => {
     const { industryId } = req.query;
     const userRole = req.user?.role || '';
     const userBranchId = req.user?.branchId;
-    const isAdmin = userRole === 'Admin' || userRole === 'Super Admin' || userRole === 'SuperAdmin';
+    const isAdmin = 
+      userRole === 'Admin' || 
+      userRole === 'Super Admin' || 
+      userRole === 'SuperAdmin' ||
+      userRole === 'System Administrator' ||
+      userRole === 'System Admin';
 
     let query = supabase
       .from('organizations')
-      .select('*, industries(name), relationship_manager:relationship_manager_id(id, full_name, employee_id), assigned_operator:assigned_operator_id(id, full_name, employee_id)')
+      .select('*, industries(name)')
       .order('created_at', { ascending: false });
 
     const roleLower = (userRole || '').toLowerCase();
@@ -73,10 +78,42 @@ exports.getOrganizations = async (req, res) => {
 
     const { data, error } = await query;
 
-    if (error) throw error;
-    console.log(`[DB] Fetched ${data.length} organizations`);
-    res.json(data);
+    if (error) {
+      console.error('❌ [DATABASE ERROR] Table "organizations" query failed:');
+      console.error('  Code:', error.code, '| Message:', error.message);
+      if (error.code === '42P01') {
+        console.error('  Hint: Table public.organizations does not exist in database.');
+      } else if (error.code === '42703') {
+        console.error('  Hint: A referenced column does not exist on organizations or joined tables.');
+      }
+      return res.status(500).json({ error: error.message, code: error.code });
+    }
+
+    // Safely attach relationship_manager from employees table if relationship_manager_id is present
+    let enriched = data || [];
+    const rmIds = enriched.map(o => o.relationship_manager_id).filter(Boolean);
+    if (rmIds.length > 0) {
+      try {
+        const { data: emps } = await supabase
+          .from('employees')
+          .select('id, full_name, employee_id')
+          .in('id', rmIds);
+        if (emps && emps.length > 0) {
+          const empMap = new Map(emps.map(e => [e.id, e]));
+          enriched = enriched.map(o => ({
+            ...o,
+            relationship_manager: o.relationship_manager_id ? empMap.get(o.relationship_manager_id) || null : null
+          }));
+        }
+      } catch (empErr) {
+        console.warn('[getOrganizations] Could not enrich RM:', empErr.message);
+      }
+    }
+
+    console.log(`[DB] Fetched ${enriched.length} organizations`);
+    res.json(enriched);
   } catch (err) {
+    console.error('[getOrganizations] Exception:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -101,8 +138,36 @@ exports.createOrganization = async (req, res) => {
       return res.status(400).json({ error: `Username "${username}" is already in use. Please choose a different username.` });
     }
 
-    // 2. Create User Profile first
-    const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
+    // 2. Create User Profile first - dynamically resolve valid user_type_id from user_types table
+    let orgRoleId = null;
+    const { data: roleRecords } = await supabase
+      .from('user_types')
+      .select('id, name')
+      .or('name.ilike.%organis%,name.ilike.%customer%,name.ilike.%school%')
+      .limit(1);
+
+    if (roleRecords && roleRecords.length > 0) {
+      orgRoleId = roleRecords[0].id;
+    } else {
+      const { data: anyRole } = await supabase
+        .from('user_types')
+        .select('id')
+        .limit(1);
+      if (anyRole && anyRole.length > 0) {
+        orgRoleId = anyRole[0].id;
+      } else {
+        const { data: newRole } = await supabase
+          .from('user_types')
+          .insert([{
+            name: 'Organisation',
+            permissions: ['view_schools', 'view_own_students', 'manage_classes', 'view_own_measurements']
+          }])
+          .select('id')
+          .single();
+        if (newRole) orgRoleId = newRole.id;
+      }
+    }
+
     const { data: userData, error: userError } = await supabase
       .from('user_profiles')
       .insert([{
@@ -110,7 +175,7 @@ exports.createOrganization = async (req, res) => {
         username: username,
         email: username,
         password: password,
-        user_type_id: ORG_ROLE_ID
+        user_type_id: orgRoleId
       }])
       .select()
       .single();
@@ -153,19 +218,72 @@ exports.createOrganization = async (req, res) => {
 
 exports.updateOrganization = async (req, res) => {
     const { id } = req.params;
-    const { name, address, industry_id, relationship_manager_id, assigned_operator_id, customer_code } = req.body;
+    const { 
+      name, 
+      address, 
+      industry_id, 
+      relationship_manager_id, 
+      customer_code,
+      is_active,
+      is_special,
+      is_risk,
+      client_tag
+    } = req.body;
+
     try {
-      const { data, error } = await supabase
+      const updatePayload = {};
+      if (name !== undefined) updatePayload.name = name;
+      if (address !== undefined) updatePayload.address = address;
+      if (industry_id !== undefined) updatePayload.industry_id = industry_id;
+      if (relationship_manager_id !== undefined) updatePayload.relationship_manager_id = relationship_manager_id;
+      if (customer_code !== undefined) updatePayload.customer_code = customer_code;
+      
+      // Active / Inactive
+      if (is_active !== undefined) {
+        updatePayload.is_active = Boolean(is_active);
+      }
+
+      // Mutually Exclusive Special vs Risk rule
+      if (is_special !== undefined || is_risk !== undefined || client_tag !== undefined) {
+        if (client_tag === 'special' || is_special === true) {
+          updatePayload.is_special = true;
+          updatePayload.is_risk = false;
+        } else if (client_tag === 'risk' || is_risk === true) {
+          updatePayload.is_special = false;
+          updatePayload.is_risk = true;
+        } else if (client_tag === 'standard' || (is_special === false && is_risk === false)) {
+          updatePayload.is_special = false;
+          updatePayload.is_risk = false;
+        }
+      }
+
+      let { data, error } = await supabase
         .from('organizations')
-        .update({ name, address, industry_id, relationship_manager_id, assigned_operator_id, customer_code })
+        .update(updatePayload)
         .eq('id', id)
         .select()
         .single();
+
+      // Graceful fallback if is_special or is_risk column is not yet present in schema
+      if (error && error.message && (error.message.includes('is_special') || error.message.includes('is_risk'))) {
+        delete updatePayload.is_special;
+        delete updatePayload.is_risk;
+        const retry = await supabase
+          .from('organizations')
+          .update(updatePayload)
+          .eq('id', id)
+          .select()
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
   
       if (error) throw error;
 
       // 2. Log the action
-      await logAction(req.user.id, 'UPDATE', 'organization', id, { updated_name: name });
+      if (req.user?.id) {
+        await logAction(req.user.id, 'UPDATE', 'organization', id, { updated_fields: Object.keys(updatePayload) });
+      }
 
       res.json({ success: true, data });
     } catch (err) {

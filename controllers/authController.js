@@ -197,7 +197,12 @@ exports.login = async (req, res) => {
     // Log the login action safely
     try {
       const { logAction } = require('../utils/logger');
-      await logAction(fullUser.id, 'LOGIN', 'auth', fullUser.id, { email: fullUser.email });
+      await logAction(fullUser.id, 'LOGIN', 'auth', fullUser.id, { 
+        email: fullUser.email,
+        performed_by_name: fullUser.fullName || fullUser.full_name || fullUser.email,
+        role: fullUser.role,
+        branch_name: fullUser.branchName || null
+      });
     } catch (e) {
       // Ignore logging errors if table doesn't exist
     }

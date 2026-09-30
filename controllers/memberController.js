@@ -128,7 +128,30 @@ exports.createStudent = async (req, res) => {
     }
 
     const generatedPassword = generatePassword();
-    const STUDENT_ROLE_ID = '64ae559c-42c2-4592-a1b7-0ef7b3a17d17';
+    
+    // Dynamically resolve Student/Entity role
+    let studentRoleId = null;
+    const { data: roleRecords } = await supabase
+      .from('user_types')
+      .select('id, name')
+      .or('name.ilike.%student%,name.ilike.%entity%')
+      .limit(1);
+
+    if (roleRecords && roleRecords.length > 0) {
+      studentRoleId = roleRecords[0].id;
+    } else {
+      const { data: anyRole } = await supabase.from('user_types').select('id').limit(1);
+      if (anyRole && anyRole.length > 0) {
+        studentRoleId = anyRole[0].id;
+      } else {
+        const { data: newRole } = await supabase
+          .from('user_types')
+          .insert([{ name: 'Entity', permissions: ['view_own_students', 'view_own_measurements'] }])
+          .select('id')
+          .single();
+        if (newRole) studentRoleId = newRole.id;
+      }
+    }
 
     // 3. Create User Profile
     const { data: userData, error: userError } = await supabase
@@ -137,7 +160,7 @@ exports.createStudent = async (req, res) => {
         full_name: full_name,
         email: studentEmail,
         password: generatedPassword,
-        user_type_id: STUDENT_ROLE_ID
+        user_type_id: studentRoleId
       }])
       .select()
       .single();
@@ -285,16 +308,114 @@ exports.bulkCreateStudents = async (req, res) => {
 
   let successCount = 0;
   let errors = [];
-  const MEMBER_ROLE_ID = '64ae559c-42c2-4592-a1b7-0ef7b3a17d17';
+
+  // Dynamically resolve Member / Entity role ID
+  let memberRoleId = null;
+  try {
+    const { data: roleRecords } = await supabase
+      .from('user_types')
+      .select('id, name')
+      .or('name.ilike.%entity%,name.ilike.%student%,name.ilike.%member%')
+      .limit(1);
+
+    if (roleRecords && roleRecords.length > 0) {
+      memberRoleId = roleRecords[0].id;
+    } else {
+      const { data: anyRole } = await supabase.from('user_types').select('id').limit(1);
+      if (anyRole && anyRole.length > 0) memberRoleId = anyRole[0].id;
+    }
+  } catch (roleErr) {
+    console.warn('[BULK REGISTER] Could not fetch role from user_types:', roleErr.message);
+  }
+
+  // Pre-load all departments for organizations present in batch
+  const orgIds = [...new Set(members.map(m => m.organization_id).filter(Boolean))];
+  const deptMap = new Map(); // key: `${orgId}_${stringVal}`, value: numericDeptId
+  if (orgIds.length > 0) {
+    try {
+      const { data: depts } = await supabase
+        .from('departments')
+        .select('id, organization_id, name, section, division')
+        .in('organization_id', orgIds);
+      if (depts) {
+        depts.forEach(d => {
+          deptMap.set(`${d.organization_id}_${String(d.id)}`, d.id);
+          if (d.name) deptMap.set(`${d.organization_id}_${d.name.toLowerCase().trim()}`, d.id);
+          if (d.section) deptMap.set(`${d.organization_id}_${d.section.toLowerCase().trim()}`, d.id);
+          if (d.division) deptMap.set(`${d.organization_id}_${d.division.toLowerCase().trim()}`, d.id);
+        });
+      }
+    } catch (deptErr) {
+      console.warn('[BULK REGISTER] Could not pre-fetch departments:', deptErr.message);
+    }
+  }
 
   for (let i = 0; i < members.length; i++) {
     const s = members[i];
     try {
-      const { full_name, admission_no, organization_id, department_id, contact_mobile, gender } = s;
+      let { full_name, admission_no, organization_id, department_id, contact_mobile, contact_number, gender } = s;
+      const contact = contact_mobile || contact_number || '';
       
       // Basic Validation
-      if (!full_name || !admission_no || !organization_id || !department_id || !gender) {
-        throw new Error(`Missing required fields: ${[!full_name && 'name', !admission_no && 'admission_no', !organization_id && 'organization_id', !department_id && 'department_id', !gender && 'gender'].filter(Boolean).join(', ')}`);
+      if (!full_name || full_name.trim() === '') {
+        throw new Error('Full Name is required');
+      }
+
+      // If admission_no is missing, auto-generate a unique fallback
+      if (!admission_no || String(admission_no).trim() === '') {
+        admission_no = `REF-${Date.now().toString().slice(-6)}-${i+1}`;
+      } else {
+        admission_no = String(admission_no).trim();
+      }
+
+      if (!organization_id && req.user?.organizationId) {
+        organization_id = req.user.organizationId;
+      }
+
+      if (organization_id && isNaN(Number(organization_id))) {
+        const { data: matchedOrg } = await supabase
+          .from('organizations')
+          .select('id')
+          .or(`name.ilike.%${organization_id}%,customer_code.eq.${organization_id}`)
+          .limit(1)
+          .maybeSingle();
+        if (matchedOrg) {
+          organization_id = matchedOrg.id;
+        }
+      }
+
+      if (!organization_id) {
+        throw new Error('Organization ID or Name is required');
+      }
+
+      // Resolve department_id if given as string name or numeric ID
+      let resolvedDeptId = null;
+      if (department_id) {
+        const lookupKey = `${organization_id}_${String(department_id).toLowerCase().trim()}`;
+        if (deptMap.has(lookupKey)) {
+          resolvedDeptId = deptMap.get(lookupKey);
+        } else if (!isNaN(Number(department_id))) {
+          resolvedDeptId = Number(department_id);
+        } else {
+          // If department name does not exist, auto-create it for the organization!
+          try {
+            const { data: newDept } = await supabase
+              .from('departments')
+              .insert([{
+                organization_id,
+                name: String(department_id).trim()
+              }])
+              .select('id, name')
+              .single();
+            if (newDept) {
+              resolvedDeptId = newDept.id;
+              deptMap.set(`${organization_id}_${newDept.name.toLowerCase().trim()}`, newDept.id);
+              deptMap.set(`${organization_id}_${String(newDept.id)}`, newDept.id);
+            }
+          } catch (createDeptErr) {
+            console.warn('[BULK REGISTER] Could not auto-create department:', createDeptErr.message);
+          }
+        }
       }
 
       // Check for existing admission_no in same organization
@@ -327,40 +448,60 @@ exports.bulkCreateStudents = async (req, res) => {
       const generatedPassword = generatePassword();
 
       // 2. Create User Profile
+      const userPayload = {
+        full_name,
+        email: studentEmail,
+        password: generatedPassword
+      };
+      if (memberRoleId) {
+        userPayload.user_type_id = memberRoleId;
+      }
+
       const { data: userData, error: userError } = await supabase
         .from('user_profiles')
-        .insert([{
-          full_name,
-          email: studentEmail,
-          password: generatedPassword,
-          user_type_id: MEMBER_ROLE_ID
-        }])
+        .insert([userPayload])
         .select()
         .single();
 
       if (userError) throw userError;
 
       // 3. Create Member record
+      const memberPayload = {
+        full_name,
+        admission_no,
+        organization_id,
+        department_id: resolvedDeptId,
+        contact_mobile: contact,
+        contact_number: contact,
+        gender: gender || 'Male',
+        user_id: userData.id,
+        status: 'Active'
+      };
+
       const { error: studentError } = await supabase
         .from('registry_members')
-        .insert([{
-          full_name,
-          admission_no,
-          organization_id,
-          department_id,
-          contact_mobile,
-          gender,
-          user_id: userData.id,
-          status: 'Active'
-        }]);
+        .insert([memberPayload]);
 
       if (studentError) {
-         await supabase.from('user_profiles').delete().eq('id', userData.id);
-         throw studentError;
+         // If contact_mobile column missing, retry with only contact_number
+         if (studentError.message && studentError.message.includes('contact_mobile')) {
+            delete memberPayload.contact_mobile;
+            const { error: retryError } = await supabase
+              .from('registry_members')
+              .insert([memberPayload]);
+            if (retryError) {
+              await supabase.from('user_profiles').delete().eq('id', userData.id);
+              throw retryError;
+            }
+         } else {
+            await supabase.from('user_profiles').delete().eq('id', userData.id);
+            throw studentError;
+         }
       }
 
       successCount++;
     } catch (err) {
+      console.error(`[BULK REGISTER ERROR] Row ${i + 1} (${members[i]?.full_name || 'Unknown'}):`, err.message);
       errors.push({
         row: i + 1,
         student: s.full_name || `Row ${i+1}`,
@@ -369,6 +510,7 @@ exports.bulkCreateStudents = async (req, res) => {
     }
   }
 
+  console.log(`[BULK REGISTER RESULT] Success: ${successCount}, Errors: ${errors.length}`);
   res.json({ 
     success: successCount > 0, 
     successCount, 

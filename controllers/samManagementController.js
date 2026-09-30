@@ -61,12 +61,19 @@ exports.listConfigurations = async (req, res) => {
             .order('name', { ascending: true });
 
         if (error) {
+            console.error('❌ [DATABASE ERROR] sam_configurations query failed:');
+            console.error('  Code:', error.code, '| Message:', error.message);
             if (error.code === '42P01') {
-                return res.json({ error: 'SCHEMA_MISSING', message: 'SAM tables have not been created yet.' });
+                console.error('  Hint: Table "sam_configurations" is missing in database.');
+                return res.status(404).json({ error: 'SCHEMA_MISSING', message: 'SAM tables have not been created yet.' });
             }
-            throw error;
+            if (error.code === '42703') {
+                console.error('  Hint: A referenced column does not exist on sam_configurations or joined tables.');
+            }
+            return res.status(500).json({ error: error.message, code: error.code });
         }
 
+        // Live data directly from database! If table is blank, return []
         res.json(data || []);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -658,13 +665,22 @@ exports.listMargins = async (req, res) => {
             .order('customer_type', { ascending: true });
 
         if (error) {
+            console.error('❌ [DATABASE ERROR] fabric_margin_calculations query failed:');
+            console.error('  Code:', error.code, '| Message:', error.message);
             if (error.code === '42P01') {
-                return res.json({ error: 'SCHEMA_MISSING', message: 'Margin calculations table has not been created yet.' });
+                console.error('  Hint: Table "fabric_margin_calculations" is missing in database.');
+                return res.status(404).json({ error: 'SCHEMA_MISSING', message: 'Fabric margins table has not been created yet.' });
             }
-            throw error;
+            if (error.code === '42703') {
+                console.error('  Hint: Column missing in "fabric_margin_calculations" table.');
+            }
+            return res.status(500).json({ error: error.message, code: error.code });
         }
+
+        // Return live data directly from database! If table is blank, return []
         res.json(data || []);
     } catch (err) {
+        console.error('❌ [DATABASE ERROR] listMargins caught exception:', err.message);
         res.status(500).json({ error: err.message });
     }
 };

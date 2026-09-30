@@ -38,8 +38,8 @@ async function generateNextDesignNumberLocal() {
 
 const variantLocks = new Map();
 
-// Local helper to resolve or auto-create variant design numbers
-async function resolveOrCreateQuotationItemDesignNumber(item) {
+// Local helper to resolve or auto-create variant design numbers based on product + fabrics + trims combination
+async function resolveOrCreateQuotationItemDesignNumber(item, options = {}) {
     const productId = item.product_id || (item.size_breakdown && item.size_breakdown.product_id);
     if (!productId) {
         return {
@@ -48,53 +48,68 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
         };
     }
 
-    const { data: product } = await supabase
+    const { data: product, error: prodErr } = await supabase
         .from('products')
-        .select('*, design_numbers(code)')
+        .select('*, design_numbers(id, code)')
         .eq('id', productId)
         .maybeSingle();
 
-    if (!product) {
+    if (prodErr || !product) {
         return {
             designNumber: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
             alreadyExists: false
         };
     }
 
+    // 1. Resolve normalized fabric selections
+    const fabricId = item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null;
+    const att1Id = item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id) || null;
+    const att2Id = item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id) || null;
+
+    const normFabricId = (fabricId && String(fabricId).trim() !== '') ? String(fabricId).trim() : null;
+    const normAtt1Id = (att1Id && String(att1Id).trim() !== '') ? String(att1Id).trim() : null;
+    const normAtt2Id = (att2Id && String(att2Id).trim() !== '') ? String(att2Id).trim() : null;
+
+    // 2. Resolve normalized trims
+    const rawTrims = Array.isArray(item.trims) && item.trims.length > 0 
+        ? item.trims 
+        : (Array.isArray(item.size_breakdown?.trims) && item.size_breakdown.trims.length > 0 
+            ? item.size_breakdown.trims 
+            : []);
+
+    let normalizedTrims = rawTrims
+        .filter(t => t && t.trim_id && String(t.trim_id).trim() !== '')
+        .map(t => ({
+            trim_id: String(t.trim_id).trim(),
+            count: String(t.count !== undefined && t.count !== null && t.count !== '' ? t.count : '1').trim()
+        }))
+        .sort((a, b) => a.trim_id.localeCompare(b.trim_id));
+
     const buttonId = item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null;
     const threadId = item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null;
     const buttonCount = item.button_count || (item.size_breakdown && item.size_breakdown.button_count) || 0;
     const threadCount = item.thread_count || (item.size_breakdown && item.size_breakdown.thread_count) || 0;
 
-    const normButtonId = buttonId === '' ? null : buttonId;
-    const normThreadId = threadId === '' ? null : threadId;
+    const normButtonId = buttonId && String(buttonId).trim() !== '' ? String(buttonId).trim() : null;
+    const normThreadId = threadId && String(threadId).trim() !== '' ? String(threadId).trim() : null;
 
-    // 1. Build a deterministic variant signature of all customization factors
-    const variantObj = {
-        collar_type: item.collar_type || (item.size_breakdown && item.size_breakdown.collar_type) || null,
-        button_id: normButtonId,
-        thread_id: normThreadId,
-        button_count: parseInt(buttonCount, 10) || 0,
-        thread_count: parseInt(threadCount, 10) || 0,
-        // Fabric selling / selection
-        fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
-        fabric_color: item.fabric_color || (item.size_breakdown && item.size_breakdown.fabric_color) || null,
-        fabric_selling: item.fabric_selling || (item.size_breakdown && item.size_breakdown.fabric_selling) || null,
-        // Customization details
-        attachments: item.attachments || (item.size_breakdown && item.size_breakdown.attachments) || null,
-        customization: item.customization || (item.size_breakdown && item.size_breakdown.customization) || null,
-        notes: item.notes || (item.size_breakdown && item.size_breakdown.notes) || null,
-    };
-
-    // Sort keys and stringify to get a stable JSON signature
-    const sortedKeys = Object.keys(variantObj).sort();
-    const sortedObj = {};
-    for (const key of sortedKeys) {
-        sortedObj[key] = variantObj[key];
+    if (normalizedTrims.length === 0) {
+        if (normButtonId) normalizedTrims.push({ trim_id: normButtonId, count: String(buttonCount || '10').trim() });
+        if (normThreadId) normalizedTrims.push({ trim_id: normThreadId, count: String(threadCount || '1').trim() });
+        normalizedTrims.sort((a, b) => a.trim_id.localeCompare(b.trim_id));
     }
-    const signature = JSON.stringify(sortedObj);
 
-    // Use concurrency lock to serialize calls for the exact same variant configuration signature
+    // 3. Build canonical material & trim combination signature
+    const combination = {
+        product_id: parseInt(productId, 10),
+        fabric_id: normFabricId,
+        attachment_fabric1_id: normAtt1Id,
+        attachment_fabric2_id: normAtt2Id,
+        trims: normalizedTrims
+    };
+    const signature = JSON.stringify(combination);
+
+    // Concurrency lock for safe concurrent requests
     const lockKey = `${productId}_${signature}`;
     while (variantLocks.has(lockKey)) {
         await variantLocks.get(lockKey);
@@ -105,59 +120,121 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
     variantLocks.set(lockKey, lockPromise);
 
     try {
-        // 2. Check if a variant already exists with this signature
-        const { data: existingVariants } = await supabase
+        // Step A: Check if this combination matches the base product's definition
+        const baseMainFab = product.fabric_id 
+            ? String(product.fabric_id).trim() 
+            : (product.class_fabric_consumption?._base_main_fabric_id 
+                ? String(product.class_fabric_consumption._base_main_fabric_id).trim() 
+                : null);
+        const baseAtt1 = product.attachment_fabric1_id ? String(product.attachment_fabric1_id).trim() : null;
+        const baseAtt2 = product.attachment_fabric2_id ? String(product.attachment_fabric2_id).trim() : null;
+
+        const baseRawTrims = Array.isArray(product.trims) && product.trims.length > 0
+            ? product.trims
+            : (Array.isArray(product.class_fabric_consumption?._base_trims) ? product.class_fabric_consumption._base_trims : []);
+        
+        let baseNormTrims = baseRawTrims
+            .filter(t => t && t.trim_id && String(t.trim_id).trim() !== '')
+            .map(t => ({
+                trim_id: String(t.trim_id).trim(),
+                count: String(t.count !== undefined && t.count !== null && t.count !== '' ? t.count : '1').trim()
+            }))
+            .sort((a, b) => a.trim_id.localeCompare(b.trim_id));
+
+        if (baseNormTrims.length === 0) {
+            if (product.button_id) baseNormTrims.push({ trim_id: String(product.button_id).trim(), count: String(product.button_count || '10').trim() });
+            if (product.thread_id) baseNormTrims.push({ trim_id: String(product.thread_id).trim(), count: String(product.thread_count || '1').trim() });
+            baseNormTrims.sort((a, b) => a.trim_id.localeCompare(b.trim_id));
+        }
+
+        const matchesBaseProduct = 
+            (normFabricId === baseMainFab || (!normFabricId && !baseMainFab)) &&
+            (normAtt1Id === baseAtt1 || (!normAtt1Id && !baseAtt1)) &&
+            (normAtt2Id === baseAtt2 || (!normAtt2Id && !baseAtt2)) &&
+            (JSON.stringify(normalizedTrims) === JSON.stringify(baseNormTrims));
+
+        if (matchesBaseProduct && product.design_numbers?.code) {
+            return {
+                designNumber: product.design_numbers.code,
+                alreadyExists: true
+            };
+        }
+
+        // Step B: Check if an existing variant in product_design_variants matches this combination
+        const { data: existingVariants, error: varFetchErr } = await supabase
             .from('product_design_variants')
-            .select('*, design_numbers(code)')
-            .eq('product_id', productId)
-            .eq('material_combination', signature);
+            .select('id, design_number_id, material_combination, button_id, thread_id, design_numbers(id, code)')
+            .eq('product_id', productId);
 
-        if (existingVariants && existingVariants.length > 0) {
+        if (!varFetchErr && existingVariants && existingVariants.length > 0) {
+            for (const variant of existingVariants) {
+                if (!variant.design_numbers?.code) continue;
+                if (variant.material_combination === signature) {
+                    return {
+                        designNumber: variant.design_numbers.code,
+                        alreadyExists: true
+                    };
+                }
+                try {
+                    if (variant.material_combination) {
+                        const parsed = JSON.parse(variant.material_combination);
+                        const pFab = parsed.fabric_id ? String(parsed.fabric_id).trim() : null;
+                        const pAtt1 = parsed.attachment_fabric1_id ? String(parsed.attachment_fabric1_id).trim() : null;
+                        const pAtt2 = parsed.attachment_fabric2_id ? String(parsed.attachment_fabric2_id).trim() : null;
+                        const pTrims = (parsed.trims || []).map(t => ({
+                            trim_id: String(t.trim_id).trim(),
+                            count: String(t.count !== undefined && t.count !== null && t.count !== '' ? t.count : '1').trim()
+                        })).sort((a, b) => a.trim_id.localeCompare(b.trim_id));
+
+                        if (pFab === normFabricId && pAtt1 === normAtt1Id && pAtt2 === normAtt2Id && JSON.stringify(pTrims) === JSON.stringify(normalizedTrims)) {
+                            return {
+                                designNumber: variant.design_numbers.code,
+                                alreadyExists: true
+                            };
+                        }
+                    }
+                } catch (e) {
+                    // Ignore JSON parse errors for legacy variant records
+                }
+            }
+        }
+
+        // If dryRun requested, just indicate that a new design number will be created upon save
+        if (options.dryRun) {
             return {
-                designNumber: existingVariants[0].design_numbers?.code || null,
-                alreadyExists: true
+                designNumber: 'New (DNS-Auto)',
+                alreadyExists: false
             };
         }
 
-        // 3. Check if standard base configuration matches
-        const isBaseButton = normButtonId === null || normButtonId === product.button_id;
-        const isBaseThread = normThreadId === null || normThreadId === product.thread_id;
-        // Let's also check if they did not customize anything else (all others null/defaults)
-        const hasOtherCustomization = variantObj.collar_type || variantObj.fabric_id || variantObj.fabric_color || variantObj.fabric_selling || variantObj.attachments || variantObj.customization || variantObj.notes;
-        if (isBaseButton && isBaseThread && !hasOtherCustomization) {
-            // It matches base product's design code
-            return {
-                designNumber: product.design_numbers?.code || null,
-                alreadyExists: true
-            };
-        }
-
-        // 4. Create a new design number variant
+        // Step C: If not in design number, create a new design number
         const nextCode = await generateNextDesignNumberLocal();
         const { data: newDn, error: dnError } = await supabase
             .from('design_numbers')
-            .insert([{ code: nextCode }])
+            .insert([{ 
+                code: nextCode,
+                type: 'Product Variant'
+            }])
             .select()
             .single();
 
         if (dnError) throw dnError;
 
-        const { error: varError } = await supabase
-            .from('product_design_variants')
-            .insert([{
-                product_id: parseInt(productId, 10),
-                design_number_id: newDn.id,
-                button_id: normButtonId,
-                thread_id: normThreadId,
-                button_count: parseInt(buttonCount, 10) || 0,
-                thread_count: parseInt(threadCount, 10) || 0,
-                variant_status: 'active',
-                material_combination: signature
-            }]);
-
-        if (varError) {
-            await supabase.from('design_numbers').delete().eq('id', newDn.id);
-            throw varError;
+        try {
+            await supabase
+                .from('product_design_variants')
+                .insert([{
+                    product_id: parseInt(productId, 10),
+                    design_number_id: newDn.id,
+                    button_id: normButtonId,
+                    thread_id: normThreadId,
+                    button_count: parseInt(buttonCount, 10) || 0,
+                    thread_count: parseInt(threadCount, 10) || 0,
+                    variant_status: 'active',
+                    material_combination: signature
+                }]);
+        } catch (varInsertErr) {
+            console.warn('Notice: product_design_variants record insertion warning:', varInsertErr.message);
         }
 
         return {
@@ -165,9 +242,9 @@ async function resolveOrCreateQuotationItemDesignNumber(item) {
             alreadyExists: false
         };
     } catch (err) {
-        console.error('Error auto-creating variant design number:', err.message);
+        console.error('Error in resolveOrCreateQuotationItemDesignNumber:', err.message);
         return {
-            designNumber: product.design_numbers?.code || null,
+            designNumber: product.design_numbers?.code || 'DNS-STANDARD',
             alreadyExists: false
         };
     } finally {
@@ -318,15 +395,14 @@ async function findOrCreateGroupDesignNumber(designCodes) {
     // 3. Create a new Group Design Number (continuous with DNG- prefix)
     const { data: allDNsList, error: allDNsError } = await supabase
         .from('group_design_numbers')
-        .select('code')
-        .ilike('code', 'DNG-%');
+        .select('code, design_number');
 
     if (allDNsError) throw allDNsError;
 
     let maxNum = 0;
     if (allDNsList && allDNsList.length > 0) {
         allDNsList.forEach(dnRecord => {
-            const dn = dnRecord.code;
+            const dn = dnRecord.code || dnRecord.design_number;
             if (dn && dn.startsWith('DNG-')) {
                 const numPart = dn.substring(4);
                 const num = parseInt(numPart, 10);
@@ -340,10 +416,14 @@ async function findOrCreateGroupDesignNumber(designCodes) {
     const nextNum = maxNum + 1;
     const nextCode = `DNG-${String(nextNum).padStart(4, '0')}`;
 
-    // Insert new GDN record
+    // Insert new GDN record with both code and design_number populated to satisfy not-null constraints
     const { data: newGDN, error: newGDNError } = await supabase
         .from('group_design_numbers')
-        .insert([{ code: nextCode }])
+        .insert([{ 
+            code: nextCode,
+            design_number: nextCode,
+            name: nextCode 
+        }])
         .select()
         .single();
 
@@ -391,7 +471,13 @@ exports.listQuotations = async (req, res) => {
 
         const { data, error } = await query;
         if (error) throw error;
-        res.json(data || []);
+        const enrichedQuotes = (data || []).map(q => ({
+            ...q,
+            estimated_expenses: q.estimated_expenses !== undefined && q.estimated_expenses !== null
+                ? q.estimated_expenses
+                : (q.metrics_summary?.estimated_expenses || 0)
+        }));
+        res.json(enrichedQuotes);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -437,6 +523,9 @@ exports.getQuotationDetails = async (req, res) => {
 
         res.json({
             ...quotation,
+            estimated_expenses: quotation.estimated_expenses !== undefined && quotation.estimated_expenses !== null
+                ? quotation.estimated_expenses
+                : (quotation.metrics_summary?.estimated_expenses || 0),
             items: enrichedItems || []
         });
     } catch (err) {
@@ -544,12 +633,11 @@ async function resolveGroupDesignNumberForQuotation(items, metrics_summary, exis
         try {
             const { data: allDNsList } = await supabase
                 .from('group_design_numbers')
-                .select('code')
-                .ilike('code', 'DNG-%');
+                .select('code, design_number');
             let maxNum = 0;
             if (allDNsList && allDNsList.length > 0) {
                 allDNsList.forEach(dnRecord => {
-                    const dn = dnRecord.code;
+                    const dn = dnRecord.code || dnRecord.design_number;
                     if (dn && dn.startsWith('DNG-')) {
                         const numPart = dn.substring(4);
                         const num = parseInt(numPart, 10);
@@ -561,11 +649,18 @@ async function resolveGroupDesignNumberForQuotation(items, metrics_summary, exis
             }
             const nextNum = maxNum + 1;
             const nextCode = `DNG-${String(nextNum).padStart(4, '0')}`;
-            const { data: newGDN } = await supabase
+            const { data: newGDN, error: fallbackGdnError } = await supabase
                 .from('group_design_numbers')
-                .insert([{ code: nextCode }])
+                .insert([{ 
+                    code: nextCode,
+                    design_number: nextCode,
+                    name: nextCode 
+                }])
                 .select()
                 .single();
+            if (fallbackGdnError) {
+                console.error('Error inserting fallback group design number:', fallbackGdnError.message);
+            }
             if (newGDN) {
                 return newGDN.id;
             }
@@ -640,26 +735,44 @@ exports.createQuotation = async (req, res) => {
             ? quotation_no.trim() 
             : `QT-${Date.now().toString().slice(-6)}`;
 
-        // Insert the quotation header
-        const { data: quote, error: quoteError } = await supabase
+        // Insert the quotation header (with fallback if estimated_expenses column is missing from schema cache)
+        const quoteInsertPayload = {
+            quotation_no: finalQuotationNo,
+            title: title.trim(),
+            organization_id,
+            branch_id: req.user?.branchId || null,
+            estimated_expenses: estimated_expenses || 0,
+            total_estimated_time: total_estimated_time || '',
+            production_days_estimate: production_days_estimate || 0,
+            expected_delivery_date: expected_delivery_date || null,
+            profit_margin_percent: profit_margin_percent || 0,
+            final_quote_value: final_quote_value || 0,
+            status: 'Draft',
+            metrics_summary: {
+                ...(metrics_summary || {}),
+                estimated_expenses: estimated_expenses || 0
+            },
+            group_design_number_id: groupDesignNumberId
+        };
+
+        let { data: quote, error: quoteError } = await supabase
             .from('quotations')
-            .insert([{
-                quotation_no: finalQuotationNo,
-                title: title.trim(),
-                organization_id,
-                branch_id: req.user?.branchId || null,
-                estimated_expenses: estimated_expenses || 0,
-                total_estimated_time: total_estimated_time || '',
-                production_days_estimate: production_days_estimate || 0,
-                expected_delivery_date: expected_delivery_date || null,
-                profit_margin_percent: profit_margin_percent || 0,
-                final_quote_value: final_quote_value || 0,
-                status: 'Draft',
-                metrics_summary: metrics_summary || {},
-                group_design_number_id: groupDesignNumberId
-            }])
+            .insert([quoteInsertPayload])
             .select()
             .single();
+
+        if (quoteError && (quoteError.message?.includes('estimated_expenses') || quoteError.details?.includes('estimated_expenses') || quoteError.code === 'PGRST204')) {
+            console.warn('⚠️ [QUOTATION] estimated_expenses column missing in quotations schema cache, retrying insert without column...');
+            const fallbackPayload = { ...quoteInsertPayload };
+            delete fallbackPayload.estimated_expenses;
+            const retryRes = await supabase
+                .from('quotations')
+                .insert([fallbackPayload])
+                .select()
+                .single();
+            quote = retryRes.data;
+            quoteError = retryRes.error;
+        }
 
         if (quoteError) {
             if (quoteError.code === '23505') {
@@ -678,6 +791,11 @@ exports.createQuotation = async (req, res) => {
             size_breakdown: {
                 ...(item.size_breakdown || {}),
                 fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                attachment_fabric1_id: item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id) || null,
+                attachment_fabric2_id: item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id) || null,
+                trims: item.trims || (item.size_breakdown && item.size_breakdown.trims) || [],
+                button_id: item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null,
+                thread_id: item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null,
                 sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
                 design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
                 is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
@@ -991,27 +1109,47 @@ exports.updateQuotation = async (req, res) => {
             existingQuote?.group_design_number_id
         );
 
-        // Update the quotation header
-        const { data: quote, error: quoteError } = await supabase
+        // Update the quotation header (with fallback if estimated_expenses column is missing from schema cache)
+        const quoteUpdatePayload = {
+            title: title.trim(),
+            quotation_no: quotation_no ? quotation_no.trim() : undefined,
+            organization_id,
+            status: status || 'Draft',
+            estimated_expenses: estimated_expenses || 0,
+            total_estimated_time: total_estimated_time || '',
+            production_days_estimate: production_days_estimate || 0,
+            expected_delivery_date: expected_delivery_date || null,
+            profit_margin_percent: profit_margin_percent || 0,
+            final_quote_value: final_quote_value || 0,
+            metrics_summary: {
+                ...(metrics_summary || {}),
+                estimated_expenses: estimated_expenses || 0
+            },
+            pdf_html: pdf_html || undefined,
+            group_design_number_id: groupDesignNumberId,
+            updated_at: new Date()
+        };
+
+        let { data: quote, error: quoteError } = await supabase
             .from('quotations')
-            .update({
-                title: title.trim(),
-                quotation_no: quotation_no ? quotation_no.trim() : undefined,
-                organization_id,
-                status: status || 'Draft',
-                estimated_expenses: estimated_expenses || 0,
-                total_estimated_time: total_estimated_time || '',
-                production_days_estimate: production_days_estimate || 0,
-                expected_delivery_date: expected_delivery_date || null,
-                profit_margin_percent: profit_margin_percent || 0,
-                final_quote_value: final_quote_value || 0,
-                metrics_summary: metrics_summary || {},
-                pdf_html: pdf_html || undefined,
-                group_design_number_id: groupDesignNumberId
-            })
+            .update(quoteUpdatePayload)
             .eq('id', id)
             .select()
             .single();
+
+        if (quoteError && (quoteError.message?.includes('estimated_expenses') || quoteError.details?.includes('estimated_expenses') || quoteError.code === 'PGRST204')) {
+            console.warn('⚠️ [QUOTATION] estimated_expenses column missing in quotations schema cache, retrying update without column...');
+            const fallbackPayload = { ...quoteUpdatePayload };
+            delete fallbackPayload.estimated_expenses;
+            const retryRes = await supabase
+                .from('quotations')
+                .update(fallbackPayload)
+                .eq('id', id)
+                .select()
+                .single();
+            quote = retryRes.data;
+            quoteError = retryRes.error;
+        }
 
         if (quoteError) {
             throw quoteError;
@@ -1035,6 +1173,11 @@ exports.updateQuotation = async (req, res) => {
             size_breakdown: {
                 ...(item.size_breakdown || {}),
                 fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                attachment_fabric1_id: item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id) || null,
+                attachment_fabric2_id: item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id) || null,
+                trims: item.trims || (item.size_breakdown && item.size_breakdown.trims) || [],
+                button_id: item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null,
+                thread_id: item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null,
                 sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
                 design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
                 is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
@@ -1955,6 +2098,18 @@ exports.updateDesignNumber = async (req, res) => {
         if (error) throw error;
 
         res.json({ success: true, designNumberId: id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// Preview / Resolve design number based on product + fabrics + trims combination
+exports.resolveDesignNumber = async (req, res) => {
+    try {
+        const item = req.body;
+        const dryRun = req.query.dryRun === 'true' || req.body.dryRun === true;
+        const result = await resolveOrCreateQuotationItemDesignNumber(item, { dryRun });
+        res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

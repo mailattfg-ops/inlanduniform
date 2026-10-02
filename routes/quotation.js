@@ -34,6 +34,9 @@ router.post('/', authMiddleware, checkPermission(['manage_quotations', 'branch_s
 // Update quotation (if not locked, allowed for staff and managers)
 router.put('/:id', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.updateQuotation);
 
+// Submit quotation to operations team (Marketing staff / managers)
+router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.submitToOps);
+
 // Delete quotation (Restricted strictly to managers/admins)
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);
 

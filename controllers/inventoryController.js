@@ -266,8 +266,7 @@ exports.buttons = {
         .from("buttons")
         .select("*")
         .order("code", { ascending: true });
-      if (error) throw error;
-      if (data && data.length > 0) {
+      if (!error && data && data.length > 0) {
         return res.json(data);
       }
       // Fallback to trims table for Button category
@@ -281,9 +280,10 @@ exports.buttons = {
         );
         return res.json(filtered.length > 0 ? filtered : trimButtons);
       }
-      res.json(data || []);
+      res.json([]);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.warn('[InventoryController] buttons.list error, returning empty list:', err.message);
+      res.json([]);
     }
   },
   create: async (req, res) => {
@@ -438,8 +438,7 @@ exports.threads = {
         .from("threads")
         .select("*")
         .order("code", { ascending: true });
-      if (error) throw error;
-      if (data && data.length > 0) {
+      if (!error && data && data.length > 0) {
         return res.json(data.map(t => ({
           ...t,
           uom: t.uom || 'Cones'
@@ -460,9 +459,10 @@ exports.threads = {
           uom: t.uom || t.trim_categories?.default_uom || 'Cones'
         })));
       }
-      res.json(data || []);
+      res.json([]);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.warn('[InventoryController] threads.list error, returning empty list:', err.message);
+      res.json([]);
     }
   },
   create: async (req, res) => {
@@ -1276,17 +1276,68 @@ exports.purchaseOrders = {
       if (!po)
         return res.status(404).json({ error: "Purchase order not found" });
 
-      // Fetch items with fabric metadata
-      const { data: items, error: itemsErr } = await supabase
+      // Fetch items with fabric and trim metadata
+      const { data: rawItems, error: itemsErr } = await supabase
         .from("purchase_order_items")
-        .select("*, fabrics(id, name, code, brand_name, shade, width)")
+        .select("*")
         .eq("purchase_order_id", id);
 
       if (itemsErr) throw itemsErr;
 
+      // Populate fabric and trim references safely
+      const fabricIds = (rawItems || []).map(i => i.fabric_id).filter(Boolean);
+      const trimIds = (rawItems || []).map(i => i.trim_id).filter(Boolean);
+
+      const fabricsMap = new Map();
+      if (fabricIds.length > 0) {
+        const { data: fabData } = await supabase
+          .from("fabrics")
+          .select("id, name, code, brand_name, shade, width, unit_price")
+          .in("id", fabricIds);
+        (fabData || []).forEach(f => fabricsMap.set(String(f.id), f));
+      }
+
+      const trimsMap = new Map();
+      if (trimIds.length > 0) {
+        const { data: trimData } = await supabase
+          .from("trims")
+          .select("id, name, code, uom, unit_price")
+          .in("id", trimIds);
+        (trimData || []).forEach(t => trimsMap.set(String(t.id), t));
+
+        // Fallback to buttons and threads tables for legacy or specialized items
+        const missingTrimIds = trimIds.filter(id => !trimsMap.has(String(id)));
+        if (missingTrimIds.length > 0) {
+          try {
+            const { data: btnData } = await supabase
+              .from("buttons")
+              .select("id, name, code, unit_price")
+              .in("id", missingTrimIds);
+            (btnData || []).forEach(b => trimsMap.set(String(b.id), { ...b, uom: 'pcs' }));
+          } catch (e) {}
+
+          const stillMissing = missingTrimIds.filter(id => !trimsMap.has(String(id)));
+          if (stillMissing.length > 0) {
+            try {
+              const { data: thrdData } = await supabase
+                .from("threads")
+                .select("id, name, code, unit_price, uom")
+                .in("id", stillMissing);
+              (thrdData || []).forEach(th => trimsMap.set(String(th.id), { ...th, uom: th.uom || 'cones' }));
+            } catch (e) {}
+          }
+        }
+      }
+
+      const populatedItems = (rawItems || []).map(item => ({
+        ...item,
+        fabrics: item.fabric_id ? fabricsMap.get(String(item.fabric_id)) : null,
+        trims: item.trim_id ? trimsMap.get(String(item.trim_id)) : null
+      }));
+
       res.json({
         ...po,
-        items: items || [],
+        items: populatedItems,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1366,7 +1417,7 @@ exports.purchaseOrders = {
 
       if (updateErr) throw updateErr;
 
-      // If PO is received, credit raw fabric quantities and close items
+      // If PO is received, credit raw fabric and trim quantities and close items
       if (status === "Received" && po.status !== "Received") {
         const { data: items } = await supabase
           .from("purchase_order_items")
@@ -1380,22 +1431,44 @@ exports.purchaseOrders = {
             .update({ status: "Received", updated_at: new Date() })
             .eq("id", item.id);
 
-          // Add physical stock quantity
-          const { data: fabric } = await supabase
-            .from("fabrics")
-            .select("quantity")
-            .eq("id", item.fabric_id)
-            .single();
-
-          if (fabric) {
-            const newQty =
-              parseFloat(fabric.quantity || 0) + parseFloat(item.quantity || 0);
-            await supabase
+          // Add physical stock quantity for Fabrics
+          if (item.fabric_id) {
+            const { data: fabric } = await supabase
               .from("fabrics")
-              .update({
-                quantity: newQty,
-              })
-              .eq("id", item.fabric_id);
+              .select("quantity")
+              .eq("id", item.fabric_id)
+              .maybeSingle();
+
+            if (fabric) {
+              const newQty =
+                parseFloat(fabric.quantity || 0) + parseFloat(item.quantity || 0);
+              await supabase
+                .from("fabrics")
+                .update({
+                  quantity: newQty,
+                })
+                .eq("id", item.fabric_id);
+            }
+          }
+
+          // Add physical stock quantity for Trims
+          if (item.trim_id) {
+            const { data: trim } = await supabase
+              .from("trims")
+              .select("quantity")
+              .eq("id", item.trim_id)
+              .maybeSingle();
+
+            if (trim) {
+              const newQty =
+                parseFloat(trim.quantity || 0) + parseFloat(item.quantity || 0);
+              await supabase
+                .from("trims")
+                .update({
+                  quantity: newQty,
+                })
+                .eq("id", item.trim_id);
+            }
           }
         }
       }

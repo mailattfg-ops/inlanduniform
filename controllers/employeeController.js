@@ -12,7 +12,7 @@ exports.listEmployees = async (req, res) => {
     // Try joined query with explicit foreign key disambiguation
     let query = supabase
       .from('employees')
-      .select('*, branches:branch_id(id, code, name, tier, address, contact_number), temp_branches:temp_branch_id(id, code, name, tier, address, contact_number)');
+      .select('*, branches:branches!branch_id(id, code, name, tier, address, contact_number), temp_branches:branches!temp_branch_id(id, code, name, tier, address, contact_number)');
 
     if (branch_id && branch_id !== 'all') {
       // Allow searching by either home branch or deputed branch
@@ -187,7 +187,7 @@ exports.createEmployee = async (req, res) => {
     let { data: empData, error: empError } = await supabase
       .from('employees')
       .insert([empInsertData])
-      .select('*, branches(id, code, name, tier)')
+      .select('*, branches:branches!branch_id(id, code, name, tier)')
       .single();
 
     // Fallback if branch_id or employment_type column is missing
@@ -423,7 +423,7 @@ exports.updateEmployee = async (req, res) => {
       .from('employees')
       .update(updatePayload)
       .eq('id', id)
-      .select('*, branches(id, code, name, tier)')
+      .select('*, branches:branches!branch_id(id, code, name, tier)')
       .single();
 
     // Fallback if branch_id / employment_type is not migrated or relationship fails
@@ -525,7 +525,7 @@ exports.assignTempBranch = async (req, res) => {
         temp_branch_notes: temp_branch_notes || null
       })
       .eq('id', id)
-      .select('*, branches(id, code, name, tier), temp_branches:temp_branch_id(id, code, name, tier)')
+      .select('*, branches:branches!branch_id(id, code, name, tier), temp_branches:branches!temp_branch_id(id, code, name, tier)')
       .single();
 
     if (error) throw error;
@@ -585,7 +585,7 @@ exports.recallTempBranch = async (req, res) => {
         temp_branch_notes: null
       })
       .eq('id', id)
-      .select('*, branches(id, code, name, tier)')
+      .select('*, branches:branches!branch_id(id, code, name, tier)')
       .single();
 
     if (error) throw error;
@@ -666,7 +666,7 @@ exports.transferEmployee = async (req, res) => {
       .from('employees')
       .update(updateData)
       .eq('id', id)
-      .select('*, branches(id, code, name, tier)')
+      .select('*, branches:branches!branch_id(id, code, name, tier)')
       .single();
 
     if (updateErr) throw updateErr;
@@ -724,7 +724,7 @@ exports.getEmployeeHistory = async (req, res) => {
   try {
     const { data: emp, error: empErr } = await supabase
       .from('employees')
-      .select('*, branches(id, code, name, tier, address), temp_branches:temp_branch_id(id, code, name, tier, address)')
+      .select('*, branches:branches!branch_id(id, code, name, tier, address), temp_branches:branches!temp_branch_id(id, code, name, tier, address)')
       .eq('id', id)
       .single();
 
@@ -736,7 +736,7 @@ exports.getEmployeeHistory = async (req, res) => {
     try {
       const { data: records, error: histErr } = await supabase
         .from('employee_work_history')
-        .select('*, branches(id, code, name, tier, address)')
+        .select('*, branches:branches!branch_id(id, code, name, tier, address)')
         .eq('employee_id', id)
         .order('created_at', { ascending: false });
 

@@ -327,6 +327,16 @@ ALTER TABLE public.quotations
     ADD COLUMN IF NOT EXISTS metrics_summary JSONB DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS group_design_number_id BIGINT;
 
+-- Ensure quotation_items table has all required columns and reload PostgREST schema cache
+ALTER TABLE public.quotation_items
+    ADD COLUMN IF NOT EXISTS product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS size_breakdown JSONB DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS fabric_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
+    ADD COLUMN IF NOT EXISTS accessories_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
+    ADD COLUMN IF NOT EXISTS labor_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
+    ADD COLUMN IF NOT EXISTS is_manual BOOLEAN DEFAULT false,
+    ADD COLUMN IF NOT EXISTS manual_item_name TEXT;
+
 NOTIFY pgrst, 'reload schema';
 
 CREATE TABLE IF NOT EXISTS public.art_dresses (
@@ -741,6 +751,11 @@ CREATE TABLE IF NOT EXISTS public.quotation_items (
 );
 
 ALTER TABLE public.quotation_items
+    ADD COLUMN IF NOT EXISTS product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS size_breakdown JSONB DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS fabric_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
+    ADD COLUMN IF NOT EXISTS accessories_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
+    ADD COLUMN IF NOT EXISTS labor_cost_per_item NUMERIC(10,2) DEFAULT 0.00,
     ADD COLUMN IF NOT EXISTS is_manual BOOLEAN DEFAULT false,
     ADD COLUMN IF NOT EXISTS manual_item_name TEXT;
 

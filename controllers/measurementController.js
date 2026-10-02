@@ -1,5 +1,93 @@
 const supabase = require("../config/supabase");
 
+/**
+ * Helper to fetch detailed staff profile (including employee ID and designation)
+ * for a list of recorder IDs.
+ */
+async function getRecorderProfiles(recorderIds) {
+  let profileMap = {};
+  if (!recorderIds || recorderIds.length === 0) return profileMap;
+
+  const validIds = [...new Set(recorderIds.filter(Boolean))];
+  const userProfileIds = validIds.filter((id) => !String(id).startsWith("branch_user_"));
+  const branchUserIds = validIds
+    .filter((id) => String(id).startsWith("branch_user_"))
+    .map((id) => String(id).replace("branch_user_", ""));
+
+  if (userProfileIds.length > 0) {
+    const { data: profiles } = await supabase
+      .from("user_profiles")
+      .select("id, full_name, email")
+      .in("id", userProfileIds);
+
+    const { data: employees } = await supabase
+      .from("employees")
+      .select("id, employee_id, full_name, designation, department, user_id")
+      .in("user_id", userProfileIds);
+
+    if (profiles) {
+      profiles.forEach((p) => {
+        const emp = employees?.find((e) => String(e.user_id) === String(p.id));
+        const prof = {
+          id: p.id,
+          full_name: emp?.full_name || p.full_name || "Staff",
+          email: p.email,
+          employee_id:
+            emp?.employee_id ||
+            (p.id === 1 ? "ADM-001" : `EMP-${String(p.id).padStart(3, "0")}`),
+          designation:
+            emp?.designation ||
+            (p.id === 1 ? "System Administrator" : "Staff Officer"),
+          department: emp?.department || null,
+        };
+        profileMap[p.id] = prof;
+        profileMap[String(p.id)] = prof;
+      });
+    }
+
+    if (employees) {
+      employees.forEach((emp) => {
+        if (!profileMap[emp.id]) {
+          const prof = {
+            id: emp.user_id || emp.id,
+            full_name: emp.full_name,
+            email: emp.email || "",
+            employee_id: emp.employee_id,
+            designation: emp.designation || "Staff Officer",
+            department: emp.department || null,
+          };
+          profileMap[emp.id] = prof;
+          profileMap[String(emp.id)] = prof;
+        }
+      });
+    }
+  }
+
+  if (branchUserIds.length > 0) {
+    const { data: bProfiles } = await supabase
+      .from("branch_users")
+      .select("id, name, email")
+      .in("id", branchUserIds);
+
+    if (bProfiles) {
+      bProfiles.forEach((bp) => {
+        const key = `branch_user_${bp.id}`;
+        profileMap[key] = {
+          id: key,
+          full_name: bp.name,
+          email: bp.email,
+          employee_id: `BRN-${bp.id}`,
+          designation: "Branch Staff",
+          department: "Retail & Counter",
+        };
+      });
+    }
+  }
+
+  return profileMap;
+}
+
+
 exports.listMeasurements = async (req, res) => {
   const user = req.user;
   const { orgId, deptId } = req.query;
@@ -57,26 +145,10 @@ exports.listMeasurements = async (req, res) => {
       return res.json([]);
     }
 
-    // Manual Fetch for staff names (recorder) — recorded_by stores auth user_id (UUID)
-    const recorderIds = [
-      ...new Set(measurements.map((m) => m.recorded_by).filter(Boolean)),
-    ];
-    let profileMap = {};
-    if (recorderIds.length > 0) {
-      const { data: profiles } = await supabase
-        .from("user_profiles")
-        .select("id, user_id, full_name")
-        .in("user_id", recorderIds);
+    // Enrich with recorder profiles (including designation and employee ID)
+    const recorderIds = measurements.map((m) => m.recorded_by).filter(Boolean);
+    const profileMap = await getRecorderProfiles(recorderIds);
 
-      if (profiles) {
-        profiles.forEach((p) => {
-          profileMap[p.user_id] = p;
-          profileMap[p.id] = p; // also index by numeric id as fallback
-        });
-      }
-    }
-
-    // Merge recorder profiles
     const enriched = measurements.map((m) => ({
       ...m,
       user_profiles: profileMap[m.recorded_by] || null,
@@ -159,6 +231,8 @@ exports.saveMeasurement = async (req, res) => {
 
     let data, error;
 
+    const activeRecorderId = req.user?.id || recorded_by || null;
+
     if (!force_new) {
       // Check if a Pending measurement already exists for this member
       const { data: existing } = await supabase
@@ -179,7 +253,7 @@ exports.saveMeasurement = async (req, res) => {
             status: targetStatus,
             reviewer_id: null,
             reviewed_at: null,
-            recorded_by: recorded_by || req.user.id,
+            recorded_by: activeRecorderId,
             recorded_at: new Date(),
           })
           .eq("id", existing[0].id)
@@ -195,7 +269,7 @@ exports.saveMeasurement = async (req, res) => {
         .insert([
           {
             member_id,
-            recorded_by: recorded_by || req.user.id,
+            recorded_by: activeRecorderId,
             dynamic_data,
             suggested_size,
             notes,
@@ -255,7 +329,14 @@ exports.saveMeasurement = async (req, res) => {
       notes: notes?.substring(0, 50),
     });
 
-    res.json({ success: true, measurement: data });
+    // Enrich saved measurement with recorder profile
+    const profileMap = await getRecorderProfiles([activeRecorderId]);
+    const enrichedMeasurement = {
+      ...data,
+      user_profiles: profileMap[activeRecorderId] || null,
+    };
+
+    res.json({ success: true, measurement: enrichedMeasurement });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -277,30 +358,18 @@ exports.getStudentHistory = async (req, res) => {
       return res.json([]);
     }
 
-    // Fetch unique recorder IDs
-    const recorderIds = [
-      ...new Set(measurements.map((m) => m.recorded_by).filter(Boolean)),
-    ];
-
-    let profileMap = {};
-    if (recorderIds.length > 0) {
-      const { data: profiles } = await supabase
-        .from("user_profiles")
-        .select("id, user_id, full_name")
-        .in("user_id", recorderIds);
-
-      if (profiles) {
-        profiles.forEach((p) => {
-          profileMap[p.user_id] = p;
-          profileMap[p.id] = p;
-        });
-      }
-    }
+    // 2. Fetch recorder profiles
+    const recorderIds = measurements.map((m) => m.recorded_by).filter(Boolean);
+    const profileMap = await getRecorderProfiles(recorderIds);
 
     // 3. Merge data
     const merged = measurements.map((m) => ({
       ...m,
-      user_profiles: profileMap[m.recorded_by] || { full_name: "System" },
+      user_profiles: profileMap[m.recorded_by] || {
+        full_name: "Staff",
+        designation: "Staff Officer",
+        employee_id: null,
+      },
     }));
 
     res.json(merged);

@@ -99,12 +99,80 @@ exports.getOrderDetails = async (req, res) => {
         }
 
         // Fetch quotation items for this order's quotation
-        const { data: items, error: itemsError } = await supabase
+        let items = [];
+        const { data: rawItems, error: itemsError } = await supabase
             .from('quotation_items')
             .select('*, product_types(name)')
             .eq('quotation_id', order.quotation_id);
 
-        if (itemsError) throw itemsError;
+        if (itemsError) {
+            const { data: fallbackItems, error: fallbackError } = await supabase
+                .from('quotation_items')
+                .select('*')
+                .eq('quotation_id', order.quotation_id);
+            if (fallbackError) throw fallbackError;
+            items = fallbackItems || [];
+        } else {
+            items = rawItems || [];
+        }
+
+        // Hydrate size_breakdown if stored as string or in notes
+        items = (items || []).map(it => {
+            if ((!it.size_breakdown || typeof it.size_breakdown !== 'object') && it.notes && typeof it.notes === 'string' && it.notes.startsWith('{')) {
+                try {
+                    it.size_breakdown = JSON.parse(it.notes);
+                } catch (e) {}
+            } else if (typeof it.size_breakdown === 'string' && it.size_breakdown.startsWith('{')) {
+                try {
+                    it.size_breakdown = JSON.parse(it.size_breakdown);
+                } catch (e) {}
+            }
+            return it;
+        });
+
+        // Enrich items with actual product names and design numbers
+        const productIds = Array.from(new Set(
+            items.map(it => it.product_id || it.size_breakdown?.product_id).filter(Boolean)
+        ));
+
+        if (productIds.length > 0) {
+            const { data: prods } = await supabase
+                .from('products')
+                .select('id, name, art_number, design_numbers(code)')
+                .in('id', productIds);
+
+            if (prods) {
+                const prodMap = {};
+                prods.forEach(p => {
+                    prodMap[String(p.id)] = p;
+                });
+                items.forEach(it => {
+                    const pId = it.product_id || it.size_breakdown?.product_id;
+                    if (pId && prodMap[String(pId)]) {
+                        const matched = prodMap[String(pId)];
+                        if (!it.size_breakdown) it.size_breakdown = {};
+                        if (matched.design_numbers?.code) {
+                            it.size_breakdown.product_design_number = matched.design_numbers.code;
+                        }
+                        if (matched.name) {
+                            it.product_name = matched.name;
+                            it.size_breakdown.product_name = matched.name;
+                        }
+                        if (matched.art_number && !it.size_breakdown.art_number) {
+                            it.size_breakdown.art_number = matched.art_number;
+                        }
+                    } else if (!it.product_name && it.size_breakdown?.product_name) {
+                        it.product_name = it.size_breakdown.product_name;
+                    }
+                });
+            }
+        } else {
+            items.forEach(it => {
+                if (!it.product_name && it.size_breakdown?.product_name) {
+                    it.product_name = it.size_breakdown.product_name;
+                }
+            });
+        }
 
         res.json({
             ...order,
@@ -444,10 +512,33 @@ exports.corporateAction = async (req, res) => {
             updatedOrder = updateWithCorp.data;
         }
 
-        // Inventory Allocation / Release Handling
+        // Inventory Allocation / Release & Auto-PO Generation Handling
         const inventoryService = require('../services/inventoryService');
+        let autoPO = null;
         try {
             if (action === 'Accept') {
+                // Check raw materials feasibility and generate PO for deficits
+                try {
+                    const feasibility = await inventoryService.checkOrderMaterialFeasibility(id);
+                    console.log(`[orderController:corporateAction] Feasibility evaluated for Order ${id}:`, {
+                        is_sufficient: feasibility?.is_sufficient,
+                        shortages_count: feasibility?.shortage_items_count
+                    });
+
+                    if (!feasibility.is_sufficient && feasibility.shortages.length > 0) {
+                        if (req.body.auto_generate_po !== false) {
+                            autoPO = await inventoryService.createAutoPOForOrderShortages(
+                                id,
+                                feasibility.shortages,
+                                req.user?.id
+                            );
+                            console.log(`[orderController:corporateAction] Generated Auto-PO: ${autoPO?.po_number}`);
+                        }
+                    }
+                } catch (feasibilityErr) {
+                    console.error('[orderController:corporateAction] Material feasibility / Auto-PO check error:', feasibilityErr);
+                }
+
                 // Confirm stock reservation for the accepted order
                 await inventoryService.allocateStockForOrder(id);
             } else if (action === 'Reject') {
@@ -472,7 +563,8 @@ exports.corporateAction = async (req, res) => {
                     reason: reason || '',
                     previous_status: order.status,
                     new_status: newStatus,
-                    action_at: actionTimestamp
+                    action_at: actionTimestamp,
+                    auto_po_number: autoPO ? autoPO.po_number : null
                 }
             }]);
         } catch (logErr) {
@@ -481,10 +573,24 @@ exports.corporateAction = async (req, res) => {
 
         res.json({
             success: true,
-            message: `Corporate has set order action to ${action}.`,
-            order: updatedOrder
+            message: `Corporate has set order action to ${action}${autoPO ? ` (Auto-PO ${autoPO.po_number} generated for material shortages)` : ''}.`,
+            order: updatedOrder,
+            auto_po: autoPO
         });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 5.1 Check Raw Materials (Fabrics & Trims) Feasibility for a Sales Order
+exports.getMaterialFeasibility = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const inventoryService = require('../services/inventoryService');
+        const feasibility = await inventoryService.checkOrderMaterialFeasibility(id);
+        res.json(feasibility);
+    } catch (err) {
+        console.error('[orderController:getMaterialFeasibility] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };

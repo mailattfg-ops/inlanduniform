@@ -1,5 +1,4 @@
 const supabase = require("../config/supabase");
-const { toSafeInt } = require("../utils/sanitize");
 
 const VALID_STANDARD_SIZES = new Set([
   "XXS",

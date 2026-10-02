@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { toSafeInt } = require('../utils/sanitize');
 
 // Local helper to generate the next design number
 async function generateNextDesignNumberLocal() {
@@ -512,12 +513,44 @@ exports.getQuotationDetails = async (req, res) => {
         }
 
         // Fetch all items within this quotation
-        const { data: items, error: itemsError } = await supabase
+        let items = [];
+        const { data: rawItems, error: itemsError } = await supabase
             .from('quotation_items')
             .select('*, product_types(name)')
             .eq('quotation_id', id);
 
-        if (itemsError) throw itemsError;
+        if (itemsError) {
+            console.warn('Selecting quotation_items with product_types failed, attempting fallback select:', itemsError.message);
+            const { data: fallbackItems, error: fallbackError } = await supabase
+                .from('quotation_items')
+                .select('*')
+                .eq('quotation_id', id);
+            if (fallbackError) throw fallbackError;
+            items = fallbackItems || [];
+        } else {
+            items = rawItems || [];
+        }
+
+        // Hydrate items if size_breakdown or costs were stored in notes
+        items = (items || []).map(it => {
+            if ((!it.size_breakdown || Object.keys(it.size_breakdown).length === 0) && it.notes && typeof it.notes === 'string' && it.notes.startsWith('{')) {
+                try {
+                    it.size_breakdown = JSON.parse(it.notes);
+                } catch (e) {}
+            }
+            if (it.size_breakdown) {
+                if ((it.fabric_cost_per_item === undefined || it.fabric_cost_per_item === null) && it.size_breakdown.fabric_cost_per_item !== undefined) {
+                    it.fabric_cost_per_item = it.size_breakdown.fabric_cost_per_item;
+                }
+                if ((it.accessories_cost_per_item === undefined || it.accessories_cost_per_item === null) && it.size_breakdown.accessories_cost_per_item !== undefined) {
+                    it.accessories_cost_per_item = it.size_breakdown.accessories_cost_per_item;
+                }
+                if ((it.labor_cost_per_item === undefined || it.labor_cost_per_item === null) && it.size_breakdown.labor_cost_per_item !== undefined) {
+                    it.labor_cost_per_item = it.size_breakdown.labor_cost_per_item;
+                }
+            }
+            return it;
+        });
 
         const enrichedItems = await enrichQuotationItemsWithDesignNumbers(items);
 
@@ -572,33 +605,51 @@ async function resolveDesignCodes(items) {
     return combinedCodes.length > 0 ? combinedCodes : explicitDesignCodes.filter(Boolean);
 }
 
-// Helper to enrich quotation items with product design numbers
+// Helper to enrich quotation items with product design numbers, product names, and art numbers
 async function enrichQuotationItemsWithDesignNumbers(items) {
     if (!items || items.length === 0) return items;
     
     const productIds = items
-        .map(it => it.size_breakdown?.product_id)
+        .map(it => it.product_id || it.size_breakdown?.product_id)
         .filter(Boolean);
     
     if (productIds.length > 0) {
         const { data: prods } = await supabase
             .from('products')
-            .select('id, design_numbers(code)')
+            .select('id, name, art_number, design_numbers(code)')
             .in('id', productIds);
         
         if (prods) {
             const prodMap = {};
             prods.forEach(p => {
-                prodMap[String(p.id)] = p.design_numbers?.code;
+                prodMap[String(p.id)] = p;
             });
             items.forEach(it => {
-                const pId = it.size_breakdown?.product_id;
+                const pId = it.product_id || it.size_breakdown?.product_id;
                 if (pId && prodMap[String(pId)]) {
+                    const matched = prodMap[String(pId)];
                     if (!it.size_breakdown) it.size_breakdown = {};
-                    it.size_breakdown.product_design_number = prodMap[String(pId)];
+                    if (matched.design_numbers?.code) {
+                        it.size_breakdown.product_design_number = matched.design_numbers.code;
+                    }
+                    if (matched.name) {
+                        it.product_name = matched.name;
+                        it.size_breakdown.product_name = matched.name;
+                    }
+                    if (matched.art_number && !it.size_breakdown.art_number) {
+                        it.size_breakdown.art_number = matched.art_number;
+                    }
+                } else if (!it.product_name && it.size_breakdown?.product_name) {
+                    it.product_name = it.size_breakdown.product_name;
                 }
             });
         }
+    } else {
+        items.forEach(it => {
+            if (!it.product_name && it.size_breakdown?.product_name) {
+                it.product_name = it.size_breakdown.product_name;
+            }
+        });
     }
     return items;
 }
@@ -782,33 +833,83 @@ exports.createQuotation = async (req, res) => {
         }
 
         // Format items with quotation ID
-        const itemsToInsert = items.map(item => ({
-            quotation_id: quote.id,
-            product_type_id: item.product_type_id || null,
-            quantity: item.quantity || 1,
-            unit_price: item.unit_price || 0,
-            total_price: item.total_price || 0,
-            size_breakdown: {
+        const itemsToInsert = items.map(item => {
+            const breakdown = {
                 ...(item.size_breakdown || {}),
+                product_id: item.product_id || (item.size_breakdown && item.size_breakdown.product_id) || null,
+                product_name: item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || null,
+                art_number: item.art_number || (item.size_breakdown && item.size_breakdown.art_number) || null,
                 fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                main_fabric_meters: item.main_fabric_meters !== undefined ? item.main_fabric_meters : (item.size_breakdown && item.size_breakdown.main_fabric_meters) || null,
                 attachment_fabric1_id: item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id) || null,
+                attachment_fabric1_meters: item.attachment_fabric1_meters !== undefined ? item.attachment_fabric1_meters : (item.size_breakdown && item.size_breakdown.attachment_fabric1_meters) || null,
                 attachment_fabric2_id: item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id) || null,
+                attachment_fabric2_meters: item.attachment_fabric2_meters !== undefined ? item.attachment_fabric2_meters : (item.size_breakdown && item.size_breakdown.attachment_fabric2_meters) || null,
                 trims: item.trims || (item.size_breakdown && item.size_breakdown.trims) || [],
                 button_id: item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null,
                 thread_id: item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null,
                 sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
                 design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
-                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
-            },
-            fabric_cost_per_item: item.fabric_cost_per_item || 0,
-            accessories_cost_per_item: item.accessories_cost_per_item || 0,
-            labor_cost_per_item: item.labor_cost_per_item || 0
-        }));
+                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false),
+                fabric_cost_per_item: item.fabric_cost_per_item || 0,
+                accessories_cost_per_item: item.accessories_cost_per_item || 0,
+                labor_cost_per_item: item.labor_cost_per_item || 0
+            };
 
-        // Insert quotation items
-        const { error: itemsError } = await supabase
+            return {
+                quotation_id: quote.id,
+                product_type_id: item.product_type_id || null,
+                quantity: item.quantity || 1,
+                unit_price: item.unit_price || 0,
+                total_price: item.total_price || 0,
+                size_breakdown: breakdown,
+                fabric_cost_per_item: item.fabric_cost_per_item || 0,
+                accessories_cost_per_item: item.accessories_cost_per_item || 0,
+                labor_cost_per_item: item.labor_cost_per_item || 0,
+                is_manual: item.is_manual !== undefined ? item.is_manual : false,
+                manual_item_name: item.product_name || item.name || item.manual_item_name || null,
+                notes: JSON.stringify(breakdown)
+            };
+        });
+
+        // Insert quotation items with robust multi-tier fallback for schema cache / column differences
+        let itemsError = null;
+        const initialRes = await supabase
             .from('quotation_items')
             .insert(itemsToInsert);
+
+        if (initialRes.error) {
+            console.warn('Initial quotation_items insert failed:', initialRes.error.message);
+            // Tier 1: Try without separate cost columns (costs are already safely embedded in size_breakdown)
+            const tier1Items = itemsToInsert.map(it => {
+                const { fabric_cost_per_item, accessories_cost_per_item, labor_cost_per_item, ...rest } = it;
+                return rest;
+            });
+            const t1Res = await supabase.from('quotation_items').insert(tier1Items);
+            if (!t1Res.error) {
+                itemsError = null;
+            } else {
+                console.warn('Tier 1 quotation_items insert failed:', t1Res.error.message);
+                // Tier 2: Try minimal columns known to exist in older schema
+                const tier2Items = itemsToInsert.map(it => ({
+                    quotation_id: it.quotation_id,
+                    quantity: it.quantity,
+                    unit_price: it.unit_price,
+                    total_price: it.total_price,
+                    notes: it.notes,
+                    is_manual: it.is_manual,
+                    manual_item_name: it.manual_item_name
+                }));
+                const t2Res = await supabase.from('quotation_items').insert(tier2Items);
+                if (!t2Res.error) {
+                    itemsError = null;
+                } else {
+                    itemsError = t2Res.error;
+                }
+            }
+        } else {
+            itemsError = null;
+        }
 
         if (itemsError) {
             // Roll back quotation header if item insert fails
@@ -1164,33 +1265,83 @@ exports.updateQuotation = async (req, res) => {
         if (deleteError) throw deleteError;
 
         // Format items with quotation ID
-        const itemsToInsert = items.map(item => ({
-            quotation_id: id,
-            product_type_id: item.product_type_id || null,
-            quantity: item.quantity || 1,
-            unit_price: item.unit_price || 0,
-            total_price: item.total_price || 0,
-            size_breakdown: {
+        const itemsToInsert = items.map(item => {
+            const breakdown = {
                 ...(item.size_breakdown || {}),
+                product_id: item.product_id || (item.size_breakdown && item.size_breakdown.product_id) || null,
+                product_name: item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || null,
+                art_number: item.art_number || (item.size_breakdown && item.size_breakdown.art_number) || null,
                 fabric_id: item.fabric_id || (item.size_breakdown && item.size_breakdown.fabric_id) || null,
+                main_fabric_meters: item.main_fabric_meters !== undefined ? item.main_fabric_meters : (item.size_breakdown && item.size_breakdown.main_fabric_meters) || null,
                 attachment_fabric1_id: item.attachment_fabric1_id || (item.size_breakdown && item.size_breakdown.attachment_fabric1_id) || null,
+                attachment_fabric1_meters: item.attachment_fabric1_meters !== undefined ? item.attachment_fabric1_meters : (item.size_breakdown && item.size_breakdown.attachment_fabric1_meters) || null,
                 attachment_fabric2_id: item.attachment_fabric2_id || (item.size_breakdown && item.size_breakdown.attachment_fabric2_id) || null,
+                attachment_fabric2_meters: item.attachment_fabric2_meters !== undefined ? item.attachment_fabric2_meters : (item.size_breakdown && item.size_breakdown.attachment_fabric2_meters) || null,
                 trims: item.trims || (item.size_breakdown && item.size_breakdown.trims) || [],
                 button_id: item.button_id || (item.size_breakdown && item.size_breakdown.button_id) || null,
                 thread_id: item.thread_id || (item.size_breakdown && item.size_breakdown.thread_id) || null,
                 sam_value: item.sam_value !== undefined ? item.sam_value : (item.size_breakdown && item.size_breakdown.sam_value) || null,
                 design_number: item.design_number || (item.size_breakdown && item.size_breakdown.design_number) || null,
-                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false)
-            },
-            fabric_cost_per_item: item.fabric_cost_per_item || 0,
-            accessories_cost_per_item: item.accessories_cost_per_item || 0,
-            labor_cost_per_item: item.labor_cost_per_item || 0
-        }));
+                is_manual: item.is_manual !== undefined ? item.is_manual : (item.size_breakdown && item.size_breakdown.is_manual !== undefined ? item.size_breakdown.is_manual : false),
+                fabric_cost_per_item: item.fabric_cost_per_item || 0,
+                accessories_cost_per_item: item.accessories_cost_per_item || 0,
+                labor_cost_per_item: item.labor_cost_per_item || 0
+            };
 
-        // Insert quotation items
-        const { error: itemsError } = await supabase
+            return {
+                quotation_id: id,
+                product_type_id: item.product_type_id || null,
+                quantity: item.quantity || 1,
+                unit_price: item.unit_price || 0,
+                total_price: item.total_price || 0,
+                size_breakdown: breakdown,
+                fabric_cost_per_item: item.fabric_cost_per_item || 0,
+                accessories_cost_per_item: item.accessories_cost_per_item || 0,
+                labor_cost_per_item: item.labor_cost_per_item || 0,
+                is_manual: item.is_manual !== undefined ? item.is_manual : false,
+                manual_item_name: item.product_name || item.name || item.manual_item_name || null,
+                notes: JSON.stringify(breakdown)
+            };
+        });
+
+        // Insert quotation items with robust multi-tier fallback for schema cache / column differences
+        let itemsError = null;
+        const initialRes = await supabase
             .from('quotation_items')
             .insert(itemsToInsert);
+
+        if (initialRes.error) {
+            console.warn('Update quotation_items insert failed:', initialRes.error.message);
+            // Tier 1: Try without separate cost columns (costs are already safely embedded in size_breakdown)
+            const tier1Items = itemsToInsert.map(it => {
+                const { fabric_cost_per_item, accessories_cost_per_item, labor_cost_per_item, ...rest } = it;
+                return rest;
+            });
+            const t1Res = await supabase.from('quotation_items').insert(tier1Items);
+            if (!t1Res.error) {
+                itemsError = null;
+            } else {
+                console.warn('Tier 1 update quotation_items insert failed:', t1Res.error.message);
+                // Tier 2: Try minimal columns known to exist in older schema
+                const tier2Items = itemsToInsert.map(it => ({
+                    quotation_id: it.quotation_id,
+                    quantity: it.quantity,
+                    unit_price: it.unit_price,
+                    total_price: it.total_price,
+                    notes: it.notes,
+                    is_manual: it.is_manual,
+                    manual_item_name: it.manual_item_name
+                }));
+                const t2Res = await supabase.from('quotation_items').insert(tier2Items);
+                if (!t2Res.error) {
+                    itemsError = null;
+                } else {
+                    itemsError = t2Res.error;
+                }
+            }
+        } else {
+            itemsError = null;
+        }
 
         if (itemsError) {
             throw itemsError;
@@ -1214,6 +1365,83 @@ exports.updateQuotation = async (req, res) => {
 
         res.json({ success: true, quotationId: id, designNumberAlreadyExists: anyDesignNumberAlreadyExists });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+ 
+// 7. Submit Quotation to Operations Team
+exports.submitToOps = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Fetch existing quotation
+        const { data: quotation, error: fetchError } = await supabase
+            .from('quotations')
+            .select('id, quotation_no, status, metrics_summary, organization_id')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !quotation) {
+            return res.status(404).json({ error: 'Quotation not found.' });
+        }
+
+        if (quotation.status === 'Approved') {
+            return res.status(400).json({ error: 'Quotation has already been approved and cannot be resubmitted.' });
+        }
+
+        const isAlreadySubmitted = quotation.status === 'Pending' || quotation.metrics_summary?.submitted_to_ops;
+        if (isAlreadySubmitted && quotation.status !== 'Draft') {
+            return res.status(400).json({ error: 'Quotation has already been submitted to the operations team.' });
+        }
+
+        const submittedAt = new Date().toISOString();
+        const updatedMetrics = {
+            ...(quotation.metrics_summary || {}),
+            submitted_to_ops: true,
+            submitted_to_ops_at: submittedAt,
+            submitted_to_ops_by: req.user?.id || null,
+            submitted_to_ops_by_name: req.user?.fullName || req.user?.email || null
+        };
+
+        const { data: updatedQuote, error: updateError } = await supabase
+            .from('quotations')
+            .update({
+                status: 'Pending',
+                metrics_summary: updatedMetrics,
+                updated_at: submittedAt
+            })
+            .eq('id', id)
+            .select('*, organizations(name, branch_id), group_design_number:group_design_numbers(code)')
+            .single();
+
+        if (updateError) throw updateError;
+
+        // Log record activity
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'Quotation',
+                entity_id: quotation.id,
+                action: 'SUBMIT_TO_OPERATIONS',
+                performed_by: toSafeInt(req.user?.id),
+                performed_by_name: req.user?.fullName || req.user?.email || null,
+                details: {
+                    quotation_no: quotation.quotation_no,
+                    status: 'Pending',
+                    submitted_at: submittedAt
+                },
+                created_at: submittedAt
+            }]);
+        } catch (logErr) {
+            console.warn('[QuotationController] Activity log failed:', logErr.message);
+        }
+
+        res.json({
+            success: true,
+            message: `Quotation ${quotation.quotation_no} submitted to Operations Team successfully.`,
+            quotation: updatedQuote
+        });
+    } catch (err) {
+        console.error('[QuotationController] submitToOps error:', err);
         res.status(500).json({ error: err.message });
     }
 };
@@ -2011,7 +2239,7 @@ exports.listDesignNumbers = async (req, res) => {
         // Fetch products
         const { data: products, error: prodError } = await supabase
             .from('products')
-            .select('id, name, art_number, main_fabric, sam_value, button_id, button_count, thread_id, thread_count, design_number_id');
+            .select('id, name, art_number, sam_value, design_number_id, class_fabric_consumption, materials, category, gender');
 
         if (prodError) throw prodError;
 
@@ -2039,27 +2267,48 @@ exports.listDesignNumbers = async (req, res) => {
             
             let spec = null;
             if (mainProduct) {
+                const consumption = mainProduct.class_fabric_consumption || {};
+                let mainFabricMeters = consumption._base_main_fabric;
+                if (!mainFabricMeters && mainProduct.materials) {
+                    const match = mainProduct.materials.match(/\[MainFabricMeters:\s*([\d\.]+)\]/);
+                    if (match) mainFabricMeters = match[1];
+                }
+
+                const buttonTrim = (consumption._base_trims || []).find(t => 
+                    t.category === 'Buttons' || (t.name && t.name.toLowerCase().includes('button'))
+                );
+                const threadTrim = (consumption._base_trims || []).find(t => 
+                    t.category === 'Sewing Thread' || (t.name && t.name.toLowerCase().includes('thread'))
+                );
+
                 spec = {
                     product_id: mainProduct.id,
                     product_name: mainProduct.name,
                     art_number: mainProduct.art_number || '—',
-                    main_fabric_id: null,
-                    main_fabric_meters: mainProduct.main_fabric || '1.25',
+                    main_fabric_id: consumption._base_main_fabric_id || null,
+                    main_fabric_meters: mainFabricMeters || '1.25',
                     sam_value: mainProduct.sam_value,
-                    button_id: mainProduct.button_id,
-                    button_count: mainProduct.button_count || 0,
-                    thread_id: mainProduct.thread_id,
-                    thread_count: mainProduct.thread_count || 0,
+                    button_id: buttonTrim?.id || null,
+                    button_count: buttonTrim ? (Number(buttonTrim.count) || 0) : 0,
+                    thread_id: threadTrim?.id || null,
+                    thread_count: threadTrim ? (Number(threadTrim.count) || 0) : 0,
                     type: 'Main Product'
                 };
             } else if (variant) {
                 const parentProduct = (products || []).find(p => p.id === variant.product_id);
+                const parentConsumption = parentProduct ? (parentProduct.class_fabric_consumption || {}) : {};
+                let parentMainFabric = parentConsumption._base_main_fabric;
+                if (!parentMainFabric && parentProduct && parentProduct.materials) {
+                    const match = parentProduct.materials.match(/\[MainFabricMeters:\s*([\d\.]+)\]/);
+                    if (match) parentMainFabric = match[1];
+                }
+
                 spec = {
                     product_id: variant.product_id,
                     product_name: parentProduct ? parentProduct.name : 'Unregistered Product',
                     art_number: parentProduct ? parentProduct.art_number : '—',
-                    main_fabric_id: null,
-                    main_fabric_meters: parentProduct ? (parentProduct.main_fabric || '1.25') : '1.25',
+                    main_fabric_id: parentConsumption._base_main_fabric_id || null,
+                    main_fabric_meters: parentMainFabric || '1.25',
                     sam_value: parentProduct ? parentProduct.sam_value : null,
                     button_id: variant.button_id,
                     button_count: variant.button_count || 0,
@@ -2072,7 +2321,7 @@ exports.listDesignNumbers = async (req, res) => {
             return {
                 id: dn.id,
                 code: dn.code,
-                name: dn.name || dn.code,
+                name: dn.name || (spec?.product_name ? `${spec.product_name} (${dn.code})` : dn.code),
                 description: dn.description || '',
                 created_at: dn.created_at,
                 spec: spec
@@ -2081,6 +2330,7 @@ exports.listDesignNumbers = async (req, res) => {
 
         res.json(results);
     } catch (err) {
+        console.error('[QuotationController] listDesignNumbers error:', err);
         res.status(500).json({ error: err.message });
     }
 };

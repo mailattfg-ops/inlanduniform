@@ -741,6 +741,153 @@ exports.trimCategories = {
   },
 };
 
+const DEFAULT_ACCESSORY_CATEGORIES = [
+  { id: 'cat-tie', name: 'Tie', code_prefix: 'TIE', is_system: true },
+  { id: 'cat-belt', name: 'Belt', code_prefix: 'BLT', is_system: true },
+  { id: 'cat-socks', name: 'Socks', code_prefix: 'SCK', is_system: true },
+  { id: 'cat-badge', name: 'Badge / Crest', code_prefix: 'BDG', is_system: true },
+  { id: 'cat-cap', name: 'Cap / Hat', code_prefix: 'CAP', is_system: true },
+  { id: 'cat-lanyard', name: 'Lanyard / ID Card', code_prefix: 'LAN', is_system: true },
+  { id: 'cat-scarf', name: 'Scarf / Dupatta', code_prefix: 'SCF', is_system: true },
+  { id: 'cat-bottle', name: 'Water Bottle / Lunchbox', code_prefix: 'BOT', is_system: true },
+  { id: 'cat-other', name: 'Other Accessory', code_prefix: 'ACC', is_system: true }
+];
+
+let inMemoryCustomAccessoryCategories = [];
+
+exports.accessoryCategories = {
+  list: async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("accessory_categories")
+        .select("*")
+        .order("is_system", { ascending: false })
+        .order("name", { ascending: true });
+
+      if (!error && Array.isArray(data) && data.length > 0) {
+        return res.json(data);
+      }
+
+      // Return default list merged with in-memory custom categories
+      return res.json([...DEFAULT_ACCESSORY_CATEGORIES, ...inMemoryCustomAccessoryCategories]);
+    } catch (err) {
+      console.warn("accessoryCategories.list fallback:", err.message);
+      return res.json([...DEFAULT_ACCESSORY_CATEGORIES, ...inMemoryCustomAccessoryCategories]);
+    }
+  },
+  create: async (req, res) => {
+    const { name, code_prefix } = req.body;
+    try {
+      if (!name || !name.trim()) {
+        return res.status(400).json({ error: "Accessory category name is required." });
+      }
+      const cleanName = name.trim();
+      const cleanPrefix = (code_prefix || cleanName.substring(0, 3)).trim().toUpperCase();
+
+      // Try database insert first
+      try {
+        const { data, error } = await supabase
+          .from("accessory_categories")
+          .insert([
+            {
+              name: cleanName,
+              code_prefix: cleanPrefix,
+              is_system: false,
+            },
+          ])
+          .select()
+          .single();
+
+        if (!error && data) {
+          return res.json(data);
+        }
+      } catch (dbErr) {
+        // Table not present yet, fallback
+      }
+
+      const newCategory = {
+        id: `cat-${Date.now()}`,
+        name: cleanName,
+        code_prefix: cleanPrefix,
+        is_system: false,
+        created_at: new Date().toISOString()
+      };
+      inMemoryCustomAccessoryCategories.push(newCategory);
+      return res.json(newCategory);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  },
+  update: async (req, res) => {
+    const { id } = req.params;
+    const { name, code_prefix } = req.body;
+    try {
+      const cleanName = name?.trim();
+      const cleanPrefix = code_prefix?.trim()?.toUpperCase();
+
+      try {
+        const { data, error } = await supabase
+          .from("accessory_categories")
+          .update({
+            ...(cleanName ? { name: cleanName } : {}),
+            ...(cleanPrefix ? { code_prefix: cleanPrefix } : {})
+          })
+          .eq("id", id)
+          .select()
+          .single();
+
+        if (!error && data) {
+          return res.json(data);
+        }
+      } catch (dbErr) {
+        // Fallback
+      }
+
+      // Check in-memory custom categories
+      const inMemIndex = inMemoryCustomAccessoryCategories.findIndex(c => String(c.id) === String(id));
+      if (inMemIndex >= 0) {
+        if (cleanName) inMemoryCustomAccessoryCategories[inMemIndex].name = cleanName;
+        if (cleanPrefix) inMemoryCustomAccessoryCategories[inMemIndex].code_prefix = cleanPrefix;
+        return res.json(inMemoryCustomAccessoryCategories[inMemIndex]);
+      }
+
+      // Check default categories
+      const defIndex = DEFAULT_ACCESSORY_CATEGORIES.findIndex(c => String(c.id) === String(id));
+      if (defIndex >= 0) {
+        if (cleanName) DEFAULT_ACCESSORY_CATEGORIES[defIndex].name = cleanName;
+        if (cleanPrefix) DEFAULT_ACCESSORY_CATEGORIES[defIndex].code_prefix = cleanPrefix;
+        return res.json(DEFAULT_ACCESSORY_CATEGORIES[defIndex]);
+      }
+
+      return res.status(404).json({ error: "Category not found" });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  },
+  delete: async (req, res) => {
+    const { id } = req.params;
+    try {
+      try {
+        const { error } = await supabase
+          .from("accessory_categories")
+          .delete()
+          .eq("id", id);
+
+        if (!error) return res.json({ success: true });
+      } catch (dbErr) {
+        // Fallback
+      }
+
+      inMemoryCustomAccessoryCategories = inMemoryCustomAccessoryCategories.filter(
+        c => String(c.id) !== String(id)
+      );
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+};
+
 exports.trims = {
   list: async (req, res) => {
     try {
@@ -933,24 +1080,37 @@ exports.trims = {
 exports.stocks = {
   list: async (req, res) => {
     try {
-      // 1. Fetch all products with product types
-      const { data: products, error: prodError } = await supabase
-        .from("products")
-        .select("*, product_types(id, name)")
-        .order("created_at", { ascending: false });
+      // Parallelize queries across product, stock, fabric, and trims
+      const [productsRes, stockRes, fabricsRes, trimsRes] = await Promise.all([
+        supabase
+          .from("products")
+          .select("*, product_types(id, name)")
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("product_stocks")
+          .select("*"),
+        supabase
+          .from("fabrics")
+          .select("*")
+          .order("code", { ascending: true }),
+        supabase
+          .from("trims")
+          .select("*, category:trim_categories(id, name, code_prefix, default_uom)")
+          .order("code", { ascending: true }),
+      ]);
 
-      if (prodError) throw prodError;
+      if (productsRes.error) throw productsRes.error;
+      if (stockRes.error) throw stockRes.error;
+      if (fabricsRes.error) throw fabricsRes.error;
 
-      // 2. Fetch all size-based stock records
-      const { data: stockRecords, error: stockError } = await supabase
-        .from("product_stocks")
-        .select("*");
-
-      if (stockError) throw stockError;
+      const products = productsRes.data || [];
+      const stockRecords = stockRes.data || [];
+      const fabrics = fabricsRes.data || [];
+      const trims = trimsRes.data || [];
 
       // Map products with their stock entries
-      const enrichedProducts = (products || []).map((p) => {
-        const matchedStocks = (stockRecords || []).filter(
+      const enrichedProducts = products.map((p) => {
+        const matchedStocks = stockRecords.filter(
           (s) => String(s.product_id) === String(p.id),
         );
         return {
@@ -959,54 +1119,26 @@ exports.stocks = {
         };
       });
 
-      // 3. Fetch raw fabrics list
-      const { data: fabrics, error: fabError } = await supabase
-        .from("fabrics")
-        .select("*")
-        .order("code", { ascending: true });
+      // Filter or populate legacy threads and buttons from trims for backwards compatibility
+      const threads = trims.filter((t) => {
+        const catName = (t.category?.name || "").toLowerCase();
+        return catName === "thread" || (t.code || "").toUpperCase().startsWith("THR-");
+      });
 
-      if (fabError) throw fabError;
-
-      // 4. Fetch threads list
-      const { data: threads, error: threadError } = await supabase
-        .from("threads")
-        .select("*")
-        .order("code", { ascending: true });
-
-      if (threadError) throw threadError;
-
-      // 5. Fetch buttons list
-      const { data: buttons, error: buttonError } = await supabase
-        .from("buttons")
-        .select("*")
-        .order("code", { ascending: true });
-
-      if (buttonError) throw buttonError;
-
-      // 6. Fetch dynamic trims list with categories
-      let trims = [];
-      try {
-        const { data: trimsData, error: trimError } = await supabase
-          .from("trims")
-          .select(
-            "*, category:trim_categories(id, name, code_prefix, default_uom)",
-          )
-          .order("code", { ascending: true });
-        if (!trimError && trimsData) {
-          trims = trimsData;
-        }
-      } catch (trimEx) {
-        // Table might not exist yet if migration pending
-      }
+      const buttons = trims.filter((t) => {
+        const catName = (t.category?.name || "").toLowerCase();
+        return catName === "button" || (t.code || "").toUpperCase().startsWith("BTN-");
+      });
 
       res.json({
         products: enrichedProducts,
-        fabrics: fabrics || [],
-        threads: threads || [],
-        buttons: buttons || [],
-        trims: trims || [],
+        fabrics: fabrics,
+        threads: threads,
+        buttons: buttons,
+        trims: trims,
       });
     } catch (err) {
+      console.error("❌ [INVENTORY ERROR] stocks.list failed:", err.message);
       res.status(500).json({ error: err.message });
     }
   },
@@ -1071,129 +1203,50 @@ exports.stocks = {
         return res.json(updatedFabric);
       }
 
-      // Case 2: Thread Stock/Threshold Adjustment
-      if (thread_id) {
-        const { data: thread, error: fetchErr } = await supabase
-          .from("threads")
-          .select("*")
-          .eq("id", thread_id)
-          .single();
-
-        if (fetchErr || !thread) {
-          return res.status(404).json({ error: "Thread record not found." });
-        }
-
-        const updates = {};
-
-        if (quantity_delta !== undefined) {
-          updates.quantity = Math.max(
-            0.0,
-            parseFloat(thread.quantity || 0) + parseFloat(quantity_delta),
-          );
-        }
-
-        if (low_stock_threshold !== undefined) {
-          updates.low_stock_threshold = Math.max(
-            0.0,
-            parseFloat(low_stock_threshold),
-          );
-        }
-
-        const { data: updatedThread, error: updateErr } = await supabase
-          .from("threads")
-          .update(updates)
-          .eq("id", thread_id)
-          .select()
-          .single();
-
-        if (updateErr) throw updateErr;
-
-        return res.json(updatedThread);
-      }
-
-      // Case 3: Button Stock/Threshold Adjustment
-      if (button_id) {
-        const { data: button, error: fetchErr } = await supabase
-          .from("buttons")
-          .select("*")
-          .eq("id", button_id)
-          .single();
-
-        if (fetchErr || !button) {
-          return res.status(404).json({ error: "Button record not found." });
-        }
-
-        const updates = {};
-
-        if (quantity_delta !== undefined) {
-          updates.quantity = Math.max(
-            0.0,
-            parseFloat(button.quantity || 0) + parseFloat(quantity_delta),
-          );
-        }
-
-        if (low_stock_threshold !== undefined) {
-          updates.low_stock_threshold = Math.max(
-            0.0,
-            parseFloat(low_stock_threshold),
-          );
-        }
-
-        const { data: updatedButton, error: updateErr } = await supabase
-          .from("buttons")
-          .update(updates)
-          .eq("id", button_id)
-          .select()
-          .single();
-
-        if (updateErr) throw updateErr;
-
-        return res.json(updatedButton);
-      }
-
-      // Case 3b: Dynamic Trims Stock/Threshold Adjustment
+      // Case 2 & 3: Trims / Buttons / Threads Stock/Threshold Adjustment
       const { trim_id } = req.body;
-      if (trim_id) {
+      const effectiveTrimId = trim_id || button_id || thread_id;
+      if (effectiveTrimId) {
         const { data: trim, error: fetchErr } = await supabase
           .from("trims")
           .select("*")
-          .eq("id", trim_id)
-          .single();
+          .eq("id", effectiveTrimId)
+          .maybeSingle();
 
-        if (fetchErr || !trim) {
-          return res.status(404).json({ error: "Trim record not found." });
+        if (trim) {
+          const updates = {
+            updated_at: new Date(),
+          };
+
+          if (quantity_delta !== undefined) {
+            updates.quantity = Math.max(
+              0.0,
+              parseFloat(trim.quantity || 0) + parseFloat(quantity_delta),
+            );
+          }
+
+          if (low_stock_threshold !== undefined) {
+            updates.low_stock_threshold = Math.max(
+              0.0,
+              parseFloat(low_stock_threshold),
+            );
+          }
+
+          const { data: updatedTrim, error: updateErr } = await supabase
+            .from("trims")
+            .update(updates)
+            .eq("id", effectiveTrimId)
+            .select(
+              "*, category:trim_categories(id, name, code_prefix, default_uom)",
+            )
+            .single();
+
+          if (updateErr) throw updateErr;
+
+          return res.json(updatedTrim);
         }
 
-        const updates = {
-          updated_at: new Date(),
-        };
-
-        if (quantity_delta !== undefined) {
-          updates.quantity = Math.max(
-            0.0,
-            parseFloat(trim.quantity || 0) + parseFloat(quantity_delta),
-          );
-        }
-
-        if (low_stock_threshold !== undefined) {
-          updates.low_stock_threshold = Math.max(
-            0.0,
-            parseFloat(low_stock_threshold),
-          );
-        }
-
-        const { data: updatedTrim, error: updateErr } = await supabase
-          .from("trims")
-          .update(updates)
-          .eq("id", trim_id)
-          .select(
-            "*, category:trim_categories(id, name, code_prefix, default_uom)",
-          )
-          .single();
-
-        if (updateErr) throw updateErr;
-
-        return res.json(updatedTrim);
+        return res.status(404).json({ error: "Trim, button, or thread item not found." });
       }
 
       // Case 4: Product Sizing Stock/Threshold Adjustment

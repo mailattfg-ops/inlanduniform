@@ -309,6 +309,11 @@ exports.listProducts = async (req, res) => {
 
 async function safeInsertProduct(payload) {
     let currentPayload = { ...payload };
+    // Strip out any keys with undefined values
+    Object.keys(currentPayload).forEach(key => {
+        if (currentPayload[key] === undefined) delete currentPayload[key];
+    });
+
     for (let attempt = 0; attempt < 10; attempt++) {
         const { data, error } = await supabase
             .from('products')
@@ -320,9 +325,10 @@ async function safeInsertProduct(payload) {
 
         // Handle missing column in schema cache
         const missingColMatch = error.message && error.message.match(/Could not find the '([^']+)' column of 'products'/i);
-        if (missingColMatch && missingColMatch[1] && currentPayload[missingColMatch[1]] !== undefined) {
-            console.warn(`Column '${missingColMatch[1]}' not found in products table schema cache. Omitting and retrying...`);
-            delete currentPayload[missingColMatch[1]];
+        if (missingColMatch && missingColMatch[1]) {
+            const missingCol = missingColMatch[1];
+            console.warn(`Column '${missingCol}' not found in products table schema cache. Omitting and retrying...`);
+            delete currentPayload[missingCol];
             continue;
         }
 
@@ -364,6 +370,11 @@ async function safeInsertProduct(payload) {
 
 async function safeUpdateProduct(id, payload) {
     let currentPayload = { ...payload };
+    // Strip out any keys with undefined values
+    Object.keys(currentPayload).forEach(key => {
+        if (currentPayload[key] === undefined) delete currentPayload[key];
+    });
+
     for (let attempt = 0; attempt < 10; attempt++) {
         const { data, error } = await supabase
             .from('products')
@@ -376,9 +387,10 @@ async function safeUpdateProduct(id, payload) {
 
         // Handle missing column in schema cache
         const missingColMatch = error.message && error.message.match(/Could not find the '([^']+)' column of 'products'/i);
-        if (missingColMatch && missingColMatch[1] && currentPayload[missingColMatch[1]] !== undefined) {
-            console.warn(`Column '${missingColMatch[1]}' not found in products table schema cache. Omitting and retrying...`);
-            delete currentPayload[missingColMatch[1]];
+        if (missingColMatch && missingColMatch[1]) {
+            const missingCol = missingColMatch[1];
+            console.warn(`Column '${missingCol}' not found in products table schema cache. Omitting and retrying...`);
+            delete currentPayload[missingCol];
             continue;
         }
 
@@ -492,7 +504,7 @@ exports.createProduct = async (req, res) => {
             gender, 
             measurements, 
             materials: serializedMaterials, 
-            entry_methods, 
+            ...(entry_methods !== undefined ? { entry_methods } : {}), 
             size_chart_id, 
             category, 
             product_type_id, 
@@ -714,7 +726,7 @@ exports.updateProduct = async (req, res) => {
                 gender, 
                 measurements, 
                 materials: serializedMaterials, 
-                entry_methods, 
+                ...(entry_methods !== undefined ? { entry_methods } : {}), 
                 size_chart_id,
                 category,
                 product_type_id, 
@@ -763,7 +775,7 @@ exports.updateProduct = async (req, res) => {
             gender, 
             measurements, 
             materials: serializedMaterials, 
-            entry_methods, 
+            ...(entry_methods !== undefined ? { entry_methods } : {}), 
             size_chart_id, 
             category, 
             product_type_id, 

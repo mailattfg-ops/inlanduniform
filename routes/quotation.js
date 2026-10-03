@@ -34,8 +34,17 @@ router.post('/', authMiddleware, checkPermission(['manage_quotations', 'branch_s
 // Update quotation (if not locked, allowed for staff and managers)
 router.put('/:id', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.updateQuotation);
 
-// Submit quotation to operations team (Marketing staff / managers)
-router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.submitToOps);
+// Submit quotation to Branch Manager for approval (Marketing & Sales staff)
+router.put('/:id/submit-to-bm', authMiddleware, checkPermission(['submit_quotations_bm', 'manage_quotations']), quotationController.submitToBranchManager);
+
+// Branch Manager approves quotation and submits to Operations
+router.put('/:id/bm-approve', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmApproveAndSubmitToOps);
+
+// Branch Manager rejects quotation back to Draft for revisions
+router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmRejectQuotation);
+
+// Submit quotation directly to operations team (Branch Managers with Ops Submission authority)
+router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.submitToOps);
 
 // Delete quotation (Restricted strictly to managers/admins)
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);

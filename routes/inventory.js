@@ -33,6 +33,12 @@ router.post('/trim-categories', requireAdmin, inventoryController.trimCategories
 router.put('/trim-categories/:id', requireAdmin, inventoryController.trimCategories.update);
 router.delete('/trim-categories/:id', requireAdmin, inventoryController.trimCategories.delete);
 
+// Accessory Categories (Dynamic Accessories Master - editable & customizable like trims)
+router.get('/accessory-categories', inventoryController.accessoryCategories.list);
+router.post('/accessory-categories', inventoryController.accessoryCategories.create);
+router.put('/accessory-categories/:id', inventoryController.accessoryCategories.update);
+router.delete('/accessory-categories/:id', inventoryController.accessoryCategories.delete);
+
 // Unified Trims Catalog & Items
 router.get('/trims', inventoryController.trims.list);
 router.post('/trims', requireAdmin, inventoryController.trims.create);

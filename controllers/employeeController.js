@@ -5,6 +5,48 @@ const { logAction } = require('../utils/logger');
 // Utility for password generation
 const generatePassword = () => crypto.randomBytes(4).toString('hex').toUpperCase();
 
+// Helper for intelligent default baseline permissions based on department & designation
+function getDefaultPermissionsForDepartment(dept, desig) {
+  const d = (dept || '').toLowerCase();
+  const title = (desig || '').toLowerCase();
+
+  if (title.includes('manager') || title.includes('in-charge') || title.includes('head') || title.includes('lead')) {
+    return [
+      'branch_inventory', 'branch_sales', 'branch_transfers',
+      'view_employees', 'view_organizations', 'manage_schools', 'view_schools',
+      'view_products', 'manage_products', 'view_measurements', 'manage_measurements',
+      'manage_quotations', 'view_quotations', 'submit_quotations_ops', 'corporate_approver',
+      'manage_invoices', 'view_invoices'
+    ];
+  }
+
+  if (d.includes('production') || d.includes('tailor') || d.includes('cutting') || d.includes('quality') || d.includes('finishing')) {
+    return ['factory_floor', 'view_measurements', 'view_products'];
+  }
+
+  if (d.includes('marketing') || d.includes('sales')) {
+    return ['manage_quotations', 'view_quotations', 'submit_quotations_bm', 'branch_sales', 'view_organizations', 'view_schools', 'view_products', 'view_leads', 'manage_leads'];
+  }
+
+  if (d.includes('measurement') || d.includes('fitting')) {
+    return ['manage_measurements', 'view_measurements', 'manage_templates', 'view_products'];
+  }
+
+  if (d.includes('inventory') || d.includes('logistics') || d.includes('warehouse')) {
+    return ['view_inventory', 'manage_inventory', 'branch_inventory', 'branch_transfers', 'view_products'];
+  }
+
+  if (d.includes('account') || d.includes('finance') || d.includes('billing')) {
+    return ['manage_invoices', 'view_invoices', 'manage_payments', 'branch_sales'];
+  }
+
+  if (d.includes('human resources') || d.includes('hr') || d.includes('admin')) {
+    return ['view_employees', 'manage_employees'];
+  }
+
+  return ['branch_sales', 'view_products', 'view_measurements'];
+}
+
 exports.listEmployees = async (req, res) => {
   try {
     const { branch_id, department, employment_type, status, search } = req.query;
@@ -111,10 +153,90 @@ exports.createEmployee = async (req, res) => {
       if (existing) return res.status(400).json({ error: `Employee ID '${finalEmpId}' already exists. Please choose a unique ID or leave blank to auto-generate.` });
     }
 
+
     let userId = null;
     let credentials = null;
 
-    // 2. Optionally Generate Credentials if has_login_access is enabled
+    // 2. Resolve or Auto-Create Role in user_types table for this Designation + Department combo
+    const cleanDesig = (designation || '').trim();
+    const cleanDept = (department || '').trim();
+    
+    // Determine combo role name (e.g., "Master Tailor - Production & Tailoring")
+    let comboRoleName = (req.body.role_name && req.body.role_name.trim()) || '';
+    if (!comboRoleName) {
+      if (cleanDesig && cleanDept) {
+        comboRoleName = `${cleanDesig} - ${cleanDept}`;
+      } else {
+        comboRoleName = cleanDesig || cleanDept || 'Staff';
+      }
+    }
+
+    let staffRoleId = null;
+    let isNewRoleCreated = false;
+
+    // Check if an explicit role_id was passed
+    if (req.body.role_id) {
+      const { data: explicitRole } = await supabase
+        .from('user_types')
+        .select('id, name, permissions')
+        .eq('id', req.body.role_id)
+        .maybeSingle();
+      if (explicitRole) {
+        staffRoleId = explicitRole.id;
+      }
+    }
+
+    // If role not yet resolved, check if a role matching the combo or designation exists in user_types
+    if (!staffRoleId) {
+      let { data: existingRole } = await supabase
+        .from('user_types')
+        .select('id, name, permissions')
+        .ilike('name', comboRoleName)
+        .maybeSingle();
+
+      if (!existingRole && cleanDesig) {
+        const { data: byDesig } = await supabase
+          .from('user_types')
+          .select('id, name, permissions')
+          .ilike('name', cleanDesig)
+          .maybeSingle();
+        if (byDesig) existingRole = byDesig;
+      }
+
+      if (existingRole) {
+        staffRoleId = existingRole.id;
+        // If admin supplied custom permissions and wants to update the role
+        if (Array.isArray(req.body.permissions) && req.body.permissions.length > 0 && req.body.update_role_permissions) {
+          await supabase.from('user_types').update({ permissions: req.body.permissions }).eq('id', existingRole.id);
+        }
+      } else {
+        // Combo does not exist in user_types table -> Create the new role!
+        const assignedPermissions = Array.isArray(req.body.permissions) && req.body.permissions.length > 0
+          ? req.body.permissions
+          : getDefaultPermissionsForDepartment(cleanDept, cleanDesig);
+
+        const { data: newRole, error: newRoleError } = await supabase
+          .from('user_types')
+          .insert([{
+            name: comboRoleName,
+            permissions: assignedPermissions
+          }])
+          .select()
+          .single();
+
+        if (newRoleError) {
+          console.warn('[createEmployee] Failed to auto-insert new role into user_types:', newRoleError.message);
+          const { data: anyRole } = await supabase.from('user_types').select('id').limit(1);
+          staffRoleId = anyRole?.[0]?.id || null;
+        } else {
+          staffRoleId = newRole.id;
+          isNewRoleCreated = true;
+          console.log(`[createEmployee] Created new user_type role: '${comboRoleName}' with ${assignedPermissions.length} permissions.`);
+        }
+      }
+    }
+
+    // 3. Optionally Generate Credentials if has_login_access is enabled
     const shouldCreateLogin = has_login_access === true || has_login_access === 'true';
 
     if (shouldCreateLogin) {
@@ -122,32 +244,8 @@ exports.createEmployee = async (req, res) => {
       const cleanId = finalEmpId.toLowerCase().replace(/[^a-z0-9]/g, '');
       const empEmail = `${namePrefix}${cleanId}@inland.com`;
       const generatedPassword = generatePassword();
-      
-      // Dynamically resolve Staff role
-      let staffRoleId = null;
-      const { data: roleRecords } = await supabase
-        .from('user_types')
-        .select('id, name')
-        .or('name.ilike.%staff%,name.ilike.%employee%')
-        .limit(1);
 
-      if (roleRecords && roleRecords.length > 0) {
-        staffRoleId = roleRecords[0].id;
-      } else {
-        const { data: anyRole } = await supabase.from('user_types').select('id').limit(1);
-        if (anyRole && anyRole.length > 0) {
-          staffRoleId = anyRole[0].id;
-        } else {
-          const { data: newRole } = await supabase
-            .from('user_types')
-            .insert([{ name: 'Branch Staff', permissions: ['view_products', 'view_measurements'] }])
-            .select('id')
-            .single();
-          if (newRole) staffRoleId = newRole.id;
-        }
-      }
-
-      // Create User Profile
+      // Create User Profile linked to the resolved/newly created role
       const { data: userData, error: userError } = await supabase
         .from('user_profiles')
         .insert([{
@@ -244,7 +342,9 @@ exports.createEmployee = async (req, res) => {
     res.json({
       success: true,
       employee: empData,
-      credentials
+      credentials,
+      roleCreated: isNewRoleCreated,
+      roleId: staffRoleId
     });
 
   } catch (err) {

@@ -34,6 +34,7 @@ router.get('/config', (req, res, next) => {
     });
 }, measurementController.listConfig);
 router.post('/config', checkPermission('manage_measurements'), measurementController.addConfig);
+router.put('/config/:id', checkPermission('manage_measurements'), measurementController.updateConfig);
 router.delete('/config/:id', checkPermission('manage_measurements'), measurementController.deleteConfig);
 router.post('/record', (req, res, next) => {
     const role = req.user.role?.toLowerCase();

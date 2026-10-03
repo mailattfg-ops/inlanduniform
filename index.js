@@ -21,8 +21,9 @@ app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/members", memberRoutes);
-app.use("/api/students", memberRoutes); // Alias for legacy support
+app.use("/api/students", memberRoutes); // Alias for frontend student registry calls
 app.use("/api/organizations", organizationRoutes);
+app.use("/api/customers", organizationRoutes); // Alias for customer transition
 app.use("/api/departments", departmentRoutes);
 app.use("/api/industries", industryRoutes);
 app.use("/api/users", userRoutes);

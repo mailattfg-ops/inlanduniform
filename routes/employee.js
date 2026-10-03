@@ -20,5 +20,9 @@ router.put('/:id', checkPermission('manage_employees'), employeeController.updat
 router.delete('/:id', checkPermission('manage_employees'), employeeController.deleteEmployee);
 router.post('/:id/reset-password', checkPermission('manage_employees'), employeeController.resetPassword);
 router.post('/:id/sync-username', checkPermission('manage_employees'), employeeController.syncUsername);
+router.post('/:id/depute', checkPermission('manage_employees'), employeeController.assignTempBranch);
+router.post('/:id/recall', checkPermission('manage_employees'), employeeController.recallTempBranch);
+router.post('/:id/transfer', checkPermission('manage_employees'), employeeController.transferEmployee);
+router.get('/:id/history', checkPermission('view_employees'), employeeController.getEmployeeHistory);
 
 module.exports = router;

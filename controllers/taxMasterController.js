@@ -1,16 +1,5 @@
 const supabase = require('../config/supabase');
 
-// Default fallback tax slabs if database table is pending execution
-const DEFAULT_TAX_MASTERS = [
-    { id: 1, name: 'GST 5% - Apparel < ₹1,000', rate: 5.00, hsn_code: '6203', is_default: true, is_active: true },
-    { id: 2, name: 'GST 12% - Apparel ≥ ₹1,000', rate: 12.00, hsn_code: '6203', is_default: false, is_active: true },
-    { id: 3, name: 'GST 18% - Services & Synthetic Fabrics', rate: 18.00, hsn_code: '9988', is_default: false, is_active: true },
-    { id: 4, name: 'Zero Rated / Exempt (0%)', rate: 0.00, hsn_code: '0000', is_default: false, is_active: true }
-];
-
-// In-memory store for fallback mode
-let fallbackTaxes = [...DEFAULT_TAX_MASTERS];
-
 // 1. List all tax masters
 exports.listTaxes = async (req, res) => {
     try {
@@ -19,19 +8,11 @@ exports.listTaxes = async (req, res) => {
             .select('*')
             .order('rate', { ascending: true });
 
-        if (error) {
-            // Table might not be migrated yet - return fallback data gracefully
-            return res.json(fallbackTaxes);
-        }
-
-        if (!data || data.length === 0) {
-            return res.json(DEFAULT_TAX_MASTERS);
-        }
-
-        res.json(data);
+        if (error) throw error;
+        res.json(data || []);
     } catch (err) {
         console.error('[TaxMasterController] listTaxes error:', err.message);
-        res.json(fallbackTaxes);
+        res.status(500).json({ error: err.message });
     }
 };
 
@@ -64,14 +45,7 @@ exports.createTax = async (req, res) => {
             .select()
             .single();
 
-        if (error) {
-            // If table does not exist, insert into fallback memory store
-            const newId = fallbackTaxes.length ? Math.max(...fallbackTaxes.map(t => Number(t.id))) + 1 : 1;
-            const fallbackItem = { id: newId, ...payload };
-            fallbackTaxes.push(fallbackItem);
-            return res.status(201).json(fallbackItem);
-        }
-
+        if (error) throw error;
         res.status(201).json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -100,16 +74,7 @@ exports.updateTax = async (req, res) => {
             .select()
             .single();
 
-        if (error) {
-            // Fallback in-memory update
-            const idx = fallbackTaxes.findIndex(t => String(t.id) === String(id));
-            if (idx >= 0) {
-                fallbackTaxes[idx] = { ...fallbackTaxes[idx], ...updatePayload };
-                return res.json(fallbackTaxes[idx]);
-            }
-            return res.status(404).json({ error: 'Tax master record not found' });
-        }
-
+        if (error) throw error;
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -125,11 +90,7 @@ exports.deleteTax = async (req, res) => {
             .delete()
             .eq('id', id);
 
-        if (error) {
-            fallbackTaxes = fallbackTaxes.filter(t => String(t.id) !== String(id));
-            return res.json({ success: true, message: 'Tax master deleted (fallback mode)' });
-        }
-
+        if (error) throw error;
         res.json({ success: true, message: 'Tax master deleted successfully.' });
     } catch (err) {
         res.status(500).json({ error: err.message });

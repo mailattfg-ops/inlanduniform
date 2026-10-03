@@ -11,8 +11,20 @@ exports.listTemplates = async (req, res) => {
             query = query.eq('organization_id', orgId);
         }
 
-        const { data, error } = await query.order('name');
-        if (error) throw error;
+        let { data, error } = await query.order('name');
+        
+        // If joined query failed (e.g. relation not found or column missing)
+        if (error) {
+            console.warn('industry_templates joined query failed, attempting simple select:', error.message);
+            let simpleQuery = supabase.from('industry_templates').select('*');
+            if (orgId) simpleQuery = simpleQuery.eq('organization_id', orgId);
+            const simpleRes = await simpleQuery.order('name');
+            if (simpleRes.error) {
+                console.warn('industry_templates table may not exist yet:', simpleRes.error.message);
+                return res.json([]);
+            }
+            data = simpleRes.data;
+        }
 
         let results = data || [];
         if (deptId && results.length > 0) {
@@ -27,6 +39,7 @@ exports.listTemplates = async (req, res) => {
 
         res.json(results);
     } catch (err) {
+        console.error('templateController.listTemplates error:', err);
         res.status(500).json({ error: err.message });
     }
 };
@@ -83,13 +96,22 @@ exports.deleteTemplate = async (req, res) => {
 exports.getTemplateById = async (req, res) => {
     try {
         const { id } = req.params;
-        const { data, error } = await supabase
+        let { data, error } = await supabase
             .from('industry_templates')
             .select('*, organizations(name)')
             .eq('id', id)
-            .single();
+            .maybeSingle();
 
-        if (error) throw error;
+        if (error) {
+            const fallback = await supabase
+                .from('industry_templates')
+                .select('*')
+                .eq('id', id)
+                .maybeSingle();
+            if (fallback.error) throw fallback.error;
+            data = fallback.data;
+        }
+
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });

@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { logAction } = require('../utils/logger');
 
 // Helper to check if logged in user is global admin
 const isGlobalAdmin = (user) => {
@@ -21,8 +22,63 @@ exports.listBranches = async (req, res) => {
         }
 
         const { data, error } = await query.order('created_at', { ascending: true });
-
         if (error) throw error;
+
+        // Enrich with employee counts if branch_id exists
+        try {
+            const { data: empData } = await supabase.from('employees').select('branch_id');
+            if (empData) {
+                const countMap = {};
+                empData.forEach(e => {
+                    if (e.branch_id) countMap[e.branch_id] = (countMap[e.branch_id] || 0) + 1;
+                });
+                const enriched = (data || []).map(b => ({
+                    ...b,
+                    employee_count: countMap[b.id] || 0
+                }));
+                return res.json(enriched);
+            }
+        } catch (e) {
+            // If branch_id column not yet present, return data as is
+        }
+
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 1.1 List employees assigned to a branch (or all branches if branchId is 'all')
+exports.listBranchEmployees = async (req, res) => {
+    try {
+        const { branchId } = req.params;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase
+            .from('employees')
+            .select('id, employee_id, full_name, designation, department, contact_mobile, email, joining_date, status, employment_type, branch_id, temp_branch_id, temp_branch_until, temp_branch_notes');
+
+        if (!isAdmin && userBranchId) {
+            query = query.or(`branch_id.eq.${userBranchId},temp_branch_id.eq.${userBranchId}`);
+        } else if (branchId && branchId !== 'all') {
+            query = query.or(`branch_id.eq.${branchId},temp_branch_id.eq.${branchId}`);
+        }
+
+        let { data, error } = await query.order('full_name', { ascending: true });
+        if (error) {
+            // Fallback if temp_branch_id column not present yet
+            let fallbackQuery = supabase
+                .from('employees')
+                .select('id, employee_id, full_name, designation, department, contact_mobile, email, joining_date, status, employment_type, branch_id');
+            if (!isAdmin && userBranchId) {
+                fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+            } else if (branchId && branchId !== 'all') {
+                fallbackQuery = fallbackQuery.eq('branch_id', branchId);
+            }
+            const fallbackRes = await fallbackQuery.order('full_name', { ascending: true });
+            data = fallbackRes.data || [];
+        }
         res.json(data || []);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -39,15 +95,40 @@ exports.createBranch = async (req, res) => {
 
         const { code, name, tier, address, contact_number, email, manager_name, manager_email, manager_password, operational_settings } = req.body;
 
-        if (!code || !name) {
-            return res.status(400).json({ error: 'Branch code and name are required.' });
+        if (!name || !name.trim()) {
+            return res.status(400).json({ error: 'Branch name is required.' });
+        }
+
+        // Auto-generate branch code if left blank
+        let finalCode = (code || '').trim().toUpperCase();
+        if (!finalCode) {
+            const tierPrefix = tier === 'Corporate' ? 'HQ' : tier === 'Factory' ? 'FACT' : 'BR';
+            const { data: existingBranches } = await supabase
+                .from('branches')
+                .select('code');
+
+            const existingCodes = new Set((existingBranches || []).map(b => (b.code || '').toUpperCase()));
+            let counter = 1;
+            do {
+                finalCode = `${tierPrefix}-${String(counter).padStart(3, '0')}`;
+                counter++;
+            } while (existingCodes.has(finalCode));
+        } else {
+            const { data: existingBranch } = await supabase
+                .from('branches')
+                .select('id')
+                .eq('code', finalCode)
+                .maybeSingle();
+            if (existingBranch) {
+                return res.status(400).json({ error: `Branch code '${finalCode}' already exists. Please provide a unique code or leave blank to auto-generate.` });
+            }
         }
 
         const { data, error } = await supabase
             .from('branches')
             .insert([{
-                code,
-                name,
+                code: finalCode,
+                name: name.trim(),
                 tier: tier || 'Branch',
                 address: address || '',
                 contact_number: contact_number || '',
@@ -73,6 +154,16 @@ exports.createBranch = async (req, res) => {
                     is_active: true
                 }]);
         }
+
+        // Audit log
+        try {
+            await logAction(req.user?.id, 'CREATE', 'branch', data.id, {
+                code: data.code,
+                name: data.name,
+                tier: data.tier,
+                performed_by_name: req.user?.fullName || req.user?.name || req.user?.email || 'Admin'
+            });
+        } catch (logErr) {}
 
         res.status(201).json(data);
     } catch (err) {
@@ -111,6 +202,17 @@ exports.updateBranch = async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Audit log
+        try {
+            await logAction(req.user?.id, 'UPDATE', 'branch', id, {
+                code: data.code,
+                name: data.name,
+                tier: data.tier,
+                performed_by_name: req.user?.fullName || req.user?.name || req.user?.email || 'Admin'
+            });
+        } catch (logErr) {}
+
         res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });

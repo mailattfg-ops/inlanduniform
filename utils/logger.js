@@ -9,29 +9,56 @@ const supabase = require('../config/supabase');
  * @param {object} details - JSON data about the change
  * @param {Array} attachments - Optional array of image/file attachments
  */
-const logAction = async (userId, action, entityType, entityId, details, attachments) => {
+/**
+ * Logs a system action to audit_logs and record_activity_logs tables
+ * @param {string|number} userId - ID of the user performing the action
+ * @param {string} action - Action type (CREATE, UPDATE, DELETE, etc.)
+ * @param {string} entityType - Type of record (Quotation, Order, JobCard, member, employee, branch, etc.)
+ * @param {string|number} entityId - ID of the record being changed
+ * @param {object} details - JSON data about the change
+ * @param {Array} attachments - Optional array of image/file attachments
+ */
+const logAction = async (userId, action, entityType, entityId, details = {}, attachments = []) => {
     try {
+        const numericUserId = userId && /^\d+$/.test(String(userId)) ? parseInt(userId, 10) : null;
+        
+        // Exact Indian Standard Time (UTC+5:30)
+        const istTimestamp = new Date().toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        });
+
+        const enrichedDetails = {
+            ...(details || {}),
+            timestamp_ist: istTimestamp
+        };
+
         // 1. Audit logs table (general system audit)
         await supabase.from('audit_logs').insert([{
-            user_id: userId,
-            action: action.toUpperCase(),
-            entity_type: entityType,
-            entity_id: String(entityId),
-            details: details || {}
+            user_id: numericUserId,
+            action: String(action || 'ACTION').toUpperCase(),
+            entity_type: String(entityType || 'SYSTEM').toLowerCase(),
+            entity_id: String(entityId ?? 'N/A'),
+            details: enrichedDetails,
+            created_at: new Date().toISOString()
         }]);
 
         // 2. Record activity logs table (PRD M1.7 entity timeline)
         const numericEntityId = /^\d+$/.test(String(entityId)) ? parseInt(entityId, 10) : null;
-        const numericUserId = userId && /^\d+$/.test(String(userId)) ? parseInt(userId, 10) : null;
-
         if (numericEntityId) {
             const capitalizedType = entityType.charAt(0).toUpperCase() + entityType.slice(1);
             await supabase.from('record_activity_logs').insert([{
                 entity_type: capitalizedType,
                 entity_id: numericEntityId,
-                action: action.toUpperCase(),
+                action: String(action || 'ACTION').toUpperCase(),
                 performed_by: numericUserId,
-                details: details || {},
+                details: enrichedDetails,
                 attachments: attachments || [],
                 created_at: new Date().toISOString()
             }]);

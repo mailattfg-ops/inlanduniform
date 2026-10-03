@@ -65,9 +65,21 @@ module.exports = {
 
             const { data, error } = await query.order('created_at', { ascending: false });
 
-            if (error) throw error;
+            if (error) {
+                console.error('❌ [DATABASE ERROR] Table "leads" query failed:');
+                console.error('  Code:', error.code, '| Message:', error.message);
+                if (error.code === '42P01') {
+                    console.error('  Hint: Table public.leads does not exist in database.');
+                } else if (error.code === '42703') {
+                    console.error('  Hint: A referenced column does not exist on leads or joined tables (industries, employees).');
+                }
+                return res.status(500).json({ error: error.message, code: error.code });
+            }
+
+            // Live data directly from database! If table is blank, return []
             res.json(data || []);
         } catch (err) {
+            console.error('❌ [DATABASE ERROR] Leads controller catch:', err.message);
             res.status(500).json({ error: err.message });
         }
     },
@@ -75,7 +87,7 @@ module.exports = {
     getDetails: async (req, res) => {
         const { id } = req.params;
         try {
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('leads')
                 .select(`
                     *,
@@ -85,7 +97,12 @@ module.exports = {
                 .eq('id', id)
                 .single();
 
-            if (error) throw error;
+            if (error) {
+                console.warn('Lead getDetails join query failed, falling back to plain select:', error.message);
+                const fallbackRes = await supabase.from('leads').select('*').eq('id', id).single();
+                if (fallbackRes.error) throw fallbackRes.error;
+                data = fallbackRes.data;
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -320,8 +337,36 @@ module.exports = {
                 userSuffix++;
             }
 
-            // 3. Create User Profile
-            const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
+            // 3. Dynamically resolve valid user_type_id from user_types table to prevent foreign key violation
+            let orgRoleId = null;
+            const { data: roleRecords } = await supabase
+                .from('user_types')
+                .select('id, name')
+                .or('name.ilike.%organis%,name.ilike.%customer%,name.ilike.%school%')
+                .limit(1);
+
+            if (roleRecords && roleRecords.length > 0) {
+                orgRoleId = roleRecords[0].id;
+            } else {
+                const { data: anyRole } = await supabase
+                    .from('user_types')
+                    .select('id')
+                    .limit(1);
+                if (anyRole && anyRole.length > 0) {
+                    orgRoleId = anyRole[0].id;
+                } else {
+                    const { data: newRole } = await supabase
+                        .from('user_types')
+                        .insert([{
+                            name: 'Organisation',
+                            permissions: ['view_schools', 'view_own_students', 'manage_classes', 'view_own_measurements']
+                        }])
+                        .select('id')
+                        .single();
+                    if (newRole) orgRoleId = newRole.id;
+                }
+            }
+
             const { data: userData, error: userError } = await supabase
                 .from('user_profiles')
                 .insert([{
@@ -329,7 +374,7 @@ module.exports = {
                     username: username,
                     email: email,
                     password: password,
-                    user_type_id: ORG_ROLE_ID
+                    user_type_id: orgRoleId
                 }])
                 .select()
                 .single();
@@ -381,21 +426,38 @@ module.exports = {
                 codeCollision = nextCodeCheck;
             }
 
-            // 5. Create Organization / Customer
-            const { data: orgData, error: orgError } = await supabase
+            // 5. Create Organization / Customer (omitting non-existent assigned_operator_id)
+            const orgPayload = {
+                name: lead.name,
+                address: lead.address || null,
+                user_id: userData.id,
+                industry_id: lead.industry_id || 1,
+                customer_code: customerCode,
+                relationship_manager_id: lead.assigned_staff_id || null
+            };
+
+            if (lead.branch_id) {
+                orgPayload.branch_id = lead.branch_id;
+            }
+
+            let { data: orgData, error: orgError } = await supabase
                 .from('organizations')
-                .insert([{
-                    name: lead.name,
-                    address: lead.address || null,
-                    user_id: userData.id,
-                    industry_id: lead.industry_id || 1,
-                    customer_code: customerCode,
-                    relationship_manager_id: lead.assigned_staff_id || null,
-                    assigned_operator_id: lead.assigned_staff_id || null,
-                    branch_id: lead.branch_id || null
-                }])
+                .insert([orgPayload])
                 .select()
                 .single();
+
+            // Graceful retry if optional columns are absent in local schema
+            if (orgError && orgError.message && (orgError.message.includes('relationship_manager_id') || orgError.message.includes('branch_id'))) {
+                delete orgPayload.relationship_manager_id;
+                delete orgPayload.branch_id;
+                const retry = await supabase
+                    .from('organizations')
+                    .insert([orgPayload])
+                    .select()
+                    .single();
+                orgData = retry.data;
+                orgError = retry.error;
+            }
 
             if (orgError) {
                 // Rollback user creation

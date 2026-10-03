@@ -11,14 +11,14 @@ router.get('/', (req, res, next) => {
   if (['organisation', 'organization', 'school', 'entity', 'student', 'member'].includes(role) || req.user?.organizationId) {
     return next();
   }
-  return checkPermission(['manage_schools', 'view_schools'])(req, res, next);
+  return checkPermission(['manage_schools', 'view_schools', 'view_organizations', 'branch_sales'])(req, res, next);
 }, organizationController.getOrganizations);
 
 router.get('/:id/details', (req, res, next) => {
   if (req.user?.organizationId && String(req.user.organizationId) === String(req.params.id)) {
     return next();
   }
-  return checkPermission(['manage_schools', 'view_schools'])(req, res, next);
+  return checkPermission(['manage_schools', 'view_schools', 'view_organizations', 'branch_sales'])(req, res, next);
 }, organizationController.getOrganizationDetails);
 
 router.get('/:id/ledger', (req, res, next) => {

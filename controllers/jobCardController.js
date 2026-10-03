@@ -1,5 +1,10 @@
 const supabase = require("../config/supabase");
-const { toSafeInt, isUuid } = require("../utils/sanitize");
+
+function toSafeInt(val, fallback = null) {
+  if (val === null || val === undefined || val === "") return fallback;
+  const num = parseInt(val, 10);
+  return isNaN(num) ? fallback : num;
+}
 
 const VALID_STANDARD_SIZES = new Set([
   "XXS",
@@ -562,14 +567,22 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
     try {
       const { data: itemData } = await supabase
         .from("quotation_items")
-        .select(
-          "id, product_type_id, quantity, size_breakdown, product_types(name)",
-        )
+        .select("*")
         .eq("id", jobCard.item_id)
         .maybeSingle();
       if (itemData) {
-        qItem = itemData;
-        qItemSb = itemData.size_breakdown || {};
+        let parsed = {};
+        if (typeof itemData.notes === "string") {
+          try { parsed = JSON.parse(itemData.notes); } catch (e) {}
+        } else if (itemData.notes && typeof itemData.notes === "object") {
+          parsed = itemData.notes;
+        }
+        qItem = {
+          ...itemData,
+          size_breakdown: parsed,
+          product_name: itemData.manual_item_name || parsed.product_name,
+        };
+        qItemSb = parsed;
       }
     } catch (qErr) {
       console.warn(
@@ -585,24 +598,35 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
       const { data: orderData } = await supabase
         .from("orders")
         .select(
-          "id, quotation_id, quotations(id, quotation_items(id, product_type_id, size_breakdown, product_types(name)))",
+          "id, quotation_id, quotations(id, quotation_items(*))",
         )
         .eq("id", jobCard.order_id)
         .maybeSingle();
-      const allQItems = orderData?.quotations?.quotation_items || [];
+      const allQItems = (orderData?.quotations?.quotation_items || []).map((it) => {
+        let parsed = {};
+        if (typeof it.notes === "string") {
+          try { parsed = JSON.parse(it.notes); } catch (e) {}
+        } else if (it.notes && typeof it.notes === "object") {
+          parsed = it.notes;
+        }
+        return {
+          ...it,
+          size_breakdown: parsed,
+          product_name: it.manual_item_name || parsed.product_name,
+        };
+      });
+
       if (allQItems.length > 0) {
         const matched = allQItems.find(
           (it) =>
             (sb.product_id &&
               it.size_breakdown?.product_id === sb.product_id) ||
             (jobCard.item_name &&
-              it.product_types?.name &&
-              it.product_types.name.toLowerCase() ===
+              it.product_name &&
+              it.product_name.toLowerCase() ===
                 jobCard.item_name.toLowerCase()) ||
-            (jobCard.item_name &&
-              it.size_breakdown?.product_name &&
-              it.size_breakdown.product_name.toLowerCase() ===
-                jobCard.item_name.toLowerCase()),
+            (jobCard.design_number &&
+              it.size_breakdown?.design_number === jobCard.design_number),
         );
         if (matched) {
           qItem = matched;
@@ -644,8 +668,8 @@ async function resolveAllFabricsForJobCard(jobCard, sizeBreakdown = null) {
   // Fallback product lookup by art_number, design_number or item_name
   if (!product && jobCard?.design_number) {
     const rawDn = jobCard.design_number.trim();
-    // 1. Try matching art_number prefix if rawDn starts with gender-dress-pattern (e.g. 1-4J012)
-    const artMatch = rawDn.match(/^([0-9]+-[A-Za-z0-9]+)/);
+    // 1. Try matching art_number prefix if rawDn starts with prefix-gender-pattern (e.g. 4J-1-012) or legacy formats (e.g. 1-4J012, 4J-1012)
+    const artMatch = rawDn.match(/^([A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+|[A-Za-z0-9]+-[A-Za-z0-9]+)/);
     if (artMatch) {
       try {
         const { data: pByArt } = await supabase
@@ -1199,11 +1223,13 @@ async function generateChildJobCardsForJobCard(jobCard, options = {}) {
       try {
         const { data: qItem } = await supabase
           .from("quotation_items")
-          .select("size_breakdown")
+          .select("*")
           .eq("id", jobCard.item_id)
           .maybeSingle();
-        if (qItem?.size_breakdown?.department_id) {
-          targetDeptId = qItem.size_breakdown.department_id;
+        if (qItem?.notes) {
+          let parsed = {};
+          try { parsed = JSON.parse(qItem.notes); } catch (e) {}
+          if (parsed.department_id) targetDeptId = parsed.department_id;
         }
       } catch (qErr) {
         console.warn(
@@ -1676,17 +1702,21 @@ exports.createJobCardFromOrder = async (req, res) => {
 
     // Guard against duplicate Job Card creation for the same order and quotation item
     if (item_id && order_id) {
-      const { data: existingCard } = await supabase
+      const { data: existingCards } = await supabase
         .from("job_cards")
-        .select("id, job_card_no, item_name")
-        .eq("order_id", order_id)
-        .eq("item_id", item_id)
-        .maybeSingle();
+        .select("id, job_card_no, notes")
+        .eq("order_id", order_id);
 
-      if (existingCard) {
+      const found = (existingCards || []).find((c) => {
+        let p = {};
+        try { p = typeof c.notes === "string" ? JSON.parse(c.notes) : c.notes || {}; } catch (e) {}
+        return (c.item_id && String(c.item_id) === String(item_id)) || (p.item_id && String(p.item_id) === String(item_id));
+      });
+
+      if (found) {
         return res.status(409).json({
-          error: `Job Card ${existingCard.job_card_no} already exists for "${existingCard.item_name}" in this order. Duplicate creation is blocked.`,
-          jobCard: existingCard,
+          error: `Job Card ${found.job_card_no} already exists for this item in this order. Duplicate creation is blocked.`,
+          jobCard: found,
         });
       }
     }
@@ -1805,32 +1835,79 @@ exports.createJobCardFromOrder = async (req, res) => {
       pending_measurements: pendingMeasurementsCount,
     };
 
-    const { data: jobCard, error } = await supabase
-      .from("job_cards")
-      .insert([
-        {
-          job_card_no,
-          order_id,
-          item_id: item_id || null,
-          item_name,
-          design_number: finalDesignNumber,
-          quantity: quantity || 1,
-          size_breakdown: enrichedSizeBreakdown,
-          status: initialStatus,
-          po_handler_action: poHandlerAction,
-          hold_reason: holdReason,
-          created_by:
-            req.user?.id && /^\d+$/.test(String(req.user.id))
-              ? parseInt(req.user.id, 10)
-              : null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ])
-      .select()
-      .single();
+    let jobCard = null;
+    const notesPayload = JSON.stringify({
+      item_id: item_id || null,
+      item_name,
+      design_number: finalDesignNumber,
+      art_number: finalArtNumber,
+      quantity: quantity || 1,
+      size_breakdown: enrichedSizeBreakdown,
+      status: initialStatus,
+      po_handler_action: poHandlerAction,
+      hold_reason: holdReason,
+      created_by: req.user?.id,
+    });
 
-    if (error) throw error;
+    try {
+      const { data: fullCard, error: fullErr } = await supabase
+        .from("job_cards")
+        .insert([
+          {
+            job_card_no,
+            order_id,
+            item_id: item_id || null,
+            item_name,
+            design_number: finalDesignNumber,
+            quantity: quantity || 1,
+            size_breakdown: enrichedSizeBreakdown,
+            status: initialStatus,
+            po_handler_action: poHandlerAction,
+            hold_reason: holdReason,
+            notes: notesPayload,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ])
+        .select()
+        .single();
+
+      if (fullErr) throw fullErr;
+      jobCard = fullCard;
+    } catch (insertErr) {
+      console.warn(
+        "[JobCardController] Full job_cards insert failed, falling back to base schema with notes:",
+        insertErr.message,
+      );
+      const { data: baseCard, error: baseErr } = await supabase
+        .from("job_cards")
+        .insert([
+          {
+            job_card_no,
+            order_id,
+            status: initialStatus,
+            current_stage: "Cutting",
+            notes: notesPayload,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ])
+        .select()
+        .single();
+
+      if (baseErr) throw baseErr;
+      jobCard = {
+        ...baseCard,
+        item_id: item_id || null,
+        item_name,
+        design_number: finalDesignNumber,
+        art_number: finalArtNumber,
+        quantity: quantity || 1,
+        size_breakdown: enrichedSizeBreakdown,
+        po_handler_action: poHandlerAction,
+        hold_reason: holdReason,
+      };
+    }
 
     // Log timeline activity
     try {
@@ -2133,12 +2210,14 @@ exports.listJobCards = async (req, res) => {
   try {
     const { status, orderId } = req.query;
 
-    const buildQuery = () => {
+    const buildQuery = (withLogs = true) => {
+      let selectClause = withLogs
+        ? "*, orders(order_no, quotations(quotation_no, organization_id, organizations(name))), fabric_consumption_logs(*)"
+        : "*, orders(order_no, quotations(quotation_no, organization_id, organizations(name)))";
+
       let q = supabase
         .from("job_cards")
-        .select(
-          "*, orders(order_no, quotations(quotation_no, organization_id, organizations(name))), fabric_consumption_logs(id, fabric_name, required_meters, safety_margin_meters, issued_meters, returned_meters, cut_piece_batch_no, created_at)",
-        )
+        .select(selectClause)
         .order("created_at", { ascending: false });
 
       if (status) {
@@ -2165,8 +2244,13 @@ exports.listJobCards = async (req, res) => {
       return q;
     };
 
-    const { data, error } = await buildQuery();
-    if (error) throw error;
+    let { data, error } = await buildQuery(true);
+    if (error) {
+      console.warn("[JobCardController] Query with fabric_consumption_logs failed, falling back to basic join:", error.message);
+      const fallback = await buildQuery(false);
+      if (fallback.error) throw fallback.error;
+      data = fallback.data;
+    }
 
     // Auto-sync any orders with held or awaiting measurement cards (PRD M9.8)
     const uniqueOrderIds = [
@@ -2184,12 +2268,49 @@ exports.listJobCards = async (req, res) => {
     }
 
     // Clean fetch with refreshed status
-    const { data: finalData, error: finalError } = await buildQuery();
-    if (finalError) throw finalError;
+    let { data: finalData, error: finalError } = await buildQuery(true);
+    if (finalError) {
+      const fallbackFinal = await buildQuery(false);
+      if (fallbackFinal.error) throw fallbackFinal.error;
+      finalData = fallbackFinal.data;
+    }
 
     // Enrich top-level measurement_readiness & fabric issue status (PRD M9.8, M9.10)
-    const enriched = (finalData || []).map((jc) => {
-      const logs = jc.fabric_consumption_logs || [];
+    const enriched = (finalData || []).map((rawJc) => {
+      let parsedNotes = {};
+      if (typeof rawJc.notes === "string") {
+        try { parsedNotes = JSON.parse(rawJc.notes); } catch (e) {}
+      } else if (rawJc.notes && typeof rawJc.notes === "object") {
+        parsedNotes = rawJc.notes;
+      }
+
+      const effectiveSizeBreakdown = rawJc.size_breakdown || parsedNotes.size_breakdown || {};
+      const effectiveItemName = rawJc.item_name || parsedNotes.item_name || "Production Item";
+      const effectiveDesignNumber = rawJc.design_number || parsedNotes.design_number || "DNS-STANDARD";
+      const effectiveQuantity = rawJc.quantity || parsedNotes.quantity || 1;
+      const effectivePoHandlerAction = rawJc.po_handler_action || parsedNotes.po_handler_action || "Pending";
+      const effectiveHoldReason = rawJc.hold_reason || parsedNotes.hold_reason || null;
+      const effectiveItemId = rawJc.item_id || parsedNotes.item_id || null;
+
+      const jc = {
+        ...rawJc,
+        item_id: effectiveItemId,
+        item_name: effectiveItemName,
+        design_number: effectiveDesignNumber,
+        quantity: effectiveQuantity,
+        size_breakdown: effectiveSizeBreakdown,
+        po_handler_action: effectivePoHandlerAction,
+        hold_reason: effectiveHoldReason,
+      };
+
+      const rawLogs = jc.fabric_consumption_logs || [];
+      const logs = rawLogs.map((l) => ({
+        ...l,
+        fabric_name: l.fabric_name || "Production Roll",
+        issued_meters: parseFloat(l.issued_meters ?? l.allocated_meters ?? 0) || 0,
+        required_meters: parseFloat(l.required_meters ?? l.consumed_meters ?? 0) || 0,
+        created_at: l.created_at ?? l.logged_at ?? jc.created_at,
+      }));
       const isFabricIssued = logs.length > 0;
       const totalFabricIssued = logs.reduce(
         (sum, l) => sum + (parseFloat(l.issued_meters) || 0),
@@ -2677,14 +2798,14 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
     if (safeItemId) {
       const { data: qItem } = await supabase
         .from("quotation_items")
-        .select("size_breakdown, product_types(id, name)")
+        .select("*")
         .eq("id", safeItemId)
         .maybeSingle();
-      if (qItem?.size_breakdown) {
-        qItemBreakdown = qItem.size_breakdown;
-      }
-      if (qItem?.product_types?.name) {
-        qItemProductType = qItem.product_types.name;
+      if (qItem) {
+        let parsed = {};
+        try { parsed = JSON.parse(qItem.notes); } catch (e) {}
+        qItemBreakdown = parsed;
+        qItemProductType = qItem.manual_item_name || parsed.product_name;
       }
     }
 
@@ -3082,10 +3203,18 @@ exports.getRequiredFabricsForJobCard = async (req, res) => {
     }
 
     // Check existing logs
-    const { data: logs } = await supabase
+    const { data: rawLogs } = await supabase
       .from("fabric_consumption_logs")
-      .select("id, fabric_name, issued_meters, created_at")
+      .select("*")
       .eq("job_card_id", safeId);
+
+    const logs = (rawLogs || []).map((l) => ({
+      ...l,
+      fabric_name: l.fabric_name || "Production Roll",
+      issued_meters: parseFloat(l.issued_meters ?? l.allocated_meters ?? 0) || 0,
+      required_meters: parseFloat(l.required_meters ?? l.consumed_meters ?? 0) || 0,
+      created_at: l.created_at ?? l.logged_at,
+    }));
 
     const isAlreadyIssued = logs && logs.length > 0;
     const allInStock = requiredFabrics.every((f) => f.is_in_stock);
@@ -3151,12 +3280,20 @@ exports.logFabricConsumption = async (req, res) => {
     }
 
     // Guard against duplicate fabric issuing for the same job card
-    const { data: existingLogs, error: logCheckErr } = await supabase
+    const { data: rawExistingLogs, error: logCheckErr } = await supabase
       .from("fabric_consumption_logs")
-      .select("id, issued_meters, created_at, fabric_name")
+      .select("*")
       .eq("job_card_id", safeJobCardId);
 
     if (logCheckErr) throw logCheckErr;
+
+    const existingLogs = (rawExistingLogs || []).map((l) => ({
+      ...l,
+      fabric_name: l.fabric_name || "Production Roll",
+      issued_meters: parseFloat(l.issued_meters ?? l.allocated_meters ?? 0) || 0,
+      required_meters: parseFloat(l.required_meters ?? l.consumed_meters ?? 0) || 0,
+      created_at: l.created_at ?? l.logged_at,
+    }));
 
     if (existingLogs && existingLogs.length > 0) {
       const totalIssued = existingLogs.reduce(
@@ -3304,14 +3441,17 @@ exports.logFabricConsumption = async (req, res) => {
         if (logErr) throw logErr;
         logEntry = data;
       } catch (insertErr) {
+        console.warn(
+          "[JobCardController] Full fabric_consumption_logs insert failed, retrying with schema fallbacks:",
+          insertErr.message,
+        );
+
+        // Try bigint-sanitized retry first if it was a type mismatch
+        let succeeded = false;
         if (
           insertErr.code === "22P02" ||
           (insertErr.message && insertErr.message.includes("bigint"))
         ) {
-          console.warn(
-            "[JobCardController] fabric_consumption_logs fabric_id bigint type mismatch, retrying with sanitized integer/null:",
-            insertErr.message,
-          );
           const { data: retryData, error: retryErr } = await supabase
             .from("fabric_consumption_logs")
             .insert([
@@ -3340,10 +3480,46 @@ exports.logFabricConsumption = async (req, res) => {
             .select()
             .single();
 
-          if (retryErr) throw retryErr;
-          logEntry = retryData;
-        } else {
-          throw insertErr;
+          if (!retryErr && retryData) {
+            logEntry = retryData;
+            succeeded = true;
+          }
+        }
+
+        // If still not succeeded or error was missing columns (e.g. fabric_name does not exist)
+        if (!succeeded) {
+          const { data: fallbackData, error: fallbackErr } = await supabase
+            .from("fabric_consumption_logs")
+            .insert([
+              {
+                job_card_id: safeJobCardId,
+                fabric_id: fabricRecord?.id
+                  ? String(fabricRecord.id)
+                  : item.fabric_id
+                    ? String(item.fabric_id)
+                    : null,
+                allocated_meters: issuedMeters,
+                consumed_meters: reqMeters,
+                wastage_meters: safetyMargin,
+              },
+            ])
+            .select()
+            .single();
+
+          if (fallbackErr) throw fallbackErr;
+          logEntry = {
+            ...fallbackData,
+            fabric_name:
+              fabricRecord?.name ||
+              item.fabric_name ||
+              "Standard Production Fabric",
+            required_meters: reqMeters,
+            safety_margin_meters: safetyMargin,
+            issued_meters: issuedMeters,
+            returned_meters: retM,
+            cut_piece_batch_no: cutPieceBatchNo,
+            created_at: fallbackData?.logged_at || new Date().toISOString(),
+          };
         }
       }
       processedLogs.push(logEntry);
@@ -3463,18 +3639,21 @@ exports.getEligibleOrdersForJobCards = async (req, res) => {
       .from("orders")
       .select(
         `
-                id, order_no, status, branch_id,
-                quotations(
-                    id, quotation_no, title, final_quote_value,
-                    organizations(name),
-                    quotation_items(
-                        id, product_type_id, quantity, size_breakdown, unit_price,
-                        product_types(name)
-                    )
-                )
-            `,
+          id, order_no, status, branch_id, quotation_id,
+          quotations(
+            id, quotation_no, title, final_quote_value,
+            organizations(name),
+            quotation_items(*)
+          )
+        `,
       )
-      .in("status", ["Corporate Accepted", "Placed", "In Production"])
+      .in("status", [
+        "Corporate Accepted",
+        "Placed",
+        "In Production",
+        "Approved",
+        "Active",
+      ])
       .order("created_at", { ascending: false });
 
     if (!isAdmin && userBranchId) {
@@ -3490,22 +3669,71 @@ exports.getEligibleOrdersForJobCards = async (req, res) => {
     if (orderIds.length > 0) {
       const { data: existingCards } = await supabase
         .from("job_cards")
-        .select("id, order_id, item_id")
+        .select("id, order_id, notes")
         .in("order_id", orderIds);
 
       (existingCards || []).forEach((jc) => {
         if (!existingCardsByOrder[jc.order_id])
           existingCardsByOrder[jc.order_id] = new Set();
-        if (jc.item_id)
-          existingCardsByOrder[jc.order_id].add(Number(jc.item_id));
+        let parsed = {};
+        if (typeof jc.notes === "string") {
+          try { parsed = JSON.parse(jc.notes); } catch (e) {}
+        } else if (jc.notes && typeof jc.notes === "object") {
+          parsed = jc.notes;
+        }
+        const itId = jc.item_id || parsed.item_id;
+        if (itId) existingCardsByOrder[jc.order_id].add(Number(itId));
       });
     }
 
-    // Only return orders that have unraised quotation items
+    // Return orders with rich, hydrated quotation items
     const eligible = [];
     for (const order of data || []) {
-      const allItems = order.quotations?.quotation_items || [];
+      const rawItems = order.quotations?.quotation_items || [];
       const raisedSet = existingCardsByOrder[order.id] || new Set();
+
+      const allItems = rawItems.map((it) => {
+        let parsedNotes = {};
+        if (typeof it.notes === "string") {
+          try { parsedNotes = JSON.parse(it.notes); } catch (e) {}
+        } else if (it.notes && typeof it.notes === "object") {
+          parsedNotes = it.notes;
+        }
+
+        const itemName =
+          it.manual_item_name ||
+          parsedNotes.product_name ||
+          parsedNotes.item_name ||
+          `Item #${it.id}`;
+
+        const designNumber =
+          it.design_number ||
+          parsedNotes.design_number ||
+          parsedNotes.product_design_number ||
+          "";
+
+        const artNumber =
+          parsedNotes.art_number ||
+          it.art_number ||
+          "";
+
+        const sizeBreakdown = {
+          ...parsedNotes,
+          design_number: designNumber,
+          art_number: artNumber,
+          product_name: itemName,
+        };
+
+        return {
+          ...it,
+          product_type_name: itemName,
+          product_types: { name: itemName },
+          design_number: designNumber,
+          art_number: artNumber,
+          size_breakdown: sizeBreakdown,
+        };
+      });
+
       const unraisedItems = allItems.filter(
         (it) => !raisedSet.has(Number(it.id)),
       );
@@ -3523,6 +3751,7 @@ exports.getEligibleOrdersForJobCards = async (req, res) => {
 
     res.json(eligible);
   } catch (err) {
+    console.error("[JobCardController] getEligibleOrdersForJobCards error:", err.message);
     res.status(500).json({ error: err.message });
   }
 };
@@ -3566,11 +3795,13 @@ async function generateInMemoryPiecesForJobCard(jobCardId) {
       try {
         const { data: qItem } = await supabase
           .from("quotation_items")
-          .select("size_breakdown")
+          .select("*")
           .eq("id", jc.item_id)
           .maybeSingle();
-        if (qItem?.size_breakdown?.department_id) {
-          targetDeptId = qItem.size_breakdown.department_id;
+        if (qItem?.notes) {
+          let parsed = {};
+          try { parsed = JSON.parse(qItem.notes); } catch (e) {}
+          if (parsed.department_id) targetDeptId = parsed.department_id;
         }
       } catch (qErr) {
         console.warn(

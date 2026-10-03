@@ -1,0 +1,511 @@
+const supabase = require('../config/supabase');
+const { logAction } = require('../utils/logger');
+
+// Helper to check if logged in user is global admin
+const isGlobalAdmin = (user) => {
+    if (!user) return false;
+    const role = user.role || '';
+    return role === 'Admin' || role === 'Super Admin' || role === 'SuperAdmin';
+};
+
+// 1. List branches (Strictly filtered by branch_id for Branch Accounts)
+exports.listBranches = async (req, res) => {
+    try {
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase.from('branches').select('*');
+
+        // Non-admin branch accounts are strictly locked to their own branch profile
+        if (!isAdmin && userBranchId) {
+            query = query.eq('id', userBranchId);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: true });
+        if (error) throw error;
+
+        // Enrich with employee counts if branch_id exists
+        try {
+            const { data: empData } = await supabase.from('employees').select('branch_id');
+            if (empData) {
+                const countMap = {};
+                empData.forEach(e => {
+                    if (e.branch_id) countMap[e.branch_id] = (countMap[e.branch_id] || 0) + 1;
+                });
+                const enriched = (data || []).map(b => ({
+                    ...b,
+                    employee_count: countMap[b.id] || 0
+                }));
+                return res.json(enriched);
+            }
+        } catch (e) {
+            // If branch_id column not yet present, return data as is
+        }
+
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 1.1 List employees assigned to a branch (or all branches if branchId is 'all')
+exports.listBranchEmployees = async (req, res) => {
+    try {
+        const { branchId } = req.params;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase
+            .from('employees')
+            .select('id, employee_id, full_name, designation, department, contact_mobile, email, joining_date, status, employment_type, branch_id, temp_branch_id, temp_branch_until, temp_branch_notes');
+
+        if (!isAdmin && userBranchId) {
+            query = query.or(`branch_id.eq.${userBranchId},temp_branch_id.eq.${userBranchId}`);
+        } else if (branchId && branchId !== 'all') {
+            query = query.or(`branch_id.eq.${branchId},temp_branch_id.eq.${branchId}`);
+        }
+
+        let { data, error } = await query.order('full_name', { ascending: true });
+        if (error) {
+            // Fallback if temp_branch_id column not present yet
+            let fallbackQuery = supabase
+                .from('employees')
+                .select('id, employee_id, full_name, designation, department, contact_mobile, email, joining_date, status, employment_type, branch_id');
+            if (!isAdmin && userBranchId) {
+                fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+            } else if (branchId && branchId !== 'all') {
+                fallbackQuery = fallbackQuery.eq('branch_id', branchId);
+            }
+            const fallbackRes = await fallbackQuery.order('full_name', { ascending: true });
+            data = fallbackRes.data || [];
+        }
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 2. Create branch profile (Admin Only)
+exports.createBranch = async (req, res) => {
+    try {
+        const isAdmin = isGlobalAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ error: 'Only System Administrators can register new branch outlets.' });
+        }
+
+        const { code, name, tier, address, contact_number, email, manager_name, manager_email, manager_password, operational_settings } = req.body;
+
+        if (!name || !name.trim()) {
+            return res.status(400).json({ error: 'Branch name is required.' });
+        }
+
+        // Auto-generate branch code if left blank
+        let finalCode = (code || '').trim().toUpperCase();
+        if (!finalCode) {
+            const tierPrefix = tier === 'Corporate' ? 'HQ' : tier === 'Factory' ? 'FACT' : 'BR';
+            const { data: existingBranches } = await supabase
+                .from('branches')
+                .select('code');
+
+            const existingCodes = new Set((existingBranches || []).map(b => (b.code || '').toUpperCase()));
+            let counter = 1;
+            do {
+                finalCode = `${tierPrefix}-${String(counter).padStart(3, '0')}`;
+                counter++;
+            } while (existingCodes.has(finalCode));
+        } else {
+            const { data: existingBranch } = await supabase
+                .from('branches')
+                .select('id')
+                .eq('code', finalCode)
+                .maybeSingle();
+            if (existingBranch) {
+                return res.status(400).json({ error: `Branch code '${finalCode}' already exists. Please provide a unique code or leave blank to auto-generate.` });
+            }
+        }
+
+        const { data, error } = await supabase
+            .from('branches')
+            .insert([{
+                code: finalCode,
+                name: name.trim(),
+                tier: tier || 'Branch',
+                address: address || '',
+                contact_number: contact_number || '',
+                email: email || '',
+                operational_settings: operational_settings || {},
+                is_active: true
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Optionally create branch user account credentials if provided
+        if (manager_email && manager_password) {
+            await supabase
+                .from('branch_users')
+                .insert([{
+                    branch_id: data.id,
+                    name: manager_name || `${name} Manager`,
+                    email: manager_email.trim().toLowerCase(),
+                    password_plain: manager_password,
+                    role: (tier === 'Factory') ? 'Factory PO Handler' : 'Branch Manager',
+                    is_active: true
+                }]);
+        }
+
+        // Audit log
+        try {
+            await logAction(req.user?.id, 'CREATE', 'branch', data.id, {
+                code: data.code,
+                name: data.name,
+                tier: data.tier,
+                performed_by_name: req.user?.fullName || req.user?.name || req.user?.email || 'Admin'
+            });
+        } catch (logErr) {}
+
+        res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 3. Update branch
+exports.updateBranch = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        // Non-admin can only update their own branch
+        if (!isAdmin && String(userBranchId) !== String(id)) {
+            return res.status(403).json({ error: 'Access denied: You can only update your assigned branch details.' });
+        }
+
+        const { name, tier, address, contact_number, email, operational_settings, is_active } = req.body;
+
+        const { data, error } = await supabase
+            .from('branches')
+            .update({
+                name,
+                tier,
+                address,
+                contact_number,
+                email,
+                operational_settings,
+                is_active,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Audit log
+        try {
+            await logAction(req.user?.id, 'UPDATE', 'branch', id, {
+                code: data.code,
+                name: data.name,
+                tier: data.tier,
+                performed_by_name: req.user?.fullName || req.user?.name || req.user?.email || 'Admin'
+            });
+        } catch (logErr) {}
+
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 4. Branch User Credentials Management
+exports.listBranchUsers = async (req, res) => {
+    try {
+        const { branchId } = req.params;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase.from('branch_users').select('*, branches(name, code)');
+
+        if (!isAdmin && userBranchId) {
+            query = query.eq('branch_id', userBranchId);
+        } else if (branchId && branchId !== 'all') {
+            query = query.eq('branch_id', branchId);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: false });
+        if (error && error.code !== 'PGRST116') throw error;
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createBranchUser = async (req, res) => {
+    try {
+        const { branch_id, name, email, password, role } = req.body;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : Number(branch_id);
+
+        if (!targetBranchId || !email || !password) {
+            return res.status(400).json({ error: 'Branch, email, and password are required.' });
+        }
+
+        const { data, error } = await supabase
+            .from('branch_users')
+            .insert([{
+                branch_id: targetBranchId,
+                name: name || 'Branch User',
+                email: email.trim().toLowerCase(),
+                password_plain: password,
+                role: role || 'Branch Staff',
+                is_active: true
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 5. Separate Branch Stock & Inventory
+exports.getBranchInventory = async (req, res) => {
+    try {
+        const { branchId } = req.params;
+        const { item_type } = req.query;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase.from('branch_inventory').select('*');
+
+        const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branchId !== 'all' ? branchId : null);
+
+        if (targetBranchId) {
+            query = query.eq('branch_id', targetBranchId);
+        }
+        if (item_type) {
+            query = query.eq('item_type', item_type);
+        }
+
+        const { data, error } = await query.order('item_name', { ascending: true });
+        if (error && error.code !== 'PGRST116') throw error;
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.adjustBranchInventory = async (req, res) => {
+    try {
+        const { branch_id, item_type, item_name, item_code, quantity, type, notes, vendor_bill_no, lump_no, batch_no } = req.body;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        // Non-admin branch users can only adjust stock for their assigned branch
+        const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : Number(branch_id);
+
+        if (!targetBranchId || !item_type || !item_name || quantity === undefined) {
+            return res.status(400).json({ error: 'Branch ID, Item Type, Item Name, and Quantity are required.' });
+        }
+
+        const qtyNum = parseFloat(quantity);
+        const change = type === 'OUT' ? -qtyNum : qtyNum;
+
+        // PRD M6.2: Batch Number = Vendor Bill Number + Lump Number on purchase inward
+        let finalBatchCode = item_code || '';
+        if (type === 'IN') {
+            if (vendor_bill_no && lump_no) {
+                finalBatchCode = `${vendor_bill_no.trim()}-${lump_no.trim()}`;
+            } else if (batch_no) {
+                finalBatchCode = batch_no.trim();
+            }
+        }
+
+        // Check if item exists in branch_inventory
+        const { data: existing } = await supabase
+            .from('branch_inventory')
+            .select('*')
+            .eq('branch_id', targetBranchId)
+            .eq('item_type', item_type)
+            .eq('item_name', item_name)
+            .maybeSingle();
+
+        let updated;
+        if (existing) {
+            const newQty = Math.max(0, parseFloat(existing.quantity || 0) + change);
+            const updatePayload = {
+                quantity: newQty,
+                updated_at: new Date().toISOString()
+            };
+            if (finalBatchCode) {
+                updatePayload.item_code = finalBatchCode;
+            }
+            const { data, error } = await supabase
+                .from('branch_inventory')
+                .update(updatePayload)
+                .eq('id', existing.id)
+                .select()
+                .single();
+            if (error) throw error;
+            updated = data;
+        } else {
+            const { data, error } = await supabase
+                .from('branch_inventory')
+                .insert([{
+                    branch_id: targetBranchId,
+                    item_type,
+                    item_name,
+                    item_code: finalBatchCode,
+                    quantity: Math.max(0, change),
+                    unit: 'units',
+                    updated_at: new Date().toISOString()
+                }])
+                .select()
+                .single();
+            if (error) throw error;
+            updated = data;
+        }
+
+        // PRD M1.7 Audit trail for stock movement
+        try {
+            await supabase.from('record_activity_logs').insert([{
+                entity_type: 'BranchInventory',
+                entity_id: updated?.id || targetBranchId,
+                action: type === 'IN' ? 'STOCK_INWARD_BATCH' : 'STOCK_OUTWARD',
+                performed_by: req.user?.id && /^\d+$/.test(String(req.user.id)) ? parseInt(req.user.id, 10) : null,
+                details: {
+                    branch_id: targetBranchId,
+                    item_type,
+                    item_name,
+                    batch_no: finalBatchCode,
+                    vendor_bill_no: vendor_bill_no || null,
+                    lump_no: lump_no || null,
+                    quantity: qtyNum,
+                    type,
+                    notes
+                }
+            }]);
+        } catch (logErr) {
+            console.error('[BranchInventory] Log failed:', logErr.message);
+        }
+
+        res.json({ ...updated, batch_no: finalBatchCode, vendor_bill_no, lump_no });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// 6. Inter-Branch Stock Transfers
+exports.listStockTransfers = async (req, res) => {
+    try {
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase
+            .from('inter_branch_transfers')
+            .select('*, from_branch:branches!from_branch_id(name, code), to_branch:branches!to_branch_id(name, code)');
+
+        if (!isAdmin && userBranchId) {
+            query = query.or(`from_branch_id.eq.${userBranchId},to_branch_id.eq.${userBranchId}`);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: false });
+        if (error && error.code !== 'PGRST116') throw error;
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createStockTransfer = async (req, res) => {
+    try {
+        const { from_branch_id, to_branch_id, item_type, item_name, quantity, notes } = req.body;
+        const isAdmin = isGlobalAdmin(req.user);
+        const userBranchId = req.user?.branchId;
+
+        const sourceBranchId = (!isAdmin && userBranchId) ? userBranchId : Number(from_branch_id);
+
+        if (!sourceBranchId || !to_branch_id || !item_name || !quantity) {
+            return res.status(400).json({ error: 'Source Branch, Destination Branch, Item, and Quantity are required.' });
+        }
+
+        const transfer_no = `TRF-${Date.now().toString().slice(-6)}`;
+
+        const { data, error } = await supabase
+            .from('inter_branch_transfers')
+            .insert([{
+                transfer_no,
+                from_branch_id: sourceBranchId,
+                to_branch_id: Number(to_branch_id),
+                item_type: item_type || 'product',
+                item_name,
+                quantity: parseFloat(quantity),
+                status: 'Dispatched',
+                notes: notes || ''
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.updateTransferStatus = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body; // 'Received' | 'Cancelled'
+
+        const { data, error } = await supabase
+            .from('inter_branch_transfers')
+            .update({ status, updated_at: new Date().toISOString() })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// Legacy Stock Summary & Purchase Batch
+exports.getBranchStockSummary = async (req, res) => {
+    try {
+        const { branchId } = req.params;
+        const { data: movements } = await supabase.from('stock_movements').select('*').eq('branch_id', branchId);
+        let totalInward = 0, totalOutward = 0;
+        (movements || []).forEach(m => {
+            const qty = parseFloat(m.quantity || 0);
+            if (m.type === 'IN') totalInward += qty;
+            else if (m.type === 'OUT') totalOutward += qty;
+        });
+        res.json({ branch_id: branchId, total_inward: totalInward, total_outward: totalOutward, closing_stock: totalInward - totalOutward });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createPurchaseBatch = async (req, res) => {
+    try {
+        const { vendor_bill_no, lump_no, item_type, branch_id, quantity } = req.body;
+        const batch_no = `${vendor_bill_no.trim().toUpperCase()}-${lump_no.trim().toUpperCase()}`;
+        const { data, error } = await supabase
+            .from('purchase_entry_batches')
+            .insert([{ batch_no, vendor_bill_no, lump_no, item_type, branch_id: branch_id || null, quantity: parseFloat(quantity) }])
+            .select().single();
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};

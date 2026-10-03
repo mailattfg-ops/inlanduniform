@@ -7,14 +7,30 @@ const { authMiddleware, checkPermission } = require('../middleware/authMiddlewar
 router.use(authMiddleware);
 
 // Specific permission checks
-router.get('/', checkPermission(['view_students', 'view_own_students']), memberController.listStudents);
-router.post('/register', checkPermission(['register_students', 'view_own_students']), memberController.createStudent);
-router.post('/bulk-register', checkPermission(['register_students', 'view_own_students']), memberController.bulkCreateStudents);
-router.put('/:id', checkPermission(['register_students', 'view_own_students']), memberController.updateStudent);
+router.get('/', (req, res, next) => {
+  const role = (req.user?.role || '').toLowerCase();
+  if (req.user?.memberId || req.user?.organizationId || ['entity', 'student', 'member', 'organisation', 'organization', 'school'].includes(role)) {
+    return next();
+  }
+  return checkPermission(['view_students', 'view_own_students'])(req, res, next);
+}, memberController.listStudents);
+
+// Mutation blocker for individual entity members
+const blockEntityMutations = (req, res, next) => {
+  const role = (req.user?.role || '').toLowerCase();
+  if (req.user?.memberId || ['entity', 'student', 'member'].includes(role)) {
+    return res.status(403).json({ error: 'Access Denied: Individual members cannot modify registry data.' });
+  }
+  next();
+};
+
+router.post('/register', blockEntityMutations, checkPermission(['register_students', 'view_own_students']), memberController.createStudent);
+router.post('/bulk-register', blockEntityMutations, checkPermission(['register_students', 'view_own_students']), memberController.bulkCreateStudents);
+router.put('/:id', blockEntityMutations, checkPermission(['register_students', 'view_own_students']), memberController.updateStudent);
 
 // Strict management permissions
-router.delete('/:id', checkPermission(['manage_students', 'view_own_students']), memberController.deleteStudent);
-router.post('/:id/reset-password', checkPermission(['manage_students', 'view_own_students']), memberController.resetPassword);
-router.post('/:id/sync-username', checkPermission(['manage_students', 'view_own_students']), memberController.syncUsername);
+router.delete('/:id', blockEntityMutations, checkPermission(['manage_students', 'view_own_students']), memberController.deleteStudent);
+router.post('/:id/reset-password', blockEntityMutations, checkPermission(['manage_students', 'view_own_students']), memberController.resetPassword);
+router.post('/:id/sync-username', blockEntityMutations, checkPermission(['manage_students', 'view_own_students']), memberController.syncUsername);
 
 module.exports = router;

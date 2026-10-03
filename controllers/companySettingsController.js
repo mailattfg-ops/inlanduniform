@@ -1,22 +1,6 @@
 const supabase = require('../config/supabase');
 const { logAction } = require('../utils/logger');
 
-// Fallback hardcoded defaults from user specification
-const DEFAULT_SETTINGS = {
-  id: 1,
-  company_name: 'Forma Apparels',
-  address: '63/3608, CD Tower, Arayidathupalam, Kozhikode, Kerala - 673 004, India',
-  phone: '(+91) 7902 499 990 | 0495 2 922 992',
-  email: 'info@formaapparels.com',
-  website: 'www.formaapparels.com',
-  bank_name: 'HDFC BANK',
-  account_no: '50200076116064',
-  branch_name: 'MAJESTIC CENTER',
-  ifsc_code: 'HDFC0001255',
-  upi_id: '7902 499 991',
-  qr_image: null
-};
-
 exports.getSettings = async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -26,19 +10,19 @@ exports.getSettings = async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      console.warn('[DB Settings] Fallback active due to query error:', error.message);
-      return res.json({ success: true, data: DEFAULT_SETTINGS, isFallback: true });
+      console.error('❌ [DATABASE ERROR] Table "company_settings" query failed:');
+      console.error('  Code:', error.code, '| Message:', error.message);
+      if (error.code === '42P01') {
+        console.error('  Hint: Table public.company_settings is missing in database.');
+      }
+      return res.status(500).json({ error: error.message, code: error.code });
     }
 
-    if (!data) {
-      // Table exists but row is empty, return default
-      return res.json({ success: true, data: DEFAULT_SETTINGS });
-    }
-
-    res.json({ success: true, data });
+    // Live data directly from database! If table is blank, return null
+    res.json({ success: true, data: data || null });
   } catch (err) {
-    console.warn('[DB Settings] Catch error fallback:', err.message);
-    res.json({ success: true, data: DEFAULT_SETTINGS, isFallback: true });
+    console.error('❌ [DATABASE ERROR] getSettings exception:', err.message);
+    res.status(500).json({ error: err.message });
   }
 };
 

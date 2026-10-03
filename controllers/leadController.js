@@ -1,6 +1,13 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
 
+// Helper to check global admin
+const isGlobalAdmin = (user) => {
+    if (!user) return false;
+    const role = user.role || '';
+    return role === 'Admin' || role === 'Super Admin' || role === 'SuperAdmin';
+};
+
 // Helper to generate next lead code (LN001, LN002, etc.)
 async function generateNextLeadCodeLocal() {
     try {
@@ -40,18 +47,39 @@ async function generateNextLeadCodeLocal() {
 module.exports = {
     list: async (req, res) => {
         try {
-            const { data, error } = await supabase
+            const isAdmin = isGlobalAdmin(req.user);
+            const userBranchId = req.user?.branchId;
+
+            let query = supabase
                 .from('leads')
                 .select(`
                     *,
                     industries ( id, name ),
                     employees ( id, full_name, employee_id )
-                `)
-                .order('created_at', { ascending: false });
+                `);
 
-            if (error) throw error;
-            res.json(data);
+            // Non-admin branch accounts ONLY see leads strictly belonging to their branch
+            if (!isAdmin && userBranchId) {
+                query = query.eq('branch_id', userBranchId);
+            }
+
+            const { data, error } = await query.order('created_at', { ascending: false });
+
+            if (error) {
+                console.error('❌ [DATABASE ERROR] Table "leads" query failed:');
+                console.error('  Code:', error.code, '| Message:', error.message);
+                if (error.code === '42P01') {
+                    console.error('  Hint: Table public.leads does not exist in database.');
+                } else if (error.code === '42703') {
+                    console.error('  Hint: A referenced column does not exist on leads or joined tables (industries, employees).');
+                }
+                return res.status(500).json({ error: error.message, code: error.code });
+            }
+
+            // Live data directly from database! If table is blank, return []
+            res.json(data || []);
         } catch (err) {
+            console.error('❌ [DATABASE ERROR] Leads controller catch:', err.message);
             res.status(500).json({ error: err.message });
         }
     },
@@ -59,7 +87,7 @@ module.exports = {
     getDetails: async (req, res) => {
         const { id } = req.params;
         try {
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('leads')
                 .select(`
                     *,
@@ -69,7 +97,12 @@ module.exports = {
                 .eq('id', id)
                 .single();
 
-            if (error) throw error;
+            if (error) {
+                console.warn('Lead getDetails join query failed, falling back to plain select:', error.message);
+                const fallbackRes = await supabase.from('leads').select('*').eq('id', id).single();
+                if (fallbackRes.error) throw fallbackRes.error;
+                data = fallbackRes.data;
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -77,11 +110,17 @@ module.exports = {
     },
 
     create: async (req, res) => {
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
+        const { name, phone, email, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
         try {
+            const isAdmin = isGlobalAdmin(req.user);
+            const userBranchId = req.user?.branchId;
+
+            // Automatically associate lead with the branch user's branch
+            const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || null);
+
             let remarksJson = [];
             if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
                 const now = new Date();
@@ -97,24 +136,44 @@ module.exports = {
             }
 
             const lead_code = await generateNextLeadCodeLocal();
-            const { data, error } = await supabase
+            const insertPayload = {
+                lead_code,
+                name,
+                phone: phone || null,
+                email: email && email.trim() ? email.trim() : null,
+                industry_id: industry_id || null,
+                address: address || null,
+                assigned_staff_id: assigned_staff_id || null,
+                branch_id: targetBranchId,
+                status: status || 'New',
+                remarks: remarksJson
+            };
+
+            let { data, error } = await supabase
                 .from('leads')
-                .insert([{
-                    lead_code,
-                    name,
-                    phone: phone || null,
-                    industry_id: industry_id || null,
-                    address: address || null,
-                    assigned_staff_id: assigned_staff_id || null,
-                    status: status || 'New',
-                    remarks: remarksJson
-                }])
+                .insert([insertPayload])
                 .select(`
                     *,
                     industries ( id, name ),
                     employees ( id, full_name, employee_id )
                 `)
                 .single();
+
+            if (error && error.message && error.message.toLowerCase().includes('email')) {
+                // If Supabase schema does not have 'email' column yet, retry without email
+                delete insertPayload.email;
+                const retry = await supabase
+                    .from('leads')
+                    .insert([insertPayload])
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .single();
+                data = retry.data;
+                error = retry.error;
+            }
 
             if (error) throw error;
             res.json(data);
@@ -125,7 +184,7 @@ module.exports = {
 
     update: async (req, res) => {
         const { id } = req.params;
-        const { name, phone, industry_id, address, assigned_staff_id, status, remarks } = req.body;
+        const { name, phone, email, industry_id, address, assigned_staff_id, status, remarks, branch_id } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
@@ -139,6 +198,14 @@ module.exports = {
                 status: status || 'New',
                 updated_at: new Date()
             };
+
+            if (email !== undefined) {
+                updateFields.email = email && email.trim() ? email.trim() : null;
+            }
+
+            if (branch_id !== undefined) {
+                updateFields.branch_id = branch_id;
+            }
 
             if (remarks !== undefined) {
                 if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
@@ -155,7 +222,7 @@ module.exports = {
                 }
             }
 
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('leads')
                 .update(updateFields)
                 .eq('id', id)
@@ -165,6 +232,23 @@ module.exports = {
                     employees ( id, full_name, employee_id )
                 `)
                 .single();
+
+            if (error && error.message && error.message.toLowerCase().includes('email')) {
+                // If Supabase schema does not have 'email' column yet, retry without email
+                delete updateFields.email;
+                const retry = await supabase
+                    .from('leads')
+                    .update(updateFields)
+                    .eq('id', id)
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .single();
+                data = retry.data;
+                error = retry.error;
+            }
 
             if (error) throw error;
             res.json(data);
@@ -206,34 +290,108 @@ module.exports = {
                 return res.status(400).json({ error: 'Lead is already converted to a customer' });
             }
 
-            // 2. Generate Organization Admin credentials
-            const username = `cust_${lead.lead_code.toLowerCase().replace(/[^a-z0-9]/g, '') || Math.random().toString(36).substring(7)}`;
+            // 2. Generate Organization Admin credentials with uniqueness guarantee
+            const cleanLeadCode = (lead.lead_code || `id${lead.id}`).toLowerCase().replace(/[^a-z0-9]/g, '');
+            const baseUsername = `cust_${cleanLeadCode || Math.random().toString(36).substring(7)}`;
+            let username = baseUsername;
+            let email = (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : username;
             const password = crypto.randomBytes(4).toString('hex').toUpperCase();
 
-            // 3. Create User Profile
-            const ORG_ROLE_ID = '3e8ef077-f264-44b3-b37e-74e98fb6c0e7'; 
+            // Check if username/email already exists in user_profiles to avoid unique constraint violation
+            let { data: existingUser } = await supabase
+                .from('user_profiles')
+                .select('id')
+                .or(`email.eq.${email},username.eq.${username}`)
+                .maybeSingle();
+
+            if (existingUser) {
+                // Check if this existing user is orphaned (not linked to any existing organization)
+                const { data: linkedOrg } = await supabase
+                    .from('organizations')
+                    .select('id')
+                    .eq('user_id', existingUser.id)
+                    .maybeSingle();
+
+                if (!linkedOrg) {
+                    // Orphaned user profile from a previous failed lead conversion attempt - clean up
+                    await supabase.from('user_profiles').delete().eq('id', existingUser.id);
+                    existingUser = null;
+                }
+            }
+
+            let userSuffix = 1;
+            while (existingUser) {
+                username = `${baseUsername}_${userSuffix}`;
+                if (lead.email && lead.email.trim()) {
+                    const parts = lead.email.trim().toLowerCase().split('@');
+                    email = parts.length === 2 ? `${parts[0]}+${userSuffix}@${parts[1]}` : `${username}@customer.local`;
+                } else {
+                    email = username;
+                }
+                const { data: checkCollision } = await supabase
+                    .from('user_profiles')
+                    .select('id')
+                    .or(`email.eq.${email},username.eq.${username}`)
+                    .maybeSingle();
+                existingUser = checkCollision;
+                userSuffix++;
+            }
+
+            // 3. Dynamically resolve valid user_type_id from user_types table to prevent foreign key violation
+            let orgRoleId = null;
+            const { data: roleRecords } = await supabase
+                .from('user_types')
+                .select('id, name')
+                .or('name.ilike.%organis%,name.ilike.%customer%,name.ilike.%school%')
+                .limit(1);
+
+            if (roleRecords && roleRecords.length > 0) {
+                orgRoleId = roleRecords[0].id;
+            } else {
+                const { data: anyRole } = await supabase
+                    .from('user_types')
+                    .select('id')
+                    .limit(1);
+                if (anyRole && anyRole.length > 0) {
+                    orgRoleId = anyRole[0].id;
+                } else {
+                    const { data: newRole } = await supabase
+                        .from('user_types')
+                        .insert([{
+                            name: 'Organisation',
+                            permissions: ['view_schools', 'view_own_students', 'manage_classes', 'view_own_measurements']
+                        }])
+                        .select('id')
+                        .single();
+                    if (newRole) orgRoleId = newRole.id;
+                }
+            }
+
             const { data: userData, error: userError } = await supabase
                 .from('user_profiles')
                 .insert([{
                     full_name: lead.name,
                     username: username,
-                    email: username,
+                    email: email,
                     password: password,
-                    user_type_id: ORG_ROLE_ID
+                    user_type_id: orgRoleId
                 }])
                 .select()
                 .single();
 
-            if (userError) throw userError;
+            if (userError) {
+                console.error('[convertLeadToCustomer] userError:', userError);
+                throw userError;
+            }
 
-            // 4. Generate customer code
-            // Inline fetching next customer code
+            // 4. Generate customer code with collision check
             let customerCode = 'CN001';
             const { data: customerCodes, error: codesError } = await supabase
                 .from('organizations')
                 .select('customer_code')
                 .not('customer_code', 'is', null);
 
+            let nextNum = 1;
             if (!codesError && customerCodes && customerCodes.length > 0) {
                 let maxNum = 0;
                 customerCodes.forEach(item => {
@@ -246,28 +404,65 @@ module.exports = {
                         }
                     }
                 });
-                const nextNum = maxNum + 1;
+                nextNum = maxNum + 1;
                 customerCode = `CN${String(nextNum).padStart(3, '0')}`;
             }
 
-            // 5. Create Organization / Customer
-            const { data: orgData, error: orgError } = await supabase
+            // Verify customer_code is strictly unique
+            let { data: codeCollision } = await supabase
                 .from('organizations')
-                .insert([{
-                    name: lead.name,
-                    address: lead.address || null,
-                    user_id: userData.id,
-                    industry_id: lead.industry_id || 1, // Default to 1 (School)
-                    customer_code: customerCode,
-                    relationship_manager_id: null,
-                    assigned_operator_id: lead.assigned_staff_id || null
-                }])
+                .select('id')
+                .eq('customer_code', customerCode)
+                .maybeSingle();
+
+            while (codeCollision) {
+                nextNum++;
+                customerCode = `CN${String(nextNum).padStart(3, '0')}`;
+                const { data: nextCodeCheck } = await supabase
+                    .from('organizations')
+                    .select('id')
+                    .eq('customer_code', customerCode)
+                    .maybeSingle();
+                codeCollision = nextCodeCheck;
+            }
+
+            // 5. Create Organization / Customer (omitting non-existent assigned_operator_id)
+            const orgPayload = {
+                name: lead.name,
+                address: lead.address || null,
+                user_id: userData.id,
+                industry_id: lead.industry_id || 1,
+                customer_code: customerCode,
+                relationship_manager_id: lead.assigned_staff_id || null
+            };
+
+            if (lead.branch_id) {
+                orgPayload.branch_id = lead.branch_id;
+            }
+
+            let { data: orgData, error: orgError } = await supabase
+                .from('organizations')
+                .insert([orgPayload])
                 .select()
                 .single();
+
+            // Graceful retry if optional columns are absent in local schema
+            if (orgError && orgError.message && (orgError.message.includes('relationship_manager_id') || orgError.message.includes('branch_id'))) {
+                delete orgPayload.relationship_manager_id;
+                delete orgPayload.branch_id;
+                const retry = await supabase
+                    .from('organizations')
+                    .insert([orgPayload])
+                    .select()
+                    .single();
+                orgData = retry.data;
+                orgError = retry.error;
+            }
 
             if (orgError) {
                 // Rollback user creation
                 await supabase.from('user_profiles').delete().eq('id', userData.id);
+                console.error('[convertLeadToCustomer] orgError:', orgError);
                 throw orgError;
             }
 
@@ -283,10 +478,12 @@ module.exports = {
                 organization: orgData,
                 credentials: {
                     username,
+                    email,
                     password
                 }
             });
         } catch (err) {
+            console.error('[convertLeadToCustomer] Exception:', err);
             res.status(500).json({ error: err.message });
         }
     },

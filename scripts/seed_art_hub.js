@@ -56,8 +56,8 @@ async function seed() {
             else console.log(`  Seeded: [${pattern.code}] ${pattern.name}`);
         }
 
-        // 4. Seed Combined Art Number (4J-1012)
-        console.log('\nGenerating pre-registered combination "4J-1012"...');
+        // 4. Seed Combined Art Number (4J-1-012)
+        console.log('\nGenerating pre-registered combination "4J-1-012"...');
         const [dRes, gRes, pRes] = await Promise.all([
             supabase.from('art_dresses').select('id').eq('code', '4J').single(),
             supabase.from('art_genders').select('id').eq('code', '1').single(),
@@ -71,13 +71,13 @@ async function seed() {
                     dress_id: dRes.data.id,
                     gender_id: gRes.data.id,
                     pattern_id: pRes.data.id,
-                    code: '4J-1012'
+                    code: '4J-1-012'
                 }], { onConflict: 'code' });
 
             if (comboError) {
-                console.error('  Error seeding combined code 4J-1012:', comboError.message);
+                console.error('  Error seeding combined code 4J-1-012:', comboError.message);
             } else {
-                console.log('  Seeded Combination: "4J-1012" successfully registered!');
+                console.log('  Seeded Combination: "4J-1-012" successfully registered!');
             }
         } else {
             console.error('  Failed to retrieve ids of seeded components to generate the combined code.');

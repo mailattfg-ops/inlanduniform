@@ -8,8 +8,9 @@ exports.listProductTypes = async (req, res) => {
             .order('name', { ascending: true });
 
         if (error) throw error;
-        res.json(data);
+        res.json(data || []);
     } catch (err) {
+        console.error('[ProductTypes] listProductTypes error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };
@@ -37,7 +38,7 @@ exports.createProductType = async (req, res) => {
         // Log the action if logger is available
         try {
             const { logAction } = require('../utils/logger');
-            await logAction(req.user.id, 'CREATE', 'product_type', data.id, { name: data.name });
+            await logAction(req.user?.id, 'CREATE', 'product_type', data.id, { name: data.name });
         } catch (logErr) {
             console.error('Logging failed:', logErr.message);
         }
@@ -56,9 +57,14 @@ exports.updateProductType = async (req, res) => {
             return res.status(400).json({ error: 'Product type name is required' });
         }
 
+        const updatePayload = { name: name.trim() };
+        if (req.body.description !== undefined) {
+            updatePayload.description = req.body.description;
+        }
+
         const { data, error } = await supabase
             .from('product_types')
-            .update({ name: name.trim(), updated_at: new Date() })
+            .update(updatePayload)
             .eq('id', id)
             .select()
             .single();
@@ -73,7 +79,7 @@ exports.updateProductType = async (req, res) => {
         // Log the action if logger is available
         try {
             const { logAction } = require('../utils/logger');
-            await logAction(req.user.id, 'UPDATE', 'product_type', id, { name: data.name });
+            await logAction(req.user?.id, 'UPDATE', 'product_type', id, { name: data.name });
         } catch (logErr) {
             console.error('Logging failed:', logErr.message);
         }

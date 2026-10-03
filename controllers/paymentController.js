@@ -35,7 +35,21 @@ exports.getQuotationPayments = async (req, res) => {
 // 3. Record a new payment
 exports.recordPayment = async (req, res) => {
     try {
-        const { quotation_id, amount, payment_method, reference_no, notes, paid_at } = req.body;
+        const { 
+            quotation_id, 
+            amount, 
+            payment_method, 
+            paymentMethod,
+            reference_no, 
+            referenceNo, 
+            notes, 
+            paid_at,
+            paidAt 
+        } = req.body;
+
+        const effectivePaymentMethod = payment_method || paymentMethod;
+        const effectiveReferenceNo = reference_no || referenceNo || '';
+        const effectivePaidAt = paid_at || paidAt || new Date().toISOString();
 
         if (!quotation_id) {
             return res.status(400).json({ error: 'Quotation ID is required.' });
@@ -43,44 +57,64 @@ exports.recordPayment = async (req, res) => {
         if (!amount || parseFloat(amount) <= 0) {
             return res.status(400).json({ error: 'Payment amount must be greater than zero.' });
         }
-        if (!payment_method) {
+        if (!effectivePaymentMethod) {
             return res.status(400).json({ error: 'Payment method is required.' });
         }
 
         // Fetch quotation details
+        const parsedQuoteId = parseInt(quotation_id, 10);
+        if (isNaN(parsedQuoteId)) {
+            return res.status(400).json({ error: `Invalid Quotation ID format: "${quotation_id}"` });
+        }
+
         const { data: quotation, error: quoteError } = await supabase
             .from('quotations')
             .select('id, quotation_no, final_quote_value, paid_amount, payment_status')
-            .eq('id', quotation_id)
-            .single();
+            .eq('id', parsedQuoteId)
+            .maybeSingle();
 
-        if (quoteError || !quotation) {
-            return res.status(404).json({ error: 'Quotation not found.' });
+        if (quoteError) {
+            console.error('[paymentController:recordPayment] Database error querying quotation:', quoteError);
+            return res.status(500).json({ 
+                error: `Database error querying quotation: ${quoteError.message}. Check if 'payment_status' and 'paid_amount' columns exist in 'quotations' table.` 
+            });
+        }
+
+        if (!quotation) {
+            return res.status(404).json({ error: `Quotation with ID #${parsedQuoteId} not found.` });
         }
 
         // Insert new payment line
         const { data: newPayment, error: paymentError } = await supabase
             .from('payments')
             .insert([{
-                quotation_id,
+                quotation_id: parsedQuoteId,
                 amount: parseFloat(amount),
-                payment_method,
-                reference_no: reference_no || '',
+                payment_method: effectivePaymentMethod,
+                reference_no: effectiveReferenceNo,
                 notes: notes || '',
-                paid_at: paid_at || new Date().toISOString()
+                paid_at: effectivePaidAt
             }])
             .select()
             .single();
 
-        if (paymentError) throw paymentError;
+        if (paymentError) {
+            console.error('[paymentController:recordPayment] Database error inserting payment:', paymentError);
+            return res.status(500).json({
+                error: `Database error inserting payment: ${paymentError.message}. Ensure the 'payments' table exists in database.`
+            });
+        }
 
         // Fetch all payments for this quotation to calculate cumulative sum
         const { data: allPayments, error: allPaymentsError } = await supabase
             .from('payments')
             .select('amount')
-            .eq('quotation_id', quotation_id);
+            .eq('quotation_id', parsedQuoteId);
 
-        if (allPaymentsError) throw allPaymentsError;
+        if (allPaymentsError) {
+            console.error('[paymentController:recordPayment] Database error fetching payments sum:', allPaymentsError);
+            return res.status(500).json({ error: allPaymentsError.message });
+        }
 
         const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
         const finalValue = parseFloat(quotation.final_quote_value || 0);
@@ -99,15 +133,18 @@ exports.recordPayment = async (req, res) => {
                 paid_amount: totalPaid,
                 payment_status: newStatus
             })
-            .eq('id', quotation_id);
+            .eq('id', parsedQuoteId);
 
-        if (updateError) throw updateError;
+        if (updateError) {
+            console.error('[paymentController:recordPayment] Database error updating quotation payment status:', updateError);
+            return res.status(500).json({ error: updateError.message });
+        }
 
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');
-            await logAction(req.user.id, 'RECORD_PAYMENT', 'payment', newPayment.id, {
-                quotation_id,
+            await logAction(req.user?.id, 'RECORD_PAYMENT', 'payment', newPayment.id, {
+                quotation_id: parsedQuoteId,
                 quotation_no: quotation.quotation_no,
                 amount: newPayment.amount,
                 total_paid: totalPaid,
@@ -120,13 +157,14 @@ exports.recordPayment = async (req, res) => {
         res.json({
             payment: newPayment,
             quotation: {
-                id: quotation_id,
+                id: parsedQuoteId,
                 quotation_no: quotation.quotation_no,
                 paid_amount: totalPaid,
                 payment_status: newStatus
             }
         });
     } catch (err) {
+        console.error('[paymentController:recordPayment] Unexpected exception:', err);
         res.status(500).json({ error: err.message });
     }
 };
@@ -141,10 +179,15 @@ exports.cancelPayment = async (req, res) => {
             .from('payments')
             .select('*')
             .eq('id', id)
-            .single();
+            .maybeSingle();
 
-        if (fetchError || !payment) {
-            return res.status(404).json({ error: 'Payment not found.' });
+        if (fetchError) {
+            console.error('[paymentController:cancelPayment] Error fetching payment:', fetchError);
+            return res.status(500).json({ error: fetchError.message });
+        }
+
+        if (!payment) {
+            return res.status(404).json({ error: `Payment #${id} not found.` });
         }
 
         const quotation_id = payment.quotation_id;
@@ -154,10 +197,15 @@ exports.cancelPayment = async (req, res) => {
             .from('quotations')
             .select('id, quotation_no, final_quote_value, paid_amount, payment_status')
             .eq('id', quotation_id)
-            .single();
+            .maybeSingle();
 
-        if (quoteError || !quotation) {
-            return res.status(404).json({ error: 'Associated quotation not found.' });
+        if (quoteError) {
+            console.error('[paymentController:cancelPayment] Error fetching associated quotation:', quoteError);
+            return res.status(500).json({ error: quoteError.message });
+        }
+
+        if (!quotation) {
+            return res.status(404).json({ error: `Associated quotation #${quotation_id} not found.` });
         }
 
         // Delete the payment line
@@ -200,7 +248,7 @@ exports.cancelPayment = async (req, res) => {
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');
-            await logAction(req.user.id, 'CANCEL_PAYMENT', 'payment', id, {
+            await logAction(req.user?.id, 'CANCEL_PAYMENT', 'payment', id, {
                 quotation_id,
                 quotation_no: quotation.quotation_no,
                 amount: payment.amount,

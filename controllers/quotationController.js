@@ -1272,6 +1272,67 @@ exports.createQuotation = async (req, res) => {
       console.error("Logging failed:", logErr.message);
     }
 
+    // Automatically advance linked lead in Sales Pipeline to 'Proposal Sent'
+    try {
+      if (organization_id) {
+        let { data: leads } = await supabase
+          .from("leads")
+          .select("id, status, remarks, name")
+          .eq("organization_id", organization_id)
+          .in("status", ["Qualified", "Contacted", "New"]);
+
+        if (!leads || leads.length === 0) {
+          const { data: org } = await supabase
+            .from("organizations")
+            .select("name")
+            .eq("id", organization_id)
+            .maybeSingle();
+
+          if (org && org.name) {
+            const { data: matchedLeads } = await supabase
+              .from("leads")
+              .select("id, status, remarks, name")
+              .ilike("name", org.name.trim())
+              .in("status", ["Qualified", "Contacted", "New"]);
+            leads = matchedLeads;
+          }
+        }
+
+        if (leads && leads.length > 0) {
+          const now = new Date();
+          const dateStr = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+          const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+          for (const l of leads) {
+            let curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
+            curRemarks.push({
+              date: dateStr,
+              time: timeStr,
+              text: `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Proposal Sent.`,
+              stage: "Proposal Sent",
+              response_type: "positive",
+              author: {
+                name: req.user?.fullName || req.user?.full_name || "Sales Representative",
+                designation: req.user?.designation || req.user?.role || "Staff",
+                department: req.user?.department || "Sales & Marketing"
+              }
+            });
+
+            await supabase
+              .from("leads")
+              .update({
+                status: "Proposal Sent",
+                remarks: curRemarks,
+                updated_at: new Date()
+              })
+              .eq("id", l.id);
+          }
+        }
+      }
+    } catch (leadProgErr) {
+      console.warn("Could not auto-advance lead pipeline to Proposal Sent:", leadProgErr.message);
+    }
+
     res.json({
       success: true,
       quotationId: quote.id,

@@ -127,6 +127,67 @@ exports.getOrganizations = async (req, res) => {
       }
     }
 
+    // Calculate real-time financial receivables and credits
+    try {
+      const orgIds = enriched.map((o) => o.id).filter(Boolean);
+      if (orgIds.length > 0) {
+        const { data: quoteAgg } = await supabase
+          .from("quotations")
+          .select("organization_id, final_quote_value, paid_amount, status")
+          .in("organization_id", orgIds)
+          .in("status", [
+            "Approved",
+            "Accepted",
+            "Converted",
+            "Confirmed",
+            "Order Placed",
+            "In Production",
+            "Delivered",
+            "Completed",
+          ]);
+
+        const dueByOrg = {};
+        if (quoteAgg && quoteAgg.length > 0) {
+          quoteAgg.forEach((q) => {
+            const val = parseFloat(q.final_quote_value || 0);
+            const paid = parseFloat(q.paid_amount || 0);
+            const due = Math.max(0, val - paid);
+            dueByOrg[q.organization_id] =
+              (dueByOrg[q.organization_id] || 0) + due;
+          });
+        }
+
+        enriched = enriched.map((o) => {
+          const calculatedDue = dueByOrg[o.id] || 0;
+          const storedReceivables =
+            o.receivables !== undefined && o.receivables !== null
+              ? parseFloat(o.receivables)
+              : null;
+          const finalReceivables =
+            storedReceivables !== null && storedReceivables > 0
+              ? storedReceivables
+              : calculatedDue;
+          const storedCredits =
+            o.credits !== undefined && o.credits !== null
+              ? parseFloat(o.credits)
+              : 0;
+
+          return {
+            ...o,
+            receivables: Math.round(finalReceivables * 100) / 100,
+            credits: Math.round(storedCredits * 100) / 100,
+          };
+        });
+      }
+    } catch (finErr) {
+      console.warn("[getOrganizations] Could not enrich financial dues:", finErr.message);
+      enriched = enriched.map((o) => ({
+        ...o,
+        receivables: parseFloat(o.receivables || 0) || 0,
+        credits: parseFloat(o.credits || 0) || 0,
+      }));
+    }
+
     console.log(`[DB] Fetched ${enriched.length} organizations`);
     res.json(enriched);
   } catch (err) {
@@ -139,37 +200,57 @@ exports.createOrganization = async (req, res) => {
   const {
     name,
     address,
+    city,
+    state,
+    pincode,
+    pin_code,
+    country,
+    phone,
+    email,
     username,
     password,
     industry_id,
     relationship_manager_id,
     customer_code,
+    receivables,
+    credits,
   } = req.body;
 
   try {
-    // 1. Validate credentials if provided
+    // 1. Validate credentials & phone
     if (!username || !password) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Username and password are required for organization registration.",
-        });
+      return res.status(400).json({
+        error:
+          "Username and password are required for organization registration.",
+      });
     }
 
+    if (!phone || String(phone).trim() === "") {
+      return res.status(400).json({
+        error: "Phone number is required for customer registration.",
+      });
+    }
+
+    const cleanEmail =
+      email && String(email).trim() !== ""
+        ? String(email).trim().toLowerCase()
+        : null;
+
     // Check if username/email already taken in user_profiles
-    const { data: existingUser } = await supabase
-      .from("user_profiles")
-      .select("id")
-      .or(`email.eq.${username},username.eq.${username}`)
-      .maybeSingle();
+    let userCollisionQuery = supabase.from("user_profiles").select("id");
+    if (cleanEmail) {
+      userCollisionQuery = userCollisionQuery.or(
+        `email.eq.${cleanEmail},username.eq.${username}`,
+      );
+    } else {
+      userCollisionQuery = userCollisionQuery.eq("username", username);
+    }
+    const { data: existingUser } = await userCollisionQuery.maybeSingle();
 
     if (existingUser) {
-      return res
-        .status(400)
-        .json({
-          error: `Username "${username}" is already in use. Please choose a different username.`,
-        });
+      return res.status(400).json({
+        error: `Username "${username}" or email is already in use. Please choose a different username.`,
+      });
     }
 
     // 2. Create User Profile first - dynamically resolve valid user_type_id from user_types table
@@ -215,7 +296,7 @@ exports.createOrganization = async (req, res) => {
         {
           full_name: name,
           username: username,
-          email: username,
+          email: cleanEmail,
           password: password,
           user_type_id: orgRoleId,
         },
@@ -232,20 +313,48 @@ exports.createOrganization = async (req, res) => {
     }
 
     // 3. Create Organization and link to user
-    const { data, error } = await supabase
+    const resolvedPincode = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+    const orgPayload = {
+      name,
+      address: address ? String(address).trim() : null,
+      city: city ? String(city).trim() : null,
+      state: state ? String(state).trim() : null,
+      pincode: resolvedPincode,
+      pin_code: resolvedPincode,
+      country: country ? String(country).trim() : 'India',
+      phone: String(phone).trim(),
+      user_id: userData.id,
+      industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
+      customer_code: finalCustomerCode,
+      relationship_manager_id: relationship_manager_id || null,
+      receivables: receivables !== undefined && receivables !== null && !isNaN(parseFloat(receivables)) ? parseFloat(receivables) : 0,
+      credits: credits !== undefined && credits !== null && !isNaN(parseFloat(credits)) ? parseFloat(credits) : 0,
+    };
+
+    let { data, error } = await supabase
       .from("organizations")
-      .insert([
-        {
-          name,
-          address,
-          user_id: userData.id,
-          industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
-          customer_code: finalCustomerCode,
-          relationship_manager_id: relationship_manager_id || null,
-        },
-      ])
+      .insert([orgPayload])
       .select()
       .single();
+
+    if (error && error.message) {
+      let shouldRetry = false;
+      ['phone', 'city', 'state', 'pincode', 'pin_code', 'country', 'receivables', 'credits'].forEach(col => {
+        if (error.message.includes(col)) {
+          delete orgPayload[col];
+          shouldRetry = true;
+        }
+      });
+      if (shouldRetry) {
+        const retry = await supabase
+          .from("organizations")
+          .insert([orgPayload])
+          .select()
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
+    }
 
     if (error) {
       await supabase.from("user_profiles").delete().eq("id", userData.id);
@@ -268,6 +377,12 @@ exports.updateOrganization = async (req, res) => {
   const {
     name,
     address,
+    city,
+    state,
+    pincode,
+    pin_code,
+    country,
+    phone,
     industry_id,
     relationship_manager_id,
     customer_code,
@@ -275,12 +390,24 @@ exports.updateOrganization = async (req, res) => {
     is_special,
     is_risk,
     client_tag,
+    receivables,
+    credits,
   } = req.body;
 
   try {
     const updatePayload = {};
     if (name !== undefined) updatePayload.name = name;
-    if (address !== undefined) updatePayload.address = address;
+    if (address !== undefined) updatePayload.address = address ? String(address).trim() : null;
+    if (city !== undefined) updatePayload.city = city ? String(city).trim() : null;
+    if (state !== undefined) updatePayload.state = state ? String(state).trim() : null;
+    if (pincode !== undefined || pin_code !== undefined) {
+      const p = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+      updatePayload.pincode = p;
+      updatePayload.pin_code = p;
+    }
+    if (country !== undefined) updatePayload.country = country ? String(country).trim() : 'India';
+    if (phone !== undefined)
+      updatePayload.phone = phone ? String(phone).trim() : null;
     if (industry_id !== undefined) updatePayload.industry_id = industry_id;
     if (relationship_manager_id !== undefined)
       updatePayload.relationship_manager_id = relationship_manager_id;
@@ -313,6 +440,19 @@ exports.updateOrganization = async (req, res) => {
       }
     }
 
+    if (receivables !== undefined) {
+      updatePayload.receivables =
+        receivables !== null && !isNaN(parseFloat(receivables))
+          ? parseFloat(receivables)
+          : 0;
+    }
+    if (credits !== undefined) {
+      updatePayload.credits =
+        credits !== null && !isNaN(parseFloat(credits))
+          ? parseFloat(credits)
+          : 0;
+    }
+
     let { data, error } = await supabase
       .from("organizations")
       .update(updatePayload)
@@ -320,15 +460,33 @@ exports.updateOrganization = async (req, res) => {
       .select()
       .single();
 
-    // Graceful fallback if is_special or is_risk column is not yet present in schema
+    // Graceful fallback if is_special or is_risk or phone or split address or receivables/credits columns are not yet present in schema
     if (
       error &&
       error.message &&
       (error.message.includes("is_special") ||
-        error.message.includes("is_risk"))
+        error.message.includes("is_risk") ||
+        error.message.includes("phone") ||
+        error.message.includes("city") ||
+        error.message.includes("state") ||
+        error.message.includes("pincode") ||
+        error.message.includes("pin_code") ||
+        error.message.includes("country") ||
+        error.message.includes("receivables") ||
+        error.message.includes("credits"))
     ) {
-      delete updatePayload.is_special;
-      delete updatePayload.is_risk;
+      if (
+        error.message.includes("is_special") ||
+        error.message.includes("is_risk")
+      ) {
+        delete updatePayload.is_special;
+        delete updatePayload.is_risk;
+      }
+      ['phone', 'city', 'state', 'pincode', 'pin_code', 'country', 'receivables', 'credits'].forEach(col => {
+        if (error.message.includes(col)) {
+          delete updatePayload[col];
+        }
+      });
       const retry = await supabase
         .from("organizations")
         .update(updatePayload)
@@ -358,11 +516,9 @@ exports.getOrganizationDetails = async (req, res) => {
   const { id } = req.params;
   const userOrgId = req.user?.organizationId;
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error: "Access Denied: You cannot view another organization's details",
-      });
+    return res.status(403).json({
+      error: "Access Denied: You cannot view another organization's details",
+    });
   }
   try {
     // 1. Get Departments
@@ -432,12 +588,10 @@ exports.getAssignedStaff = async (req, res) => {
   const { id } = req.params;
   const userOrgId = req.user?.organizationId;
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error:
-          "Access Denied: You cannot view another organization's assigned staff",
-      });
+    return res.status(403).json({
+      error:
+        "Access Denied: You cannot view another organization's assigned staff",
+    });
   }
   try {
     const { data, error } = await supabase
@@ -568,20 +722,16 @@ exports.getOrganizationLedger = async (req, res) => {
     req.user?.memberId ||
     ["entity", "student", "member"].includes(userRole)
   ) {
-    return res
-      .status(403)
-      .json({
-        error:
-          "Access Denied: Individual members cannot view organization financial ledgers",
-      });
+    return res.status(403).json({
+      error:
+        "Access Denied: Individual members cannot view organization financial ledgers",
+    });
   }
 
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error: "Access Denied: You cannot view another organization's ledger",
-      });
+    return res.status(403).json({
+      error: "Access Denied: You cannot view another organization's ledger",
+    });
   }
   try {
     // 1. Fetch organization master details

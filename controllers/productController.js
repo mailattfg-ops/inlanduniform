@@ -454,7 +454,7 @@ exports.createProduct = async (req, res) => {
             if (btnTrim) {
                 if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
             }
-            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.uom || '').toLowerCase() === 'spools' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
             if (thrTrim) {
                 if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
             }
@@ -621,7 +621,7 @@ exports.updateProduct = async (req, res) => {
             if (btnTrim) {
                 if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
             }
-            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.uom || '').toLowerCase() === 'spools' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
             if (thrTrim) {
                 if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
             }

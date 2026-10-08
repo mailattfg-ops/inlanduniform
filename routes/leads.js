@@ -14,5 +14,6 @@ router.put('/:id', leadController.update);
 router.delete('/:id', leadController.delete);
 router.post('/:id/convert', leadController.convertLeadToCustomer);
 router.post('/:id/remarks', leadController.addRemark);
+router.post('/:id/contact-log', leadController.logContactOutcome);
 
 module.exports = router;

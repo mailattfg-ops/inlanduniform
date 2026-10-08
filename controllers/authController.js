@@ -28,6 +28,10 @@ exports.login = async (req, res) => {
       .eq('password', cleanPass)
       .maybeSingle();
 
+    if (pError) {
+      console.error('[AUTH] Supabase error in user_profiles query:', pError.message, pError.details || '');
+    }
+
     let fullUser = null;
 
     if (profile) {
@@ -75,14 +79,44 @@ exports.login = async (req, res) => {
           fullUser.fullName = memberData.full_name;
         }
       }
+      // 1c. If it's a staff/employee account, fetch linked employee record for designation and department
+      try {
+        const { data: empData } = await supabase
+          .from('employees')
+          .select('id, employee_id, full_name, designation, department, branch_id')
+          .or(`user_id.eq.${profile.id},email.eq.${cleanEmail}`)
+          .maybeSingle();
+
+        if (empData) {
+          fullUser.employeeId = empData.employee_id;
+          fullUser.designation = empData.designation || profile.user_types?.name || 'Staff';
+          fullUser.department = empData.department || 'Operations';
+          if (empData.full_name && !fullUser.fullName) {
+            fullUser.fullName = empData.full_name;
+          }
+          if (empData.branch_id && !fullUser.branchId) {
+            fullUser.branchId = empData.branch_id;
+          }
+        } else {
+          fullUser.designation = profile.user_types?.name || 'Administrator';
+          fullUser.department = (fullUser.role === 'Admin' || fullUser.role === 'Super Admin' || fullUser.role === 'SuperAdmin') ? 'Management' : 'Corporate';
+        }
+      } catch (empErr) {
+        fullUser.designation = profile.user_types?.name || 'Administrator';
+        fullUser.department = 'Corporate';
+      }
     } else {
       // 2. Fallback check in branch_users table
-      const { data: bUser } = await supabase
+      const { data: bUser, error: bError } = await supabase
         .from('branch_users')
         .select('*, branches(name, code)')
         .eq('email', cleanEmail.toLowerCase())
         .eq('password_plain', cleanPass)
         .maybeSingle();
+
+      if (bError) {
+        console.error('[AUTH] Supabase error in branch_users query:', bError.message, bError.details || '');
+      }
 
       if (bUser && bUser.is_active) {
         const userRole = bUser.role || 'Branch Manager';
@@ -163,6 +197,8 @@ exports.login = async (req, res) => {
           email: bUser.email,
           fullName: bUser.name,
           role: userRole,
+          designation: userRole,
+          department: bUser.branches?.name ? `${bUser.branches.name} Branch` : 'Branch Operations',
           branchId: bUser.branch_id,
           branchTier: bUser.branches?.tier || 'Branch',
           branchName: bUser.branches?.name || 'Branch Outlet',

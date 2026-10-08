@@ -71,7 +71,7 @@ exports.listOrders = async (req, res) => {
 // 2. Get single order details
 exports.getOrderDetails = async (req, res) => {
     try {
-        const d{ i } = req.params;
+        const { id } = req.params;
         const safeId = toSafeInt(id);
         if (!safeId) {
             return res.status(400).json({ error: 'Invalid Order ID.' });

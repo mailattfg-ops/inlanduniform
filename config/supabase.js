@@ -21,6 +21,11 @@ const getSupabase = () => {
       persistSession: false,
       autoRefreshToken: false,
       detectSessionInUrl: false
+    },
+    global: {
+      headers: {
+        'Connection': 'keep-alive'
+      }
     }
   });
 

@@ -133,9 +133,20 @@ exports.getOrganizations = async (req, res) => {
     try {
       const orgIds = enriched.map((o) => o.id).filter(Boolean);
       if (orgIds.length > 0) {
-        const { data: invoicesData, error: invFetchErr } = await supabase
-          .from("invoices")
-          .select("id, organization_id, total_amount, status");
+        // Parallelize financial metrics queries and scope to active organizations using index
+        const [
+          { data: invoicesData, error: invFetchErr },
+          { data: quotesData }
+        ] = await Promise.all([
+          supabase
+            .from("invoices")
+            .select("id, organization_id, total_amount, status")
+            .in("organization_id", orgIds),
+          supabase
+            .from("quotations")
+            .select("id, organization_id, paid_amount")
+            .in("organization_id", orgIds)
+        ]);
 
         if (invFetchErr) {
           console.warn("[getOrganizations] Could not fetch invoices:", invFetchErr.message);
@@ -172,26 +183,17 @@ exports.getOrganizations = async (req, res) => {
           });
         }
 
-        // Also check any advance payments recorded for these organizations
-        try {
-          const { data: quotesData } = await supabase
-            .from("quotations")
-            .select("id, organization_id, paid_amount")
-            .in("organization_id", orgIds);
-
-          (quotesData || []).forEach((q) => {
-            if (q.organization_id) {
-              const qPaid = parseFloat(q.paid_amount || 0);
-              if (qPaid > 0 && !orgsWithInvoices.has(q.organization_id)) {
-                // Advance payments received before invoice generation: credit = (amount paid - 0 invoice)
-                totalPaidByOrg[q.organization_id] = (totalPaidByOrg[q.organization_id] || 0) + qPaid;
-                creditByOrg[q.organization_id] = (creditByOrg[q.organization_id] || 0) + qPaid;
-              }
+        // Check any advance payments recorded for these organizations
+        (quotesData || []).forEach((q) => {
+          if (q.organization_id) {
+            const qPaid = parseFloat(q.paid_amount || 0);
+            if (qPaid > 0 && !orgsWithInvoices.has(q.organization_id)) {
+              // Advance payments received before invoice generation: credit = (amount paid - 0 invoice)
+              totalPaidByOrg[q.organization_id] = (totalPaidByOrg[q.organization_id] || 0) + qPaid;
+              creditByOrg[q.organization_id] = (creditByOrg[q.organization_id] || 0) + qPaid;
             }
-          });
-        } catch (qErr) {
-          // resilient fallback
-        }
+          }
+        });
 
         enriched = enriched.map((o) => {
           // Receivables are calculated strictly against generated invoices, NEVER quotations

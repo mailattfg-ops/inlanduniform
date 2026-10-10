@@ -7,7 +7,9 @@ async function generateNextDesignNumberLocal() {
     const { data, error } = await supabase
       .from("design_numbers")
       .select("code")
-      .not("code", "is", null);
+      .ilike("code", "DNS-%")
+      .order("code", { ascending: false })
+      .limit(20);
 
     if (error) {
       console.error("Error fetching design numbers:", error.message);

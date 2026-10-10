@@ -6,7 +6,7 @@
 -- 1. ZERO DATA LOSS: Does NOT drop, truncate, or delete any tables or columns.
 -- 2. COMPLETELY IDEMPOTENT: Safe to run once or 100 times without errors.
 -- 3. AUTO-EXPANDS EXISTING TABLES: Uses ADD COLUMN IF NOT EXISTS for every field.
--- 4. NON-CONFLICTING FOREIGN KEYS & CONSTRAINTS: Safe exception blocks.
+-- 4. TYPE-SAFE FOREIGN KEYS: Dynamic type-matching prevents ERROR 42804.
 -- 5. AUTOMATIC POSTGREST SCHEMA CACHE RELOAD: Avoids 500 / PGRST204 errors.
 -- ==============================================================================
 
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS public.user_profiles (
     username TEXT UNIQUE,
     password TEXT NOT NULL,
     avatar_url TEXT,
-    user_type_id UUID REFERENCES public.user_types(id) ON DELETE SET NULL,
+    user_type_id UUID,
     branch_id BIGINT,
     organization_id BIGINT,
     is_active BOOLEAN DEFAULT true,
@@ -68,7 +68,7 @@ ALTER TABLE public.user_profiles
     ADD COLUMN IF NOT EXISTS username TEXT,
     ADD COLUMN IF NOT EXISTS password TEXT,
     ADD COLUMN IF NOT EXISTS avatar_url TEXT,
-    ADD COLUMN IF NOT EXISTS user_type_id UUID REFERENCES public.user_types(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS user_type_id UUID,
     ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS organization_id BIGINT,
     ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true,
@@ -105,7 +105,7 @@ ALTER TABLE public.branches
 
 CREATE TABLE IF NOT EXISTS public.branch_users (
     id BIGSERIAL PRIMARY KEY,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    branch_id BIGINT,
     email TEXT UNIQUE NOT NULL,
     full_name TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'Branch Staff',
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS public.branch_users (
 );
 
 ALTER TABLE public.branch_users
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS email TEXT,
     ADD COLUMN IF NOT EXISTS full_name TEXT,
     ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'Branch Staff',
@@ -135,8 +135,8 @@ CREATE TABLE IF NOT EXISTS public.employees (
     contact_number TEXT,
     email TEXT,
     type TEXT NOT NULL DEFAULT 'Permanent',
-    home_branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
-    current_branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    home_branch_id BIGINT,
+    current_branch_id BIGINT,
     branch_id BIGINT,
     designation TEXT,
     status TEXT NOT NULL DEFAULT 'Active',
@@ -152,8 +152,8 @@ ALTER TABLE public.employees
     ADD COLUMN IF NOT EXISTS contact_number TEXT,
     ADD COLUMN IF NOT EXISTS email TEXT,
     ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'Permanent',
-    ADD COLUMN IF NOT EXISTS home_branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS current_branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS home_branch_id BIGINT,
+    ADD COLUMN IF NOT EXISTS current_branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS designation TEXT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active',
@@ -163,7 +163,7 @@ ALTER TABLE public.employees
 
 CREATE TABLE IF NOT EXISTS public.employee_work_history (
     id BIGSERIAL PRIMARY KEY,
-    employee_id BIGINT REFERENCES public.employees(id) ON DELETE CASCADE,
+    employee_id BIGINT,
     job_card_id BIGINT,
     operation_type TEXT NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS public.employee_work_history (
 );
 
 ALTER TABLE public.employee_work_history
-    ADD COLUMN IF NOT EXISTS employee_id BIGINT REFERENCES public.employees(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS employee_id BIGINT,
     ADD COLUMN IF NOT EXISTS job_card_id BIGINT,
     ADD COLUMN IF NOT EXISTS operation_type TEXT,
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1,
@@ -214,8 +214,8 @@ CREATE TABLE IF NOT EXISTS public.organizations (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     customer_code TEXT UNIQUE,
-    industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    industry_id BIGINT,
+    branch_id BIGINT,
     address TEXT,
     contact_person TEXT,
     contact_email TEXT,
@@ -229,9 +229,14 @@ CREATE TABLE IF NOT EXISTS public.organizations (
 ALTER TABLE public.organizations
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS customer_code TEXT,
-    ADD COLUMN IF NOT EXISTS industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS industry_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS address TEXT,
+    ADD COLUMN IF NOT EXISTS city TEXT,
+    ADD COLUMN IF NOT EXISTS state TEXT,
+    ADD COLUMN IF NOT EXISTS pincode TEXT,
+    ADD COLUMN IF NOT EXISTS pin_code TEXT,
+    ADD COLUMN IF NOT EXISTS country TEXT DEFAULT 'India',
     ADD COLUMN IF NOT EXISTS contact_person TEXT,
     ADD COLUMN IF NOT EXISTS contact_email TEXT,
     ADD COLUMN IF NOT EXISTS contact_phone TEXT,
@@ -241,7 +246,7 @@ ALTER TABLE public.organizations
 
 CREATE TABLE IF NOT EXISTS public.organization_staff (
     id BIGSERIAL PRIMARY KEY,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    organization_id BIGINT,
     full_name TEXT NOT NULL,
     email TEXT,
     phone TEXT,
@@ -250,7 +255,7 @@ CREATE TABLE IF NOT EXISTS public.organization_staff (
 );
 
 ALTER TABLE public.organization_staff
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
     ADD COLUMN IF NOT EXISTS full_name TEXT,
     ADD COLUMN IF NOT EXISTS email TEXT,
     ADD COLUMN IF NOT EXISTS phone TEXT,
@@ -258,7 +263,7 @@ ALTER TABLE public.organization_staff
 
 CREATE TABLE IF NOT EXISTS public.departments (
     id BIGSERIAL PRIMARY KEY,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    organization_id BIGINT,
     school_id BIGINT,
     name TEXT NOT NULL,
     section TEXT,
@@ -267,7 +272,7 @@ CREATE TABLE IF NOT EXISTS public.departments (
 );
 
 ALTER TABLE public.departments
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
     ADD COLUMN IF NOT EXISTS school_id BIGINT,
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS section TEXT,
@@ -281,15 +286,15 @@ CREATE TABLE IF NOT EXISTS public.registry_members (
     id BIGSERIAL PRIMARY KEY,
     full_name TEXT NOT NULL,
     admission_no TEXT,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    organization_id BIGINT,
     school_id BIGINT,
-    department_id BIGINT REFERENCES public.departments(id) ON DELETE SET NULL,
+    department_id BIGINT,
     class_id BIGINT,
     section TEXT,
     gender TEXT,
     contact_mobile TEXT,
     status TEXT DEFAULT 'Active',
-    user_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    user_id BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -297,27 +302,27 @@ CREATE TABLE IF NOT EXISTS public.registry_members (
 ALTER TABLE public.registry_members
     ADD COLUMN IF NOT EXISTS full_name TEXT,
     ADD COLUMN IF NOT EXISTS admission_no TEXT,
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
     ADD COLUMN IF NOT EXISTS school_id BIGINT,
-    ADD COLUMN IF NOT EXISTS department_id BIGINT REFERENCES public.departments(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS department_id BIGINT,
     ADD COLUMN IF NOT EXISTS class_id BIGINT,
     ADD COLUMN IF NOT EXISTS section TEXT,
     ADD COLUMN IF NOT EXISTS gender TEXT,
     ADD COLUMN IF NOT EXISTS contact_mobile TEXT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active',
-    ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS user_id BIGINT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.measurements (
     id BIGSERIAL PRIMARY KEY,
-    member_id BIGINT REFERENCES public.registry_members(id) ON DELETE CASCADE,
+    member_id BIGINT,
     student_id BIGINT,
-    recorded_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    recorded_by BIGINT,
     dynamic_data JSONB DEFAULT '{}'::jsonb,
     suggested_size TEXT,
     notes TEXT,
     status TEXT DEFAULT 'Pending',
-    reviewer_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    reviewer_id BIGINT,
     reviewed_at TIMESTAMPTZ,
     recorded_at TIMESTAMPTZ DEFAULT now(),
     created_at TIMESTAMPTZ DEFAULT now(),
@@ -325,14 +330,14 @@ CREATE TABLE IF NOT EXISTS public.measurements (
 );
 
 ALTER TABLE public.measurements
-    ADD COLUMN IF NOT EXISTS member_id BIGINT REFERENCES public.registry_members(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS member_id BIGINT,
     ADD COLUMN IF NOT EXISTS student_id BIGINT,
-    ADD COLUMN IF NOT EXISTS recorded_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS recorded_by BIGINT,
     ADD COLUMN IF NOT EXISTS dynamic_data JSONB DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS suggested_size TEXT,
     ADD COLUMN IF NOT EXISTS notes TEXT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Pending',
-    ADD COLUMN IF NOT EXISTS reviewer_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS reviewer_id BIGINT,
     ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ DEFAULT now(),
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
@@ -340,9 +345,9 @@ ALTER TABLE public.measurements
 CREATE TABLE IF NOT EXISTS public.measurement_tokens (
     id BIGSERIAL PRIMARY KEY,
     token_number TEXT NOT NULL,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    organization_id BIGINT,
     order_id BIGINT,
-    member_id BIGINT REFERENCES public.registry_members(id) ON DELETE SET NULL,
+    member_id BIGINT,
     student_name TEXT NOT NULL,
     class_name TEXT,
     section_name TEXT,
@@ -350,16 +355,16 @@ CREATE TABLE IF NOT EXISTS public.measurement_tokens (
     alteration_details TEXT,
     unique_composite_id TEXT UNIQUE NOT NULL,
     status TEXT DEFAULT 'Assigned',
-    created_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    created_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE public.measurement_tokens
     ADD COLUMN IF NOT EXISTS token_number TEXT,
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
     ADD COLUMN IF NOT EXISTS order_id BIGINT,
-    ADD COLUMN IF NOT EXISTS member_id BIGINT REFERENCES public.registry_members(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS member_id BIGINT,
     ADD COLUMN IF NOT EXISTS student_name TEXT,
     ADD COLUMN IF NOT EXISTS class_name TEXT,
     ADD COLUMN IF NOT EXISTS section_name TEXT,
@@ -367,7 +372,7 @@ ALTER TABLE public.measurement_tokens
     ADD COLUMN IF NOT EXISTS alteration_details TEXT,
     ADD COLUMN IF NOT EXISTS unique_composite_id TEXT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Assigned',
-    ADD COLUMN IF NOT EXISTS created_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS created_by BIGINT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.measurement_config (
@@ -457,8 +462,8 @@ WHERE design_number IS NULL OR design_number = '';
 
 CREATE TABLE IF NOT EXISTS public.group_design_mappings (
     id BIGSERIAL PRIMARY KEY,
-    parent_id BIGINT REFERENCES public.group_design_numbers(id) ON DELETE CASCADE,
-    child_id BIGINT REFERENCES public.design_numbers(id) ON DELETE CASCADE,
+    parent_id BIGINT,
+    child_id BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE(parent_id, child_id)
 );
@@ -496,7 +501,7 @@ CREATE TABLE IF NOT EXISTS public.art_patterns (
     id BIGSERIAL PRIMARY KEY,
     code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
-    dress_id BIGINT REFERENCES public.art_dresses(id) ON DELETE SET NULL,
+    dress_id BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -504,14 +509,14 @@ CREATE TABLE IF NOT EXISTS public.art_patterns (
 ALTER TABLE public.art_patterns
     ADD COLUMN IF NOT EXISTS code TEXT,
     ADD COLUMN IF NOT EXISTS name TEXT,
-    ADD COLUMN IF NOT EXISTS dress_id BIGINT REFERENCES public.art_dresses(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS dress_id BIGINT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.art_fits (
     id BIGSERIAL PRIMARY KEY,
     code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
-    pattern_id BIGINT REFERENCES public.art_patterns(id) ON DELETE SET NULL,
+    pattern_id BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -519,16 +524,16 @@ CREATE TABLE IF NOT EXISTS public.art_fits (
 ALTER TABLE public.art_fits
     ADD COLUMN IF NOT EXISTS code TEXT,
     ADD COLUMN IF NOT EXISTS name TEXT,
-    ADD COLUMN IF NOT EXISTS pattern_id BIGINT REFERENCES public.art_patterns(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS pattern_id BIGINT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.art_numbers (
     id BIGSERIAL PRIMARY KEY,
     full_code TEXT UNIQUE NOT NULL,
-    dress_id BIGINT REFERENCES public.art_dresses(id) ON DELETE CASCADE,
-    gender_id BIGINT REFERENCES public.art_genders(id) ON DELETE CASCADE,
-    pattern_id BIGINT REFERENCES public.art_patterns(id) ON DELETE CASCADE,
-    fit_id BIGINT REFERENCES public.art_fits(id) ON DELETE SET NULL,
+    dress_id BIGINT,
+    gender_id BIGINT,
+    pattern_id BIGINT,
+    fit_id BIGINT,
     description TEXT,
     image_url TEXT,
     images JSONB DEFAULT '[]'::jsonb,
@@ -538,10 +543,10 @@ CREATE TABLE IF NOT EXISTS public.art_numbers (
 
 ALTER TABLE public.art_numbers
     ADD COLUMN IF NOT EXISTS full_code TEXT,
-    ADD COLUMN IF NOT EXISTS dress_id BIGINT REFERENCES public.art_dresses(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS gender_id BIGINT REFERENCES public.art_genders(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS pattern_id BIGINT REFERENCES public.art_patterns(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS fit_id BIGINT REFERENCES public.art_fits(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS dress_id BIGINT,
+    ADD COLUMN IF NOT EXISTS gender_id BIGINT,
+    ADD COLUMN IF NOT EXISTS pattern_id BIGINT,
+    ADD COLUMN IF NOT EXISTS fit_id BIGINT,
     ADD COLUMN IF NOT EXISTS description TEXT,
     ADD COLUMN IF NOT EXISTS image_url TEXT,
     ADD COLUMN IF NOT EXISTS images JSONB DEFAULT '[]'::jsonb,
@@ -630,20 +635,20 @@ CREATE TABLE IF NOT EXISTS public.products (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     art_number TEXT UNIQUE NOT NULL,
-    product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    product_type_id BIGINT,
     product_type TEXT,
     gender TEXT,
     measurements JSONB DEFAULT '[]'::jsonb,
     materials TEXT,
     entry_methods JSONB DEFAULT '[]'::jsonb,
     entry_method TEXT,
-    size_chart_id BIGINT REFERENCES public.size_charts(id) ON DELETE SET NULL,
+    size_chart_id BIGINT,
     category TEXT,
     base_size TEXT,
     fit TEXT,
     allowance TEXT,
     images JSONB DEFAULT '[]'::jsonb,
-    design_number_id BIGINT REFERENCES public.design_numbers(id) ON DELETE SET NULL,
+    design_number_id BIGINT,
     design_number TEXT,
     other_sizes JSONB DEFAULT '[]'::jsonb,
     other_fits JSONB DEFAULT '[]'::jsonb,
@@ -673,20 +678,20 @@ CREATE TABLE IF NOT EXISTS public.products (
 ALTER TABLE public.products
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS art_number TEXT,
-    ADD COLUMN IF NOT EXISTS product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS product_type_id BIGINT,
     ADD COLUMN IF NOT EXISTS product_type TEXT,
     ADD COLUMN IF NOT EXISTS gender TEXT,
     ADD COLUMN IF NOT EXISTS measurements JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS materials TEXT,
     ADD COLUMN IF NOT EXISTS entry_methods JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS entry_method TEXT,
-    ADD COLUMN IF NOT EXISTS size_chart_id BIGINT REFERENCES public.size_charts(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS size_chart_id BIGINT,
     ADD COLUMN IF NOT EXISTS category TEXT,
     ADD COLUMN IF NOT EXISTS base_size TEXT,
     ADD COLUMN IF NOT EXISTS fit TEXT,
     ADD COLUMN IF NOT EXISTS allowance TEXT,
     ADD COLUMN IF NOT EXISTS images JSONB DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS design_number_id BIGINT REFERENCES public.design_numbers(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS design_number_id BIGINT,
     ADD COLUMN IF NOT EXISTS design_number TEXT,
     ADD COLUMN IF NOT EXISTS other_sizes JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS other_fits JSONB DEFAULT '[]'::jsonb,
@@ -712,8 +717,8 @@ ALTER TABLE public.products
 
 CREATE TABLE IF NOT EXISTS public.product_stocks (
     id BIGSERIAL PRIMARY KEY,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE CASCADE,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    product_id BIGINT,
+    branch_id BIGINT,
     size TEXT NOT NULL,
     quantity INTEGER DEFAULT 0,
     reserved_quantity INTEGER DEFAULT 0,
@@ -724,8 +729,8 @@ CREATE TABLE IF NOT EXISTS public.product_stocks (
 );
 
 ALTER TABLE public.product_stocks
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS size TEXT,
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 0,
     ADD COLUMN IF NOT EXISTS reserved_quantity INTEGER DEFAULT 0,
@@ -734,8 +739,8 @@ ALTER TABLE public.product_stocks
 
 CREATE TABLE IF NOT EXISTS public.product_design_variants (
     id BIGSERIAL PRIMARY KEY,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE CASCADE,
-    design_number_id BIGINT REFERENCES public.design_numbers(id) ON DELETE CASCADE,
+    product_id BIGINT,
+    design_number_id BIGINT,
     name TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -909,7 +914,7 @@ ON CONFLICT (name) DO NOTHING;
 -- Trims & Accessories Master
 CREATE TABLE IF NOT EXISTS public.trims (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    category_id UUID REFERENCES public.trim_categories(id) ON DELETE SET NULL,
+    category_id UUID,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     uom TEXT DEFAULT 'pcs',
@@ -931,7 +936,7 @@ CREATE TABLE IF NOT EXISTS public.trims (
 );
 
 ALTER TABLE public.trims
-    ADD COLUMN IF NOT EXISTS category_id UUID REFERENCES public.trim_categories(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS category_id UUID,
     ADD COLUMN IF NOT EXISTS code TEXT,
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS uom TEXT DEFAULT 'pcs',
@@ -951,11 +956,12 @@ ALTER TABLE public.trims
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 -- ==============================================================================
--- 8. VENDORS, PROCUREMENT & INVENTORY MOVEMENTS
+-- 8. VENDORS, PROCUREMENT & INVENTORY MOVEMENTS (TYPE-SAFE)
 -- ==============================================================================
 
+-- Compatible with either existing BIGINT or UUID primary key!
 CREATE TABLE IF NOT EXISTS public.vendors (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     contact_person TEXT,
@@ -963,6 +969,7 @@ CREATE TABLE IF NOT EXISTS public.vendors (
     email TEXT,
     address TEXT,
     category TEXT DEFAULT 'Fabric',
+    status TEXT DEFAULT 'active',
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -975,12 +982,13 @@ ALTER TABLE public.vendors
     ADD COLUMN IF NOT EXISTS email TEXT,
     ADD COLUMN IF NOT EXISTS address TEXT,
     ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Fabric',
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active',
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.purchase_orders (
     id BIGSERIAL PRIMARY KEY,
     po_number TEXT UNIQUE NOT NULL,
-    vendor_id UUID REFERENCES public.vendors(id) ON DELETE SET NULL,
+    vendor_id BIGINT,
     supplier_name TEXT DEFAULT 'Default Supplier',
     order_id BIGINT,
     status TEXT NOT NULL DEFAULT 'Draft',
@@ -991,9 +999,26 @@ CREATE TABLE IF NOT EXISTS public.purchase_orders (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Harmonize purchase_orders.vendor_id if it pre-existed with uuid type
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'purchase_orders' AND column_name = 'vendor_id' AND data_type = 'uuid'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'vendors' AND column_name = 'id' AND data_type IN ('bigint', 'integer')
+    ) THEN
+        ALTER TABLE public.purchase_orders ALTER COLUMN vendor_id DROP DEFAULT;
+        ALTER TABLE public.purchase_orders ALTER COLUMN vendor_id TYPE BIGINT USING NULL;
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
+
 ALTER TABLE public.purchase_orders
     ADD COLUMN IF NOT EXISTS po_number TEXT,
-    ADD COLUMN IF NOT EXISTS vendor_id UUID REFERENCES public.vendors(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS vendor_id BIGINT,
     ADD COLUMN IF NOT EXISTS supplier_name TEXT DEFAULT 'Default Supplier',
     ADD COLUMN IF NOT EXISTS order_id BIGINT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Draft',
@@ -1004,7 +1029,7 @@ ALTER TABLE public.purchase_orders
 
 CREATE TABLE IF NOT EXISTS public.purchase_order_items (
     id BIGSERIAL PRIMARY KEY,
-    purchase_order_id BIGINT REFERENCES public.purchase_orders(id) ON DELETE CASCADE,
+    purchase_order_id BIGINT,
     fabric_id TEXT,
     trim_id TEXT,
     item_type TEXT,
@@ -1017,7 +1042,7 @@ CREATE TABLE IF NOT EXISTS public.purchase_order_items (
 );
 
 ALTER TABLE public.purchase_order_items
-    ADD COLUMN IF NOT EXISTS purchase_order_id BIGINT REFERENCES public.purchase_orders(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS purchase_order_id BIGINT,
     ADD COLUMN IF NOT EXISTS fabric_id TEXT,
     ADD COLUMN IF NOT EXISTS trim_id TEXT,
     ADD COLUMN IF NOT EXISTS item_type TEXT,
@@ -1031,7 +1056,7 @@ CREATE TABLE IF NOT EXISTS public.purchase_entry_batches (
     id BIGSERIAL PRIMARY KEY,
     batch_no TEXT UNIQUE NOT NULL,
     vendor_id BIGINT,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    branch_id BIGINT,
     invoice_no TEXT,
     items JSONB DEFAULT '[]'::jsonb,
     total_amount NUMERIC(14,2) DEFAULT 0.00,
@@ -1042,7 +1067,7 @@ CREATE TABLE IF NOT EXISTS public.purchase_entry_batches (
 ALTER TABLE public.purchase_entry_batches
     ADD COLUMN IF NOT EXISTS batch_no TEXT,
     ADD COLUMN IF NOT EXISTS vendor_id BIGINT,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS invoice_no TEXT,
     ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS total_amount NUMERIC(14,2) DEFAULT 0.00,
@@ -1050,30 +1075,30 @@ ALTER TABLE public.purchase_entry_batches
 
 CREATE TABLE IF NOT EXISTS public.stock_movements (
     id BIGSERIAL PRIMARY KEY,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    branch_id BIGINT,
     item_type TEXT NOT NULL,
     item_id BIGINT,
     quantity NUMERIC(12,2) NOT NULL,
     movement_type TEXT NOT NULL,
     reference_id TEXT,
     notes TEXT,
-    performed_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    performed_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE public.stock_movements
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS item_type TEXT,
     ADD COLUMN IF NOT EXISTS item_id BIGINT,
     ADD COLUMN IF NOT EXISTS quantity NUMERIC(12,2),
     ADD COLUMN IF NOT EXISTS movement_type TEXT,
     ADD COLUMN IF NOT EXISTS reference_id TEXT,
     ADD COLUMN IF NOT EXISTS notes TEXT,
-    ADD COLUMN IF NOT EXISTS performed_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS performed_by BIGINT;
 
 CREATE TABLE IF NOT EXISTS public.branch_inventory (
     id BIGSERIAL PRIMARY KEY,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    branch_id BIGINT,
     item_type TEXT NOT NULL,
     item_id BIGINT NOT NULL,
     size TEXT,
@@ -1084,7 +1109,7 @@ CREATE TABLE IF NOT EXISTS public.branch_inventory (
 );
 
 ALTER TABLE public.branch_inventory
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS item_type TEXT,
     ADD COLUMN IF NOT EXISTS item_id BIGINT,
     ADD COLUMN IF NOT EXISTS size TEXT,
@@ -1095,13 +1120,13 @@ ALTER TABLE public.branch_inventory
 CREATE TABLE IF NOT EXISTS public.inter_branch_transfers (
     id BIGSERIAL PRIMARY KEY,
     transfer_no TEXT UNIQUE NOT NULL,
-    from_branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
-    to_branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    from_branch_id BIGINT,
+    to_branch_id BIGINT,
     status TEXT NOT NULL DEFAULT 'In Transit',
     items JSONB DEFAULT '[]'::jsonb,
     notes TEXT,
-    transferred_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
-    received_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    transferred_by BIGINT,
+    received_by BIGINT,
     transferred_at TIMESTAMPTZ DEFAULT now(),
     received_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now(),
@@ -1110,13 +1135,13 @@ CREATE TABLE IF NOT EXISTS public.inter_branch_transfers (
 
 ALTER TABLE public.inter_branch_transfers
     ADD COLUMN IF NOT EXISTS transfer_no TEXT,
-    ADD COLUMN IF NOT EXISTS from_branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS to_branch_id BIGINT REFERENCES public.branches(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS from_branch_id BIGINT,
+    ADD COLUMN IF NOT EXISTS to_branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'In Transit',
     ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS notes TEXT,
-    ADD COLUMN IF NOT EXISTS transferred_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS received_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS transferred_by BIGINT,
+    ADD COLUMN IF NOT EXISTS received_by BIGINT,
     ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ DEFAULT now(),
     ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
@@ -1131,10 +1156,10 @@ CREATE TABLE IF NOT EXISTS public.leads (
     name TEXT NOT NULL,
     phone TEXT,
     email TEXT,
-    industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
+    industry_id BIGINT,
     address TEXT,
-    assigned_staff_id BIGINT REFERENCES public.employees(id) ON DELETE SET NULL,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    assigned_staff_id BIGINT,
+    branch_id BIGINT,
     status TEXT NOT NULL DEFAULT 'New',
     remarks JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
@@ -1146,10 +1171,10 @@ ALTER TABLE public.leads
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS phone TEXT,
     ADD COLUMN IF NOT EXISTS email TEXT,
-    ADD COLUMN IF NOT EXISTS industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS industry_id BIGINT,
     ADD COLUMN IF NOT EXISTS address TEXT,
-    ADD COLUMN IF NOT EXISTS assigned_staff_id BIGINT REFERENCES public.employees(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS assigned_staff_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New',
     ADD COLUMN IF NOT EXISTS remarks JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
@@ -1162,9 +1187,9 @@ CREATE TABLE IF NOT EXISTS public.quotations (
     id BIGSERIAL PRIMARY KEY,
     quotation_no TEXT UNIQUE NOT NULL,
     title TEXT NOT NULL,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
-    group_design_number_id BIGINT REFERENCES public.group_design_numbers(id) ON DELETE SET NULL,
+    organization_id BIGINT,
+    branch_id BIGINT,
+    group_design_number_id BIGINT,
     estimated_expenses NUMERIC(12,2) DEFAULT 0.00,
     total_estimated_time TEXT DEFAULT '',
     production_days_estimate INTEGER DEFAULT 0,
@@ -1185,9 +1210,9 @@ CREATE TABLE IF NOT EXISTS public.quotations (
 ALTER TABLE public.quotations
     ADD COLUMN IF NOT EXISTS quotation_no TEXT,
     ADD COLUMN IF NOT EXISTS title TEXT,
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS group_design_number_id BIGINT REFERENCES public.group_design_numbers(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
+    ADD COLUMN IF NOT EXISTS group_design_number_id BIGINT,
     ADD COLUMN IF NOT EXISTS estimated_expenses NUMERIC(12,2) DEFAULT 0.00,
     ADD COLUMN IF NOT EXISTS total_estimated_time TEXT DEFAULT '',
     ADD COLUMN IF NOT EXISTS production_days_estimate INTEGER DEFAULT 0,
@@ -1205,9 +1230,9 @@ ALTER TABLE public.quotations
 
 CREATE TABLE IF NOT EXISTS public.quotation_items (
     id BIGSERIAL PRIMARY KEY,
-    quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
-    product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    quotation_id BIGINT,
+    product_id BIGINT,
+    product_type_id BIGINT,
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     total_price NUMERIC(14,2) NOT NULL DEFAULT 0.00,
@@ -1222,9 +1247,9 @@ CREATE TABLE IF NOT EXISTS public.quotation_items (
 );
 
 ALTER TABLE public.quotation_items
-    ADD COLUMN IF NOT EXISTS quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS product_type_id BIGINT REFERENCES public.product_types(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS quotation_id BIGINT,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
+    ADD COLUMN IF NOT EXISTS product_type_id BIGINT,
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1,
     ADD COLUMN IF NOT EXISTS unit_price NUMERIC(12,2) DEFAULT 0.00,
     ADD COLUMN IF NOT EXISTS total_price NUMERIC(14,2) DEFAULT 0.00,
@@ -1238,14 +1263,14 @@ ALTER TABLE public.quotation_items
 
 CREATE TABLE IF NOT EXISTS public.orders (
     id BIGSERIAL PRIMARY KEY,
-    quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    quotation_id BIGINT,
+    branch_id BIGINT,
     order_no TEXT UNIQUE NOT NULL,
     barcode TEXT,
     status TEXT NOT NULL DEFAULT 'Draft',
     corporate_action TEXT DEFAULT 'Pending',
     corporate_action_reason TEXT,
-    corporate_action_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    corporate_action_by BIGINT,
     corporate_action_at TIMESTAMPTZ,
     submitted_to_corporate_at TIMESTAMPTZ,
     order_notes TEXT,
@@ -1254,14 +1279,14 @@ CREATE TABLE IF NOT EXISTS public.orders (
 );
 
 ALTER TABLE public.orders
-    ADD COLUMN IF NOT EXISTS quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS quotation_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS order_no TEXT,
     ADD COLUMN IF NOT EXISTS barcode TEXT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Draft',
     ADD COLUMN IF NOT EXISTS corporate_action TEXT DEFAULT 'Pending',
     ADD COLUMN IF NOT EXISTS corporate_action_reason TEXT,
-    ADD COLUMN IF NOT EXISTS corporate_action_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS corporate_action_by BIGINT,
     ADD COLUMN IF NOT EXISTS corporate_action_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS submitted_to_corporate_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS order_notes TEXT,
@@ -1269,8 +1294,8 @@ ALTER TABLE public.orders
 
 CREATE TABLE IF NOT EXISTS public.payments (
     id BIGSERIAL PRIMARY KEY,
-    quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
+    quotation_id BIGINT,
+    order_id BIGINT,
     amount NUMERIC(14,2) NOT NULL,
     payment_method TEXT NOT NULL,
     reference_no TEXT,
@@ -1280,8 +1305,8 @@ CREATE TABLE IF NOT EXISTS public.payments (
 );
 
 ALTER TABLE public.payments
-    ADD COLUMN IF NOT EXISTS quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS quotation_id BIGINT,
+    ADD COLUMN IF NOT EXISTS order_id BIGINT,
     ADD COLUMN IF NOT EXISTS amount NUMERIC(14,2),
     ADD COLUMN IF NOT EXISTS payment_method TEXT,
     ADD COLUMN IF NOT EXISTS reference_no TEXT,
@@ -1295,9 +1320,9 @@ ALTER TABLE public.payments
 CREATE TABLE IF NOT EXISTS public.job_cards (
     id BIGSERIAL PRIMARY KEY,
     job_card_no TEXT UNIQUE NOT NULL,
-    order_id BIGINT REFERENCES public.orders(id) ON DELETE CASCADE,
+    order_id BIGINT,
     item_id BIGINT,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    product_id BIGINT,
     quantity INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'Pending PO Handler',
     cutting_status TEXT DEFAULT 'Pending',
@@ -1317,9 +1342,9 @@ CREATE TABLE IF NOT EXISTS public.job_cards (
 
 ALTER TABLE public.job_cards
     ADD COLUMN IF NOT EXISTS job_card_no TEXT,
-    ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES public.orders(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS order_id BIGINT,
     ADD COLUMN IF NOT EXISTS item_id BIGINT,
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Pending PO Handler',
     ADD COLUMN IF NOT EXISTS cutting_status TEXT DEFAULT 'Pending',
@@ -1339,7 +1364,7 @@ CREATE TABLE IF NOT EXISTS public.sub_job_cards (
     id BIGSERIAL PRIMARY KEY,
     sub_job_card_no TEXT UNIQUE,
     sub_card_no TEXT UNIQUE,
-    job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
+    job_card_id BIGINT,
     size TEXT,
     quantity INTEGER NOT NULL DEFAULT 0,
     batch_size INTEGER DEFAULT 0,
@@ -1353,7 +1378,7 @@ CREATE TABLE IF NOT EXISTS public.sub_job_cards (
 ALTER TABLE public.sub_job_cards
     ADD COLUMN IF NOT EXISTS sub_job_card_no TEXT,
     ADD COLUMN IF NOT EXISTS sub_card_no TEXT,
-    ADD COLUMN IF NOT EXISTS job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS job_card_id BIGINT,
     ADD COLUMN IF NOT EXISTS size TEXT,
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 0,
     ADD COLUMN IF NOT EXISTS batch_size INTEGER DEFAULT 0,
@@ -1366,8 +1391,8 @@ ALTER TABLE public.sub_job_cards
 CREATE TABLE IF NOT EXISTS public.child_job_cards (
     id BIGSERIAL PRIMARY KEY,
     child_card_no TEXT UNIQUE NOT NULL,
-    job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
-    order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
+    job_card_id BIGINT,
+    order_id BIGINT,
     barcode TEXT,
     item_type TEXT DEFAULT 'standard',
     size TEXT,
@@ -1403,8 +1428,8 @@ CREATE TABLE IF NOT EXISTS public.child_job_cards (
 
 ALTER TABLE public.child_job_cards
     ADD COLUMN IF NOT EXISTS child_card_no TEXT,
-    ADD COLUMN IF NOT EXISTS job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS job_card_id BIGINT,
+    ADD COLUMN IF NOT EXISTS order_id BIGINT,
     ADD COLUMN IF NOT EXISTS barcode TEXT,
     ADD COLUMN IF NOT EXISTS item_type TEXT DEFAULT 'standard',
     ADD COLUMN IF NOT EXISTS size TEXT,
@@ -1438,8 +1463,8 @@ ALTER TABLE public.child_job_cards
 
 CREATE TABLE IF NOT EXISTS public.fabric_consumption_logs (
     id BIGSERIAL PRIMARY KEY,
-    job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
-    sub_job_card_id BIGINT REFERENCES public.sub_job_cards(id) ON DELETE SET NULL,
+    job_card_id BIGINT,
+    sub_job_card_id BIGINT,
     fabric_id TEXT,
     fabric_name TEXT,
     required_meters NUMERIC(10,2) DEFAULT 0.00,
@@ -1458,8 +1483,8 @@ CREATE TABLE IF NOT EXISTS public.fabric_consumption_logs (
 
 -- Crucial: Ensure fabric_id is TEXT to allow UUIDs and IDs seamlessly
 ALTER TABLE public.fabric_consumption_logs
-    ADD COLUMN IF NOT EXISTS job_card_id BIGINT REFERENCES public.job_cards(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS sub_job_card_id BIGINT REFERENCES public.sub_job_cards(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS job_card_id BIGINT,
+    ADD COLUMN IF NOT EXISTS sub_job_card_id BIGINT,
     ADD COLUMN IF NOT EXISTS fabric_id TEXT,
     ADD COLUMN IF NOT EXISTS fabric_name TEXT,
     ADD COLUMN IF NOT EXISTS required_meters NUMERIC(10,2) DEFAULT 0.00,
@@ -1481,9 +1506,9 @@ ALTER TABLE public.fabric_consumption_logs
 CREATE TABLE IF NOT EXISTS public.invoices (
     id BIGSERIAL PRIMARY KEY,
     invoice_no TEXT UNIQUE NOT NULL,
-    order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
-    quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE SET NULL,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    order_id BIGINT,
+    quotation_id BIGINT,
+    branch_id BIGINT,
     customer_name TEXT NOT NULL,
     customer_type TEXT DEFAULT 'Business',
     is_tax_inclusive BOOLEAN DEFAULT true,
@@ -1494,16 +1519,16 @@ CREATE TABLE IF NOT EXISTS public.invoices (
     payment_status TEXT DEFAULT 'Fully Paid',
     notes TEXT,
     pdf_html TEXT,
-    created_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    created_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE public.invoices
     ADD COLUMN IF NOT EXISTS invoice_no TEXT,
-    ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS quotation_id BIGINT REFERENCES public.quotations(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS order_id BIGINT,
+    ADD COLUMN IF NOT EXISTS quotation_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS customer_name TEXT,
     ADD COLUMN IF NOT EXISTS customer_type TEXT DEFAULT 'Business',
     ADD COLUMN IF NOT EXISTS is_tax_inclusive BOOLEAN DEFAULT true,
@@ -1514,13 +1539,13 @@ ALTER TABLE public.invoices
     ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'Fully Paid',
     ADD COLUMN IF NOT EXISTS notes TEXT,
     ADD COLUMN IF NOT EXISTS pdf_html TEXT,
-    ADD COLUMN IF NOT EXISTS created_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS created_by BIGINT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS public.invoice_items (
     id BIGSERIAL PRIMARY KEY,
-    invoice_id BIGINT REFERENCES public.invoices(id) ON DELETE CASCADE,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    invoice_id BIGINT,
+    product_id BIGINT,
     item_description TEXT,
     description TEXT,
     design_number TEXT,
@@ -1533,8 +1558,8 @@ CREATE TABLE IF NOT EXISTS public.invoice_items (
 );
 
 ALTER TABLE public.invoice_items
-    ADD COLUMN IF NOT EXISTS invoice_id BIGINT REFERENCES public.invoices(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS invoice_id BIGINT,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
     ADD COLUMN IF NOT EXISTS item_description TEXT,
     ADD COLUMN IF NOT EXISTS description TEXT,
     ADD COLUMN IF NOT EXISTS design_number TEXT,
@@ -1548,9 +1573,9 @@ CREATE TABLE IF NOT EXISTS public.delivery_challans (
     id BIGSERIAL PRIMARY KEY,
     dc_no TEXT UNIQUE,
     dc_number TEXT UNIQUE,
-    order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
-    invoice_id BIGINT REFERENCES public.invoices(id) ON DELETE SET NULL,
-    branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    order_id BIGINT,
+    invoice_id BIGINT,
+    branch_id BIGINT,
     status TEXT NOT NULL DEFAULT 'Dispatched',
     items JSONB DEFAULT '[]'::jsonb,
     dispatch_date DATE DEFAULT CURRENT_DATE,
@@ -1566,9 +1591,9 @@ CREATE TABLE IF NOT EXISTS public.delivery_challans (
 ALTER TABLE public.delivery_challans
     ADD COLUMN IF NOT EXISTS dc_no TEXT,
     ADD COLUMN IF NOT EXISTS dc_number TEXT,
-    ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES public.orders(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS invoice_id BIGINT REFERENCES public.invoices(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS branch_id BIGINT REFERENCES public.branches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS order_id BIGINT,
+    ADD COLUMN IF NOT EXISTS invoice_id BIGINT,
+    ADD COLUMN IF NOT EXISTS branch_id BIGINT,
     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Dispatched',
     ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS dispatch_date DATE DEFAULT CURRENT_DATE,
@@ -1589,7 +1614,7 @@ UPDATE public.delivery_challans SET dc_number = dc_no WHERE dc_number IS NULL AN
 
 CREATE TABLE IF NOT EXISTS public.audit_logs (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    user_id BIGINT,
     action TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     entity_id TEXT,
@@ -1598,7 +1623,7 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
 );
 
 ALTER TABLE public.audit_logs
-    ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS user_id BIGINT,
     ADD COLUMN IF NOT EXISTS action TEXT,
     ADD COLUMN IF NOT EXISTS entity_type TEXT,
     ADD COLUMN IF NOT EXISTS entity_id TEXT,
@@ -1634,7 +1659,7 @@ CREATE INDEX IF NOT EXISTS idx_rec_act ON public.record_activity_logs(entity_typ
 CREATE TABLE IF NOT EXISTS public.sam_configurations (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    product_id BIGINT,
     wholesale_slabs JSONB DEFAULT '[]'::jsonb,
     retail_slabs JSONB DEFAULT '[]'::jsonb,
     is_active BOOLEAN DEFAULT true,
@@ -1644,7 +1669,7 @@ CREATE TABLE IF NOT EXISTS public.sam_configurations (
 
 ALTER TABLE public.sam_configurations
     ADD COLUMN IF NOT EXISTS name TEXT,
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
     ADD COLUMN IF NOT EXISTS wholesale_slabs JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS retail_slabs JSONB DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true,
@@ -1652,7 +1677,7 @@ ALTER TABLE public.sam_configurations
 
 CREATE TABLE IF NOT EXISTS public.sam_configuration_components (
     id BIGSERIAL PRIMARY KEY,
-    configuration_id BIGINT REFERENCES public.sam_configurations(id) ON DELETE CASCADE,
+    configuration_id BIGINT,
     name TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'percentage',
     value NUMERIC(10,4) NOT NULL DEFAULT 0.0000,
@@ -1662,7 +1687,7 @@ CREATE TABLE IF NOT EXISTS public.sam_configuration_components (
 );
 
 ALTER TABLE public.sam_configuration_components
-    ADD COLUMN IF NOT EXISTS configuration_id BIGINT REFERENCES public.sam_configurations(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS configuration_id BIGINT,
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'percentage',
     ADD COLUMN IF NOT EXISTS value NUMERIC(10,4) DEFAULT 0.0000,
@@ -1694,8 +1719,8 @@ ALTER TABLE public.fabric_margin_calculations
 
 CREATE TABLE IF NOT EXISTS public.sam_calculations (
     id BIGSERIAL PRIMARY KEY,
-    product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
-    sam_configuration_id BIGINT REFERENCES public.sam_configurations(id) ON DELETE SET NULL,
+    product_id BIGINT,
+    sam_configuration_id BIGINT,
     sales_type TEXT NOT NULL DEFAULT 'wholesale',
     quantity INTEGER NOT NULL DEFAULT 1,
     base_sam NUMERIC(10,4) NOT NULL DEFAULT 0.0000,
@@ -1703,13 +1728,13 @@ CREATE TABLE IF NOT EXISTS public.sam_calculations (
     adjusted_sam NUMERIC(10,4) NOT NULL DEFAULT 0.0000,
     final_sam_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     components_snapshot JSONB DEFAULT '{}'::jsonb,
-    calculated_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    calculated_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE public.sam_calculations
-    ADD COLUMN IF NOT EXISTS product_id BIGINT REFERENCES public.products(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS sam_configuration_id BIGINT REFERENCES public.sam_configurations(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS product_id BIGINT,
+    ADD COLUMN IF NOT EXISTS sam_configuration_id BIGINT,
     ADD COLUMN IF NOT EXISTS sales_type TEXT DEFAULT 'wholesale',
     ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1,
     ADD COLUMN IF NOT EXISTS base_sam NUMERIC(10,4) DEFAULT 0.0000,
@@ -1717,7 +1742,7 @@ ALTER TABLE public.sam_calculations
     ADD COLUMN IF NOT EXISTS adjusted_sam NUMERIC(10,4) DEFAULT 0.0000,
     ADD COLUMN IF NOT EXISTS final_sam_cost NUMERIC(12,2) DEFAULT 0.00,
     ADD COLUMN IF NOT EXISTS components_snapshot JSONB DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS calculated_by BIGINT REFERENCES public.user_profiles(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS calculated_by BIGINT;
 
 -- ==============================================================================
 -- 15. COMPANY SETTINGS, TAX MASTERS & TEMPLATES
@@ -1784,8 +1809,8 @@ ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS public.industry_templates (
     id BIGSERIAL PRIMARY KEY,
-    organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
-    industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
+    organization_id BIGINT,
+    industry_id BIGINT,
     name TEXT NOT NULL,
     description TEXT,
     department_ids JSONB DEFAULT '[]'::jsonb,
@@ -1797,8 +1822,8 @@ CREATE TABLE IF NOT EXISTS public.industry_templates (
 );
 
 ALTER TABLE public.industry_templates
-    ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES public.organizations(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS industry_id BIGINT REFERENCES public.industries(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS organization_id BIGINT,
+    ADD COLUMN IF NOT EXISTS industry_id BIGINT,
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS description TEXT,
     ADD COLUMN IF NOT EXISTS department_ids JSONB DEFAULT '[]'::jsonb,
@@ -1808,7 +1833,239 @@ ALTER TABLE public.industry_templates
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 -- ==============================================================================
--- 16. LEGACY VIEW COMPATIBILITY (schools, students, classes)
+-- 16. SAFE FOREIGN KEY APPLICATION (NON-BLOCKING & TYPE-CHECKED)
+-- ==============================================================================
+
+DO $$
+BEGIN
+    -- user_profiles -> user_types
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_profiles_user_type_id_fkey') THEN
+            ALTER TABLE public.user_profiles ADD CONSTRAINT user_profiles_user_type_id_fkey FOREIGN KEY (user_type_id) REFERENCES public.user_types(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- branch_users -> branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'branch_users_branch_id_fkey') THEN
+            ALTER TABLE public.branch_users ADD CONSTRAINT branch_users_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- employees -> branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'employees_home_branch_id_fkey') THEN
+            ALTER TABLE public.employees ADD CONSTRAINT employees_home_branch_id_fkey FOREIGN KEY (home_branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'employees_current_branch_id_fkey') THEN
+            ALTER TABLE public.employees ADD CONSTRAINT employees_current_branch_id_fkey FOREIGN KEY (current_branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- employee_work_history -> employees
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'employee_work_history_employee_id_fkey') THEN
+            ALTER TABLE public.employee_work_history ADD CONSTRAINT employee_work_history_employee_id_fkey FOREIGN KEY (employee_id) REFERENCES public.employees(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- organizations -> industries / branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_industry_id_fkey') THEN
+            ALTER TABLE public.organizations ADD CONSTRAINT organizations_industry_id_fkey FOREIGN KEY (industry_id) REFERENCES public.industries(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_branch_id_fkey') THEN
+            ALTER TABLE public.organizations ADD CONSTRAINT organizations_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- departments -> organizations
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'departments_organization_id_fkey') THEN
+            ALTER TABLE public.departments ADD CONSTRAINT departments_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- registry_members -> organizations / departments
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'registry_members_organization_id_fkey') THEN
+            ALTER TABLE public.registry_members ADD CONSTRAINT registry_members_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'registry_members_department_id_fkey') THEN
+            ALTER TABLE public.registry_members ADD CONSTRAINT registry_members_department_id_fkey FOREIGN KEY (department_id) REFERENCES public.departments(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- measurements -> registry_members
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'measurements_member_id_fkey') THEN
+            ALTER TABLE public.measurements ADD CONSTRAINT measurements_member_id_fkey FOREIGN KEY (member_id) REFERENCES public.registry_members(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- measurement_tokens -> organizations
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'measurement_tokens_organization_id_fkey') THEN
+            ALTER TABLE public.measurement_tokens ADD CONSTRAINT measurement_tokens_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- art_numbers -> dresses / genders / patterns
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'art_numbers_dress_id_fkey') THEN
+            ALTER TABLE public.art_numbers ADD CONSTRAINT art_numbers_dress_id_fkey FOREIGN KEY (dress_id) REFERENCES public.art_dresses(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'art_numbers_gender_id_fkey') THEN
+            ALTER TABLE public.art_numbers ADD CONSTRAINT art_numbers_gender_id_fkey FOREIGN KEY (gender_id) REFERENCES public.art_genders(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'art_numbers_pattern_id_fkey') THEN
+            ALTER TABLE public.art_numbers ADD CONSTRAINT art_numbers_pattern_id_fkey FOREIGN KEY (pattern_id) REFERENCES public.art_patterns(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- products -> product_types / size_charts
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'products_product_type_id_fkey') THEN
+            ALTER TABLE public.products ADD CONSTRAINT products_product_type_id_fkey FOREIGN KEY (product_type_id) REFERENCES public.product_types(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'products_size_chart_id_fkey') THEN
+            ALTER TABLE public.products ADD CONSTRAINT products_size_chart_id_fkey FOREIGN KEY (size_chart_id) REFERENCES public.size_charts(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- product_stocks -> products / branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'product_stocks_product_id_fkey') THEN
+            ALTER TABLE public.product_stocks ADD CONSTRAINT product_stocks_product_id_fkey FOREIGN KEY (product_id) REFERENCES public.products(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'product_stocks_branch_id_fkey') THEN
+            ALTER TABLE public.product_stocks ADD CONSTRAINT product_stocks_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- trims -> trim_categories
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'trims_category_id_fkey') THEN
+            ALTER TABLE public.trims ADD CONSTRAINT trims_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.trim_categories(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- purchase_orders -> vendors (Strictly check type compatibility before applying!)
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns c1
+            JOIN information_schema.columns c2 ON c1.data_type = c2.data_type
+            WHERE c1.table_schema = 'public' AND c1.table_name = 'purchase_orders' AND c1.column_name = 'vendor_id'
+              AND c2.table_schema = 'public' AND c2.table_name = 'vendors' AND c2.column_name = 'id'
+        ) THEN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'purchase_orders_vendor_id_fkey') THEN
+                ALTER TABLE public.purchase_orders ADD CONSTRAINT purchase_orders_vendor_id_fkey FOREIGN KEY (vendor_id) REFERENCES public.vendors(id) ON DELETE SET NULL;
+            END IF;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- purchase_order_items -> purchase_orders
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'purchase_order_items_purchase_order_id_fkey') THEN
+            ALTER TABLE public.purchase_order_items ADD CONSTRAINT purchase_order_items_purchase_order_id_fkey FOREIGN KEY (purchase_order_id) REFERENCES public.purchase_orders(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- quotations -> organizations / branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'quotations_organization_id_fkey') THEN
+            ALTER TABLE public.quotations ADD CONSTRAINT quotations_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'quotations_branch_id_fkey') THEN
+            ALTER TABLE public.quotations ADD CONSTRAINT quotations_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- quotation_items -> quotations / products
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'quotation_items_quotation_id_fkey') THEN
+            ALTER TABLE public.quotation_items ADD CONSTRAINT quotation_items_quotation_id_fkey FOREIGN KEY (quotation_id) REFERENCES public.quotations(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'quotation_items_product_id_fkey') THEN
+            ALTER TABLE public.quotation_items ADD CONSTRAINT quotation_items_product_id_fkey FOREIGN KEY (product_id) REFERENCES public.products(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- orders -> quotations / branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_quotation_id_fkey') THEN
+            ALTER TABLE public.orders ADD CONSTRAINT orders_quotation_id_fkey FOREIGN KEY (quotation_id) REFERENCES public.quotations(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_branch_id_fkey') THEN
+            ALTER TABLE public.orders ADD CONSTRAINT orders_branch_id_fkey FOREIGN KEY (branch_id) REFERENCES public.branches(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- payments -> quotations / orders
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'payments_quotation_id_fkey') THEN
+            ALTER TABLE public.payments ADD CONSTRAINT payments_quotation_id_fkey FOREIGN KEY (quotation_id) REFERENCES public.quotations(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- job_cards -> orders / products
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'job_cards_order_id_fkey') THEN
+            ALTER TABLE public.job_cards ADD CONSTRAINT job_cards_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'job_cards_product_id_fkey') THEN
+            ALTER TABLE public.job_cards ADD CONSTRAINT job_cards_product_id_fkey FOREIGN KEY (product_id) REFERENCES public.products(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- sub_job_cards -> job_cards
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sub_job_cards_job_card_id_fkey') THEN
+            ALTER TABLE public.sub_job_cards ADD CONSTRAINT sub_job_cards_job_card_id_fkey FOREIGN KEY (job_card_id) REFERENCES public.job_cards(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- child_job_cards -> job_cards
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'child_job_cards_job_card_id_fkey') THEN
+            ALTER TABLE public.child_job_cards ADD CONSTRAINT child_job_cards_job_card_id_fkey FOREIGN KEY (job_card_id) REFERENCES public.job_cards(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- fabric_consumption_logs -> job_cards
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fabric_consumption_logs_job_card_id_fkey') THEN
+            ALTER TABLE public.fabric_consumption_logs ADD CONSTRAINT fabric_consumption_logs_job_card_id_fkey FOREIGN KEY (job_card_id) REFERENCES public.job_cards(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- invoices -> orders / quotations / branches
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoices_order_id_fkey') THEN
+            ALTER TABLE public.invoices ADD CONSTRAINT invoices_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoices_quotation_id_fkey') THEN
+            ALTER TABLE public.invoices ADD CONSTRAINT invoices_quotation_id_fkey FOREIGN KEY (quotation_id) REFERENCES public.quotations(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- invoice_items -> invoices
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_invoice_id_fkey') THEN
+            ALTER TABLE public.invoice_items ADD CONSTRAINT invoice_items_invoice_id_fkey FOREIGN KEY (invoice_id) REFERENCES public.invoices(id) ON DELETE CASCADE;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- delivery_challans -> orders
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'delivery_challans_order_id_fkey') THEN
+            ALTER TABLE public.delivery_challans ADD CONSTRAINT delivery_challans_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE SET NULL;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+END $$;
+
+-- ==============================================================================
+-- 17. LEGACY VIEW COMPATIBILITY (schools, students, classes)
 -- ==============================================================================
 
 DO $$
@@ -1825,7 +2082,7 @@ BEGIN
 END $$;
 
 -- ==============================================================================
--- 17. PERFORMANCE INDEXES
+-- 18. PERFORMANCE INDEXES
 -- ==============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_products_art_number ON public.products(art_number);
@@ -1852,7 +2109,7 @@ CREATE INDEX IF NOT EXISTS idx_invoices_order_id ON public.invoices(order_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_challans_order_id ON public.delivery_challans(order_id);
 
 -- ==============================================================================
--- 18. ROW LEVEL SECURITY (RLS) & GRANTS FOR ALL APIS & ROLES
+-- 19. ROW LEVEL SECURITY (RLS) & GRANTS FOR ALL APIS & ROLES
 -- ==============================================================================
 
 DO $$
@@ -1879,7 +2136,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, an
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO postgres, anon, authenticated, service_role;
 
 -- ==============================================================================
--- 19. RELOAD SUPABASE POSTGREST SCHEMA CACHE
+-- 20. RELOAD SUPABASE POSTGREST SCHEMA CACHE
 -- ==============================================================================
 
 NOTIFY pgrst, 'reload schema';

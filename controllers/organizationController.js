@@ -11,7 +11,9 @@ async function generateNextCustomerCodeLocal() {
     const { data, error } = await supabase
       .from("organizations")
       .select("customer_code")
-      .not("customer_code", "is", null);
+      .ilike("customer_code", "CN%")
+      .order("customer_code", { ascending: false })
+      .limit(20);
 
     if (error) {
       console.error("Error fetching customer codes:", error.message);
@@ -22,7 +24,7 @@ async function generateNextCustomerCodeLocal() {
     if (data && data.length > 0) {
       data.forEach((item) => {
         const c = item.customer_code;
-        if (c && c.startsWith("CN")) {
+        if (c && c.toUpperCase().startsWith("CN")) {
           const numPart = c.substring(2);
           const num = parseInt(numPart, 10);
           if (!isNaN(num) && num > maxNum) {
@@ -127,6 +129,112 @@ exports.getOrganizations = async (req, res) => {
       }
     }
 
+    // Calculate real-time financial receivables and credits strictly from generated invoices (NOT quotations)
+    try {
+      const orgIds = enriched.map((o) => o.id).filter(Boolean);
+      if (orgIds.length > 0) {
+        const { data: invoicesData, error: invFetchErr } = await supabase
+          .from("invoices")
+          .select("id, organization_id, total_amount, status");
+
+        if (invFetchErr) {
+          console.warn("[getOrganizations] Could not fetch invoices:", invFetchErr.message);
+        }
+
+        const dueByOrg = {};
+        const creditByOrg = {};
+        const totalInvoicedByOrg = {};
+        const totalPaidByOrg = {};
+        const orgsWithInvoices = new Set();
+
+        if (invoicesData && invoicesData.length > 0) {
+          invoicesData.forEach((inv) => {
+            const matchedOrgId = inv.organization_id;
+
+            if (matchedOrgId && orgIds.includes(matchedOrgId)) {
+              orgsWithInvoices.add(matchedOrgId);
+              const total = parseFloat(inv.total_amount || 0);
+              const isPaid = inv.status === "Paid" || inv.status === "Fully Paid";
+              const paid = isPaid ? total : 0;
+              
+              // Receivables: (invoice - amount paid) when unpaid
+              const balance = isPaid ? 0 : total;
+              dueByOrg[matchedOrgId] = (dueByOrg[matchedOrgId] || 0) + balance;
+
+              // Track organization totals
+              totalInvoicedByOrg[matchedOrgId] = (totalInvoicedByOrg[matchedOrgId] || 0) + total;
+              totalPaidByOrg[matchedOrgId] = (totalPaidByOrg[matchedOrgId] || 0) + paid;
+
+              // Credit per invoice: (amount paid - invoice) when paid > total
+              const invoiceCredit = Math.max(0, paid - total);
+              creditByOrg[matchedOrgId] = (creditByOrg[matchedOrgId] || 0) + invoiceCredit;
+            }
+          });
+        }
+
+        // Also check any advance payments recorded for these organizations
+        try {
+          const { data: quotesData } = await supabase
+            .from("quotations")
+            .select("id, organization_id, paid_amount")
+            .in("organization_id", orgIds);
+
+          (quotesData || []).forEach((q) => {
+            if (q.organization_id) {
+              const qPaid = parseFloat(q.paid_amount || 0);
+              if (qPaid > 0 && !orgsWithInvoices.has(q.organization_id)) {
+                // Advance payments received before invoice generation: credit = (amount paid - 0 invoice)
+                totalPaidByOrg[q.organization_id] = (totalPaidByOrg[q.organization_id] || 0) + qPaid;
+                creditByOrg[q.organization_id] = (creditByOrg[q.organization_id] || 0) + qPaid;
+              }
+            }
+          });
+        } catch (qErr) {
+          // resilient fallback
+        }
+
+        enriched = enriched.map((o) => {
+          // Receivables are calculated strictly against generated invoices, NEVER quotations
+          const invoiceDue = dueByOrg[o.id] || 0;
+          const finalReceivables = orgsWithInvoices.has(o.id) ? invoiceDue : 0;
+
+          // Credit is calculated strictly by (amount paid - invoice)
+          const totalInvoiced = totalInvoicedByOrg[o.id] || 0;
+          const totalPaid = totalPaidByOrg[o.id] || 0;
+          const netCredit = Math.max(0, totalPaid - totalInvoiced);
+          const invExcessCredit = creditByOrg[o.id] || 0;
+          const calculatedCredits = Math.max(netCredit, invExcessCredit);
+
+          return {
+            ...o,
+            receivables: Math.round(finalReceivables * 100) / 100,
+            credits: Math.round(calculatedCredits * 100) / 100,
+          };
+        });
+      }
+    } catch (finErr) {
+      console.warn("[getOrganizations] Could not enrich financial dues:", finErr.message);
+      enriched = enriched.map((o) => ({
+        ...o,
+        receivables: 0,
+        credits: 0,
+      }));
+    }
+
+    enriched = enriched.map((o) => {
+      const resolvedNum = o.contact_number || o.contact_phone || o.phone || null;
+      const resolvedEmail = o.contact_email || o.email || null;
+      return {
+        ...o,
+        contact_number: resolvedNum,
+        contact_phone: resolvedNum,
+        phone: resolvedNum,
+        contact_email: resolvedEmail,
+        email: resolvedEmail,
+        is_b2b: Boolean(o.is_b2b || (o.gst_number && String(o.gst_number).trim() !== '')),
+      };
+    });
+
     console.log(`[DB] Fetched ${enriched.length} organizations`);
     res.json(enriched);
   } catch (err) {
@@ -139,37 +247,69 @@ exports.createOrganization = async (req, res) => {
   const {
     name,
     address,
+    city,
+    state,
+    pincode,
+    pin_code,
+    country,
+    phone,
+    email,
+    contact_email,
+    contact_person,
     username,
     password,
     industry_id,
     relationship_manager_id,
     customer_code,
+    receivables,
+    credits,
+    gst_number,
+    pan_number,
+    legal_name,
+    delivery_address,
+    delivery_city,
+    delivery_state,
+    delivery_pincode,
+    delivery_country,
+    is_b2b,
+    credit_period_days,
   } = req.body;
 
   try {
-    // 1. Validate credentials if provided
+    // 1. Validate credentials & phone
     if (!username || !password) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Username and password are required for organization registration.",
-        });
+      return res.status(400).json({
+        error:
+          "Username and password are required for organization registration.",
+      });
     }
 
+    if (!phone || String(phone).trim() === "") {
+      return res.status(400).json({
+        error: "Phone number is required for customer registration.",
+      });
+    }
+
+    const cleanEmail =
+      email && String(email).trim() !== ""
+        ? String(email).trim().toLowerCase()
+        : null;
+
     // Check if username/email already taken in user_profiles
-    const { data: existingUser } = await supabase
-      .from("user_profiles")
-      .select("id")
-      .or(`email.eq.${username},username.eq.${username}`)
-      .maybeSingle();
+    let userCollisionQuery = supabase.from("user_profiles").select("id");
+    if (cleanEmail) {
+      userCollisionQuery = userCollisionQuery.or(
+        `email.eq.${cleanEmail},username.eq.${username}`,
+      );
+    } else {
+      userCollisionQuery = userCollisionQuery.eq("username", username);
+    }
+    const { data: existingUser } = await userCollisionQuery.maybeSingle();
 
     if (existingUser) {
-      return res
-        .status(400)
-        .json({
-          error: `Username "${username}" is already in use. Please choose a different username.`,
-        });
+      return res.status(400).json({
+        error: `Username "${username}" or email is already in use. Please choose a different username.`,
+      });
     }
 
     // 2. Create User Profile first - dynamically resolve valid user_type_id from user_types table
@@ -215,7 +355,7 @@ exports.createOrganization = async (req, res) => {
         {
           full_name: name,
           username: username,
-          email: username,
+          email: cleanEmail,
           password: password,
           user_type_id: orgRoleId,
         },
@@ -232,24 +372,123 @@ exports.createOrganization = async (req, res) => {
     }
 
     // 3. Create Organization and link to user
-    const { data, error } = await supabase
-      .from("organizations")
-      .insert([
-        {
-          name,
-          address,
-          user_id: userData.id,
-          industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
-          customer_code: finalCustomerCode,
-          relationship_manager_id: relationship_manager_id || null,
-        },
-      ])
-      .select()
-      .single();
+    const resolvedPincode = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+    const rawPhone = phone !== undefined ? phone : (req.body.contact_number !== undefined ? req.body.contact_number : req.body.contact_phone);
+    const cleanPhone = rawPhone ? String(rawPhone).trim() : null;
+    const resolvedContactEmail = contact_email || email || cleanEmail || null;
+
+    // Automatically resolve relationship manager (sales person) from logged-in user
+    let resolvedRmId = relationship_manager_id ? parseInt(relationship_manager_id, 10) : null;
+    if (!resolvedRmId && req.user) {
+      if (req.user.employeeRecordId) {
+        resolvedRmId = req.user.employeeRecordId;
+      } else {
+        try {
+          let empQuery = supabase.from("employees").select("id");
+          if (req.user.employeeId) {
+            empQuery = empQuery.eq("employee_id", req.user.employeeId);
+          } else if (req.user.id && !String(req.user.id).startsWith("branch_user_")) {
+            empQuery = empQuery.eq("user_id", req.user.id);
+          } else if (req.user.email) {
+            empQuery = empQuery.eq("email", String(req.user.email).trim().toLowerCase());
+          }
+          const { data: userEmp } = await empQuery.maybeSingle();
+          if (userEmp) {
+            resolvedRmId = userEmp.id;
+          }
+        } catch (eErr) {
+          console.warn("[createOrganization] Could not auto-resolve employee ID for RM:", eErr.message);
+        }
+      }
+    }
+
+    const orgPayload = {
+      name,
+      contact_person: contact_person ? String(contact_person).trim() : null,
+      contact_email: resolvedContactEmail ? String(resolvedContactEmail).trim().toLowerCase() : null,
+      address: address ? String(address).trim() : null,
+      city: city ? String(city).trim() : null,
+      state: state ? String(state).trim() : null,
+      pincode: resolvedPincode,
+      country: country ? String(country).trim() : 'India',
+      contact_number: cleanPhone,
+      user_id: userData.id,
+      industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
+      customer_code: finalCustomerCode,
+      relationship_manager_id: resolvedRmId,
+      receivables: receivables !== undefined && receivables !== null && !isNaN(parseFloat(receivables)) ? parseFloat(receivables) : 0,
+      credits: credits !== undefined && credits !== null && !isNaN(parseFloat(credits)) ? parseFloat(credits) : 0,
+      gst_number: gst_number ? String(gst_number).trim().toUpperCase() : null,
+      pan_number: pan_number ? String(pan_number).trim().toUpperCase() : (gst_number && String(gst_number).trim().length >= 12 ? String(gst_number).trim().substring(2, 12).toUpperCase() : null),
+      legal_name: legal_name ? String(legal_name).trim() : null,
+      delivery_address: delivery_address ? String(delivery_address).trim() : null,
+      delivery_city: delivery_city ? String(delivery_city).trim() : null,
+      delivery_state: delivery_state ? String(delivery_state).trim() : null,
+      delivery_pincode: delivery_pincode ? String(delivery_pincode).trim() : null,
+      delivery_country: delivery_country ? String(delivery_country).trim() : 'India',
+      is_b2b: Boolean(gst_number && String(gst_number).trim() !== '') || Boolean(is_b2b),
+      credit_period_days: credit_period_days !== undefined && credit_period_days !== null && !isNaN(parseInt(credit_period_days, 10)) ? parseInt(credit_period_days, 10) : 30,
+    };
+
+    let currentInsert = { ...orgPayload };
+    let insertResult = null;
+    let insertError = null;
+
+    for (let attempt = 0; attempt <= 12; attempt++) {
+      const { data: resData, error: resErr } = await supabase
+        .from("organizations")
+        .insert([currentInsert])
+        .select()
+        .maybeSingle();
+
+      if (!resErr) {
+        insertResult = resData;
+        insertError = null;
+        break;
+      }
+
+      insertError = resErr;
+      const errLower = (resErr.message || "").toLowerCase();
+      let pruned = false;
+
+      // Fallback hierarchy: contact_number -> contact_phone -> phone
+      if (errLower.includes("contact_number") && currentInsert.contact_number !== undefined) {
+        delete currentInsert.contact_number;
+        if (cleanPhone) currentInsert.contact_phone = cleanPhone;
+        pruned = true;
+      } else if (errLower.includes("contact_phone") && currentInsert.contact_phone !== undefined) {
+        delete currentInsert.contact_phone;
+        if (cleanPhone) currentInsert.phone = cleanPhone;
+        pruned = true;
+      } else if (errLower.includes("phone") && currentInsert.phone !== undefined) {
+        delete currentInsert.phone;
+        pruned = true;
+      }
+
+      for (const col of Object.keys(currentInsert)) {
+        if (errLower.includes(col.toLowerCase())) {
+          delete currentInsert[col];
+          pruned = true;
+          break;
+        }
+      }
+
+      if (!pruned) break;
+    }
+
+    let data = insertResult;
+    let error = insertError;
 
     if (error) {
       await supabase.from("user_profiles").delete().eq("id", userData.id);
       throw error;
+    }
+
+    if (data) {
+      const savedNum = data.contact_number || data.contact_phone || data.phone || cleanPhone || null;
+      data.phone = savedNum;
+      data.contact_number = savedNum;
+      data.contact_phone = savedNum;
     }
 
     // 4. Log the action
@@ -268,6 +507,15 @@ exports.updateOrganization = async (req, res) => {
   const {
     name,
     address,
+    city,
+    state,
+    pincode,
+    pin_code,
+    country,
+    phone,
+    email,
+    contact_email,
+    contact_person,
     industry_id,
     relationship_manager_id,
     customer_code,
@@ -275,12 +523,41 @@ exports.updateOrganization = async (req, res) => {
     is_special,
     is_risk,
     client_tag,
+    receivables,
+    credits,
+    gst_number,
+    pan_number,
+    legal_name,
+    delivery_address,
+    delivery_city,
+    delivery_state,
+    delivery_pincode,
+    delivery_country,
+    is_b2b,
+    credit_period_days,
   } = req.body;
 
   try {
     const updatePayload = {};
     if (name !== undefined) updatePayload.name = name;
-    if (address !== undefined) updatePayload.address = address;
+    if (contact_person !== undefined) updatePayload.contact_person = contact_person ? String(contact_person).trim() : null;
+    if (contact_email !== undefined || email !== undefined) {
+      const em = contact_email || email;
+      updatePayload.contact_email = em ? String(em).trim().toLowerCase() : null;
+    }
+    if (address !== undefined) updatePayload.address = address ? String(address).trim() : null;
+    if (city !== undefined) updatePayload.city = city ? String(city).trim() : null;
+    if (state !== undefined) updatePayload.state = state ? String(state).trim() : null;
+    if (pincode !== undefined || pin_code !== undefined) {
+      const p = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+      updatePayload.pincode = p;
+    }
+    if (country !== undefined) updatePayload.country = country ? String(country).trim() : 'India';
+    const rawPhone = phone !== undefined ? phone : (req.body.contact_number !== undefined ? req.body.contact_number : req.body.contact_phone);
+    if (rawPhone !== undefined) {
+      const cleanPhone = rawPhone ? String(rawPhone).trim() : null;
+      updatePayload.contact_number = cleanPhone;
+    }
     if (industry_id !== undefined) updatePayload.industry_id = industry_id;
     if (relationship_manager_id !== undefined)
       updatePayload.relationship_manager_id = relationship_manager_id;
@@ -313,33 +590,110 @@ exports.updateOrganization = async (req, res) => {
       }
     }
 
-    let { data, error } = await supabase
-      .from("organizations")
-      .update(updatePayload)
-      .eq("id", id)
-      .select()
-      .single();
-
-    // Graceful fallback if is_special or is_risk column is not yet present in schema
-    if (
-      error &&
-      error.message &&
-      (error.message.includes("is_special") ||
-        error.message.includes("is_risk"))
-    ) {
-      delete updatePayload.is_special;
-      delete updatePayload.is_risk;
-      const retry = await supabase
-        .from("organizations")
-        .update(updatePayload)
-        .eq("id", id)
-        .select()
-        .single();
-      data = retry.data;
-      error = retry.error;
+    if (receivables !== undefined) {
+      updatePayload.receivables =
+        receivables !== null && !isNaN(parseFloat(receivables))
+          ? parseFloat(receivables)
+          : 0;
+    }
+    if (credits !== undefined) {
+      updatePayload.credits =
+        credits !== null && !isNaN(parseFloat(credits))
+          ? parseFloat(credits)
+          : 0;
     }
 
-    if (error) throw error;
+    if (gst_number !== undefined) {
+      const cleanGst = gst_number ? String(gst_number).trim().toUpperCase() : null;
+      updatePayload.gst_number = cleanGst;
+      updatePayload.is_b2b = Boolean(cleanGst && cleanGst !== '');
+      if (cleanGst && cleanGst.length >= 12 && (!pan_number || String(pan_number).trim() === '')) {
+        updatePayload.pan_number = cleanGst.substring(2, 12).toUpperCase();
+      }
+    }
+    if (pan_number !== undefined) updatePayload.pan_number = pan_number ? String(pan_number).trim().toUpperCase() : null;
+    if (legal_name !== undefined) updatePayload.legal_name = legal_name ? String(legal_name).trim() : null;
+    if (delivery_address !== undefined) updatePayload.delivery_address = delivery_address ? String(delivery_address).trim() : null;
+    if (delivery_city !== undefined) updatePayload.delivery_city = delivery_city ? String(delivery_city).trim() : null;
+    if (delivery_state !== undefined) updatePayload.delivery_state = delivery_state ? String(delivery_state).trim() : null;
+    if (delivery_pincode !== undefined) updatePayload.delivery_pincode = delivery_pincode ? String(delivery_pincode).trim() : null;
+    if (delivery_country !== undefined) updatePayload.delivery_country = delivery_country ? String(delivery_country).trim() : 'India';
+    if (is_b2b !== undefined) updatePayload.is_b2b = Boolean(is_b2b);
+    if (credit_period_days !== undefined) {
+      updatePayload.credit_period_days = credit_period_days !== null && !isNaN(parseInt(credit_period_days, 10))
+        ? parseInt(credit_period_days, 10)
+        : 30;
+    }
+
+    // Robust execution loop: iteratively prune any columns that PostgREST schema does not have
+    let currentUpdate = { ...updatePayload };
+    let updateResult = null;
+    let updateError = null;
+
+    for (let attempt = 0; attempt <= 12; attempt++) {
+      const { data: resData, error: resErr } = await supabase
+        .from("organizations")
+        .update(currentUpdate)
+        .eq("id", id)
+        .select()
+        .maybeSingle();
+
+      if (!resErr) {
+        updateResult = resData;
+        updateError = null;
+        break;
+      }
+
+      updateError = resErr;
+      const errLower = (resErr.message || "").toLowerCase();
+      let pruned = false;
+
+      // Handle contact_number -> contact_phone -> phone fallback
+      if (errLower.includes("contact_number") && currentUpdate.contact_number !== undefined) {
+        delete currentUpdate.contact_number;
+        if (rawPhone !== undefined) {
+          currentUpdate.contact_phone = rawPhone ? String(rawPhone).trim() : null;
+        }
+        pruned = true;
+      } else if (errLower.includes("contact_phone") && currentUpdate.contact_phone !== undefined) {
+        delete currentUpdate.contact_phone;
+        if (rawPhone !== undefined) {
+          currentUpdate.phone = rawPhone ? String(rawPhone).trim() : null;
+        }
+        pruned = true;
+      } else if (errLower.includes("phone") && currentUpdate.phone !== undefined) {
+        delete currentUpdate.phone;
+        pruned = true;
+      }
+
+      // Handle special / risk
+      if ((errLower.includes("is_special") || errLower.includes("is_risk")) && (currentUpdate.is_special !== undefined || currentUpdate.is_risk !== undefined)) {
+        delete currentUpdate.is_special;
+        delete currentUpdate.is_risk;
+        pruned = true;
+      }
+
+      // Check any other key in currentUpdate mentioned in error
+      for (const col of Object.keys(currentUpdate)) {
+        if (errLower.includes(col.toLowerCase())) {
+          delete currentUpdate[col];
+          pruned = true;
+          break;
+        }
+      }
+
+      if (!pruned) break;
+    }
+
+    if (updateError) throw updateError;
+    const data = updateResult;
+
+    if (data) {
+      const savedNum = data.contact_number || data.contact_phone || data.phone || (rawPhone ? String(rawPhone).trim() : null);
+      data.phone = savedNum;
+      data.contact_number = savedNum;
+      data.contact_phone = savedNum;
+    }
 
     // 2. Log the action
     if (req.user?.id) {
@@ -358,11 +712,9 @@ exports.getOrganizationDetails = async (req, res) => {
   const { id } = req.params;
   const userOrgId = req.user?.organizationId;
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error: "Access Denied: You cannot view another organization's details",
-      });
+    return res.status(403).json({
+      error: "Access Denied: You cannot view another organization's details",
+    });
   }
   try {
     // 1. Get Departments
@@ -413,8 +765,35 @@ exports.getOrganizationDetails = async (req, res) => {
       )
       .eq("quotations.organization_id", id);
 
+    // 4. Get Organization Details
+    let orgData = null;
+    try {
+      const { data: oRow } = await supabase
+        .from("organizations")
+        .select("*, industries(name)")
+        .eq("id", id)
+        .maybeSingle();
+      if (oRow) {
+        const resolvedNum = oRow.contact_number || oRow.contact_phone || oRow.phone || null;
+        const resolvedEmail = oRow.contact_email || oRow.email || null;
+        orgData = {
+          ...oRow,
+          phone: resolvedNum,
+          contact_number: resolvedNum,
+          contact_phone: resolvedNum,
+          email: resolvedEmail,
+          contact_email: resolvedEmail,
+          is_b2b: Boolean(oRow.is_b2b || (oRow.gst_number && String(oRow.gst_number).trim() !== '')),
+          credit_period_days: oRow.credit_period_days !== undefined && oRow.credit_period_days !== null ? oRow.credit_period_days : 30
+        };
+      }
+    } catch (oErr) {
+      console.warn("[getOrganizationDetails] Could not fetch org header:", oErr.message);
+    }
+
     res.json({
       success: true,
+      organization: orgData,
       departments: enrichedDepartments,
       measurements: {
         total: members ? members.length : 0,
@@ -432,12 +811,10 @@ exports.getAssignedStaff = async (req, res) => {
   const { id } = req.params;
   const userOrgId = req.user?.organizationId;
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error:
-          "Access Denied: You cannot view another organization's assigned staff",
-      });
+    return res.status(403).json({
+      error:
+        "Access Denied: You cannot view another organization's assigned staff",
+    });
   }
   try {
     const { data, error } = await supabase
@@ -558,6 +935,51 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
+function calculateLedgerDueInfo(invoiceDate, creditPeriodDays, paymentStatus, balanceAmount) {
+  if (paymentStatus === "Paid" || Number(balanceAmount) <= 0) {
+    return {
+      due_status: "Paid",
+      due_label: "Paid in Full",
+      diff_days: 0,
+      is_due_today: false,
+      is_overdue: false,
+    };
+  }
+
+  const invDate = invoiceDate ? new Date(invoiceDate) : new Date();
+  const period = parseInt(creditPeriodDays, 10) || 30;
+  const dueDate = new Date(invDate);
+  dueDate.setDate(dueDate.getDate() + period);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dueMidnight = new Date(dueDate);
+  dueMidnight.setHours(0, 0, 0, 0);
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const diffDays = Math.round((today.getTime() - dueMidnight.getTime()) / msPerDay);
+
+  let due_status = "Active";
+  let due_label = `${Math.abs(diffDays)} days remaining`;
+
+  if (diffDays === 0) {
+    due_status = "Due";
+    due_label = "Due Today (Last day of credit period)";
+  } else if (diffDays > 0) {
+    due_status = "Overdue";
+    due_label = `Overdue by ${diffDays} day${diffDays === 1 ? "" : "s"}`;
+  }
+
+  return {
+    due_status,
+    due_label,
+    diff_days: diffDays,
+    due_date: dueDate.toISOString(),
+    is_due_today: diffDays === 0,
+    is_overdue: diffDays > 0,
+  };
+}
+
 // Phase 1 Option B: Customer Account Ledger Statement
 exports.getOrganizationLedger = async (req, res) => {
   const { id } = req.params;
@@ -568,30 +990,38 @@ exports.getOrganizationLedger = async (req, res) => {
     req.user?.memberId ||
     ["entity", "student", "member"].includes(userRole)
   ) {
-    return res
-      .status(403)
-      .json({
-        error:
-          "Access Denied: Individual members cannot view organization financial ledgers",
-      });
+    return res.status(403).json({
+      error:
+        "Access Denied: Individual members cannot view organization financial ledgers",
+    });
   }
 
   if (userOrgId && String(userOrgId) !== String(id)) {
-    return res
-      .status(403)
-      .json({
-        error: "Access Denied: You cannot view another organization's ledger",
-      });
+    return res.status(403).json({
+      error: "Access Denied: You cannot view another organization's ledger",
+    });
   }
   try {
     // 1. Fetch organization master details
-    const { data: org, error: orgErr } = await supabase
-      .from("organizations")
-      .select("id, name, customer_code, address, created_at, industries(name)")
-      .eq("id", id)
-      .single();
+    let org = null;
+    try {
+      const { data: orgWithCredit } = await supabase
+        .from("organizations")
+        .select("id, name, customer_code, address, credit_period_days, created_at, industries(name)")
+        .eq("id", id)
+        .single();
+      org = orgWithCredit;
+    } catch (e) {
+      // Fallback if credit_period_days not yet in schema cache
+      const { data: orgBasic } = await supabase
+        .from("organizations")
+        .select("id, name, customer_code, address, created_at, industries(name)")
+        .eq("id", id)
+        .single();
+      org = orgBasic;
+    }
 
-    if (orgErr || !org) {
+    if (!org) {
       return res.status(404).json({ error: "Organization not found" });
     }
 
@@ -616,31 +1046,35 @@ exports.getOrganizationLedger = async (req, res) => {
     }
     const orderIds = orders.map((o) => o.id);
 
-    // 4. Fetch all invoices for these orders or quotations or matching customer name
+    // 4. Fetch all invoices for these orders or quotations or matching customer name or organization_id
     const invMap = new Map();
+    try {
+      const { data: directOrgInvoices } = await supabase
+        .from("invoices")
+        .select("*")
+        .eq("organization_id", id);
+      (directOrgInvoices || []).forEach((i) => invMap.set(i.id, i));
+    } catch (e) {
+      // organization_id may not exist yet in postgrest cache
+    }
+
     if (quotationIds.length > 0) {
       const { data: qInvoices } = await supabase
         .from("invoices")
-        .select(
-          "id, invoice_no, order_id, quotation_id, total_amount, paid_amount, payment_status, is_tax_inclusive, created_at, notes",
-        )
+        .select("*")
         .in("quotation_id", quotationIds);
       (qInvoices || []).forEach((i) => invMap.set(i.id, i));
     }
     if (orderIds.length > 0) {
       const { data: oInvoices } = await supabase
         .from("invoices")
-        .select(
-          "id, invoice_no, order_id, quotation_id, total_amount, paid_amount, payment_status, is_tax_inclusive, created_at, notes",
-        )
+        .select("*")
         .in("order_id", orderIds);
       (oInvoices || []).forEach((i) => invMap.set(i.id, i));
     }
     const { data: nameInvoices } = await supabase
       .from("invoices")
-      .select(
-        "id, invoice_no, order_id, quotation_id, total_amount, paid_amount, payment_status, is_tax_inclusive, created_at, notes",
-      )
+      .select("*")
       .ilike("customer_name", org.name);
     (nameInvoices || []).forEach((i) => invMap.set(i.id, i));
 
@@ -661,24 +1095,42 @@ exports.getOrganizationLedger = async (req, res) => {
     // 6. Build combined chronological ledger transactions
     const rawTransactions = [];
 
-    // Map Invoices as Debits (amount charged)
+    // Map Invoices as Debits (commercial credit billings)
     invoices.forEach((inv) => {
       const amount = parseFloat(inv.total_amount || 0);
+      const paid = parseFloat(inv.paid_amount || 0);
       const linkedOrder = orders.find((o) => o.id === inv.order_id);
       const linkedQuote = (quotations || []).find(
         (q) => q.id === inv.quotation_id,
       );
       const orderRef =
-        linkedOrder?.order_no || linkedQuote?.quotation_no || "Direct";
+        linkedOrder?.order_no || linkedQuote?.quotation_no || (inv.sale_type === 'retail' ? "Retail Direct" : "Direct");
+
+      const orgCreditPeriod = org.credit_period_days || 30;
+      const invCreditPeriod = inv.credit_period_days || orgCreditPeriod;
+      const invDate = inv.invoice_date || inv.created_at;
+      const dueInfo = calculateLedgerDueInfo(
+        invDate,
+        invCreditPeriod,
+        inv.payment_status,
+        amount - paid
+      );
 
       rawTransactions.push({
         id: `INV-${inv.id}`,
         raw_id: inv.id,
-        date: inv.created_at,
+        date: invDate,
         type: "INVOICE",
         reference_no: inv.invoice_no,
-        description: `Tax Invoice for ${orderRef}`,
+        description: inv.sale_type === "retail" ? `Retail Tax Invoice (Manual)` : `Bulk Order Invoice for ${orderRef}`,
         order_ref: orderRef,
+        sale_type: inv.sale_type || (linkedOrder ? "bulk" : "retail"),
+        credit_period_days: invCreditPeriod,
+        due_date: inv.due_date || dueInfo.due_date,
+        due_status: dueInfo.due_status,
+        due_label: dueInfo.due_label,
+        is_due_today: dueInfo.is_due_today,
+        is_overdue: dueInfo.is_overdue,
         debit: amount,
         credit: 0,
         status: inv.payment_status || "Unpaid",
@@ -687,82 +1139,7 @@ exports.getOrganizationLedger = async (req, res) => {
       });
     });
 
-    // Valid confirmed order statuses eligible for debiting the customer ledger
-    const CONFIRMED_ORDER_STATUSES = [
-      "Corporate Accepted",
-      "Placed",
-      "In Production",
-      "Shipped",
-      "Delivered",
-      "Completed",
-      "Confirmed",
-    ];
-
-    // Map Orders as Debits ONLY if confirmed and no formal tax invoice has been generated for them yet
-    const invoicedOrderIds = new Set(
-      invoices.filter((i) => i.order_id).map((i) => i.order_id),
-    );
-    const invoicedQuotationIds = new Set(
-      invoices.filter((i) => i.quotation_id).map((i) => i.quotation_id),
-    );
-
-    orders.forEach((order) => {
-      const isConfirmed = CONFIRMED_ORDER_STATUSES.includes(order.status);
-      if (
-        isConfirmed &&
-        !invoicedOrderIds.has(order.id) &&
-        !invoicedQuotationIds.has(order.quotation_id)
-      ) {
-        const linkedQuote = (quotations || []).find(
-          (q) => q.id === order.quotation_id,
-        );
-        const orderAmount = parseFloat(linkedQuote?.final_quote_value || 0);
-        if (orderAmount > 0) {
-          rawTransactions.push({
-            id: `ORD-${order.id}`,
-            raw_id: order.id,
-            date: order.created_at,
-            type: "ORDER",
-            reference_no: order.order_no,
-            description: `Sales Order (${order.status}): ${linkedQuote?.title || linkedQuote?.quotation_no || order.order_no}`,
-            order_ref: order.order_no,
-            debit: orderAmount,
-            credit: 0,
-            status: order.status || "Confirmed",
-            payment_mode: null,
-            notes: order.order_notes,
-          });
-        }
-      }
-    });
-
-    // In case an organization has an approved quotation with charges but no order yet
-    const orderedQuotationIds = new Set(orders.map((o) => o.quotation_id));
-    (quotations || []).forEach((quote) => {
-      if (
-        !invoicedQuotationIds.has(quote.id) &&
-        !orderedQuotationIds.has(quote.id) &&
-        (quote.status === "Approved" || quote.status === "Accepted")
-      ) {
-        const quoteAmount = parseFloat(quote.final_quote_value || 0);
-        if (quoteAmount > 0) {
-          rawTransactions.push({
-            id: `QT-${quote.id}`,
-            raw_id: quote.id,
-            date: quote.created_at,
-            type: "ORDER",
-            reference_no: quote.quotation_no,
-            description: `Approved Contract: ${quote.title || quote.quotation_no}`,
-            order_ref: quote.quotation_no,
-            debit: quoteAmount,
-            credit: 0,
-            status: quote.status,
-            payment_mode: null,
-            notes: "",
-          });
-        }
-      }
-    });
+    // Debits to the customer account ledger are strictly from generated invoices, NOT un-invoiced orders or quotations.
 
     // Map Payments as Credits (amount received)
     payments.forEach((pay) => {
@@ -825,6 +1202,8 @@ exports.getOrganizationLedger = async (req, res) => {
       settlementStatus = "Credit Balance";
     }
 
+    const creditAmount = Math.max(0, Math.round((totalPaid - totalInvoiced) * 100) / 100);
+
     res.json({
       success: true,
       organization: {
@@ -832,6 +1211,7 @@ exports.getOrganizationLedger = async (req, res) => {
         name: org.name,
         customer_code: org.customer_code,
         address: org.address,
+        credit_period_days: org.credit_period_days || 30,
         phone: null,
         email: null,
         industry: org.industries?.name || "General",
@@ -841,10 +1221,10 @@ exports.getOrganizationLedger = async (req, res) => {
         total_invoiced: Math.round(totalInvoiced * 100) / 100,
         total_paid: Math.round(totalPaid * 100) / 100,
         outstanding_balance: outstandingBalance,
+        credits: creditAmount,
+        credit_balance: creditAmount,
         settlement_status: settlementStatus,
-        total_orders: orders.filter((o) =>
-          CONFIRMED_ORDER_STATUSES.includes(o.status),
-        ).length,
+        total_orders: orders.length,
         total_invoices: invoices.length,
         total_payments: payments.length,
       },

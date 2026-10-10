@@ -260,8 +260,7 @@ exports.listProducts = async (req, res) => {
             .from('products')
             .select(`
                 *,
-                product_types(id, name),
-                design_number_ref:design_numbers(code)
+                product_types(id, name)
             `)
             .order('created_at', { ascending: false });
 
@@ -276,6 +275,16 @@ exports.listProducts = async (req, res) => {
             return res.status(500).json({ error: prodError.message, code: prodError.code });
         }
 
+        const dnIds = (products || []).map(p => p.design_number_id).filter(Boolean);
+        let dnMap = {};
+        if (dnIds.length > 0) {
+            const { data: dns } = await supabase
+                .from('design_numbers')
+                .select('id, code')
+                .in('id', dnIds);
+            (dns || []).forEach(d => { dnMap[d.id] = d.code; });
+        }
+
         const formatted = (products || []).map(p => {
             const meta = parseMaterialsMetadata(p.materials);
             const resolvedMainFabric = (p.main_fabric !== null && p.main_fabric !== undefined && p.main_fabric !== '')
@@ -288,8 +297,7 @@ exports.listProducts = async (req, res) => {
                 ...p,
                 main_fabric: resolvedMainFabric,
                 main_fabric_meters: resolvedMainFabric,
-                design_number: p.design_number_ref?.code || null,
-                design_number_ref: undefined,
+                design_number: dnMap[p.design_number_id] || null,
                 main_fabric_id: p.main_fabric_id || meta.main_fabric_id || p.class_fabric_consumption?._base_main_fabric_id || null,
                 attachment_fabric1_id: p.attachment_fabric1_id || meta.attachment_fabric1_id,
                 attachment_fabric2_id: p.attachment_fabric2_id || meta.attachment_fabric2_id,
@@ -440,13 +448,10 @@ exports.createProduct = async (req, res) => {
             trims, attachment_fabrics, allowance
         } = req.body;
         
-        if (!design_number || design_number.trim() === '') {
-            design_number = await generateNextDesignNumberInternal();
-        } else {
-            design_number = design_number.trim();
+        let designNumberId = null;
+        if (design_number && design_number.trim() !== '') {
+            designNumberId = await findOrCreateProductDesignNumber(design_number.trim());
         }
-
-        const designNumberId = await findOrCreateProductDesignNumber(design_number);
 
         // Map dynamic trims counts and preserve valid button_id/thread_id
         if (Array.isArray(trims) && trims.length > 0) {
@@ -454,7 +459,7 @@ exports.createProduct = async (req, res) => {
             if (btnTrim) {
                 if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
             }
-            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.uom || '').toLowerCase() === 'spools' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
             if (thrTrim) {
                 if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
             }
@@ -621,7 +626,7 @@ exports.updateProduct = async (req, res) => {
             if (btnTrim) {
                 if (!button_count) button_count = parseInt(btnTrim.count, 10) || 0;
             }
-            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
+            const thrTrim = trims.find(t => (t.uom || '').toLowerCase() === 'cones' || (t.uom || '').toLowerCase() === 'spools' || (t.name || '').toLowerCase().includes('thread') || String(t.trim_id).includes('thr'));
             if (thrTrim) {
                 if (!thread_count) thread_count = parseInt(thrTrim.count, 10) || 0;
             }

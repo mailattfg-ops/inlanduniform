@@ -4,6 +4,7 @@ const invoiceController = require('../controllers/invoiceController');
 const { authMiddleware } = require('../middleware/authMiddleware');
 
 router.get('/', authMiddleware, invoiceController.listInvoices);
+router.post('/from-order', authMiddleware, invoiceController.createInvoiceFromOrder);
 router.post('/', authMiddleware, invoiceController.createInvoice);
 router.put('/:id', authMiddleware, invoiceController.updateInvoice);
 router.delete('/:id', authMiddleware, invoiceController.deleteInvoice);

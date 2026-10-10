@@ -328,6 +328,73 @@ exports.createOrder = async (req, res) => {
             console.error('Logging failed:', logErr.message);
         }
 
+        // Automatically advance linked lead in Sales Pipeline to 'Converted' (Customer Won!)
+        try {
+            const { data: quoteRec } = await supabase
+                .from('quotations')
+                .select('organization_id')
+                .eq('id', quotation_id)
+                .maybeSingle();
+
+            if (quoteRec && quoteRec.organization_id) {
+                let { data: leads } = await supabase
+                    .from('leads')
+                    .select('id, status, remarks, name')
+                    .eq('organization_id', quoteRec.organization_id)
+                    .in('status', ['Proposal Sent', 'Qualified', 'Contacted', 'New']);
+
+                if (!leads || leads.length === 0) {
+                    const { data: org } = await supabase
+                        .from('organizations')
+                        .select('name')
+                        .eq('id', quoteRec.organization_id)
+                        .maybeSingle();
+
+                    if (org && org.name) {
+                        const { data: matchedLeads } = await supabase
+                            .from('leads')
+                            .select('id, status, remarks, name')
+                            .ilike('name', org.name.trim())
+                            .in('status', ['Proposal Sent', 'Qualified', 'Contacted', 'New']);
+                        leads = matchedLeads;
+                    }
+                }
+
+                if (leads && leads.length > 0) {
+                    const now = new Date();
+                    const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                    const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+                    for (const l of leads) {
+                        let curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
+                        curRemarks.push({
+                            date: dateStr,
+                            time: timeStr,
+                            text: `Converted: Sales Order #${newOrder.order_no} created and confirmed! Customer won!`,
+                            stage: 'Converted',
+                            response_type: 'positive',
+                            author: {
+                                name: req.user?.fullName || req.user?.full_name || 'Operations Staff',
+                                designation: req.user?.designation || req.user?.role || 'Staff',
+                                department: req.user?.department || 'Sales & Operations'
+                            }
+                        });
+
+                        await supabase
+                            .from('leads')
+                            .update({
+                                status: 'Converted',
+                                remarks: curRemarks,
+                                updated_at: new Date()
+                            })
+                            .eq('id', l.id);
+                    }
+                }
+            }
+        } catch (leadConvErr) {
+            console.warn('Could not auto-advance lead pipeline to Converted:', leadConvErr.message);
+        }
+
         res.status(201).json(newOrder);
     } catch (err) {
         res.status(500).json({ error: err.message });

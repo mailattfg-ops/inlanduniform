@@ -89,6 +89,7 @@ exports.login = async (req, res) => {
 
         if (empData) {
           fullUser.employeeId = empData.employee_id;
+          fullUser.employeeRecordId = empData.id;
           fullUser.designation = empData.designation || profile.user_types?.name || 'Staff';
           fullUser.department = empData.department || 'Operations';
           if (empData.full_name && !fullUser.fullName) {
@@ -224,7 +225,9 @@ exports.login = async (req, res) => {
         organizationId: fullUser.organizationId,
         memberId: fullUser.memberId,
         departmentId: fullUser.departmentId,
-        branchId: fullUser.branchId
+        branchId: fullUser.branchId,
+        employeeRecordId: fullUser.employeeRecordId || null,
+        employeeId: fullUser.employeeId || null
       },
       JWT_SECRET,
       { expiresIn: '7d' }

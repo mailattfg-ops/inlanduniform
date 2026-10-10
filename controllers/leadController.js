@@ -77,7 +77,12 @@ module.exports = {
             }
 
             // Live data directly from database! If table is blank, return []
-            res.json(data || []);
+            const mapped = (data || []).map(l => ({
+                ...l,
+                phone: l.contact_number || l.phone || null,
+                contact_number: l.contact_number || l.phone || null
+            }));
+            res.json(mapped);
         } catch (err) {
             console.error('❌ [DATABASE ERROR] Leads controller catch:', err.message);
             res.status(500).json({ error: err.message });
@@ -103,6 +108,10 @@ module.exports = {
                 if (fallbackRes.error) throw fallbackRes.error;
                 data = fallbackRes.data;
             }
+            if (data) {
+                data.phone = data.contact_number || data.phone || null;
+                data.contact_number = data.contact_number || data.phone || null;
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -110,110 +119,157 @@ module.exports = {
     },
 
     create: async (req, res) => {
-        const { name, phone, email, industry_id, address, city, state, pincode, pin_code, country, assigned_staff_id, status, remarks, branch_id } = req.body;
-        if (!name || name.trim() === '') {
-            return res.status(400).json({ error: 'Lead name is required' });
-        }
-        if (!phone || String(phone).trim() === '') {
-            return res.status(400).json({ error: 'Phone number is required' });
-        }
-        try {
-            const isAdmin = isGlobalAdmin(req.user);
-            const userBranchId = req.user?.branchId;
-
-            // Automatically associate lead with the branch user's branch
-            const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || null);
-
-            let remarksJson = [];
-            if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
-                const now = new Date();
-                const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-                const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-                remarksJson = [{
-                    date: dateStr,
-                    time: timeStr,
-                    text: remarks.trim()
-                }];
-            } else if (Array.isArray(remarks)) {
-                remarksJson = remarks;
+        const { 
+                name, 
+                phone, 
+                email, 
+                industry_id, 
+                address, 
+                city, 
+                state, 
+                pincode, 
+                pin_code, 
+                country, 
+                assigned_staff_id, 
+                status, 
+                remarks, 
+                branch_id,
+                contact_person,
+                source,
+                requirements
+            } = req.body;
+            if (!name || name.trim() === '') {
+                return res.status(400).json({ error: 'Lead name is required' });
             }
+            if (!phone || String(phone).trim() === '') {
+                return res.status(400).json({ error: 'Phone number is required' });
+            }
+            try {
+                const isAdmin = isGlobalAdmin(req.user);
+                const userBranchId = req.user?.branchId;
 
-            // Automatically resolve assigned_staff_id from logged-in user if not explicitly provided
-            let resolvedStaffId = assigned_staff_id || null;
-            if (!resolvedStaffId && req.user?.id) {
-                try {
-                    let empQuery = supabase.from('employees').select('id');
-                    if (req.user.employeeId) {
-                        empQuery = empQuery.eq('employee_id', req.user.employeeId);
-                    } else if (req.user.email) {
-                        empQuery = empQuery.or(`user_id.eq.${req.user.id},email.eq.${req.user.email}`);
-                    } else {
-                        empQuery = empQuery.eq('user_id', req.user.id);
-                    }
-                    const { data: userEmp } = await empQuery.maybeSingle();
-                    if (userEmp) {
-                        resolvedStaffId = userEmp.id;
-                    }
-                } catch (empResErr) {
-                    console.warn('[leadController.create] Could not auto-resolve employee ID:', empResErr.message);
+                // Automatically associate lead with the branch user's branch
+                const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || null);
+
+                let remarksJson = [];
+                if (remarks && typeof remarks === 'string' && remarks.trim() !== '') {
+                    const now = new Date();
+                    const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                    const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                    remarksJson = [{
+                        date: dateStr,
+                        time: timeStr,
+                        text: remarks.trim()
+                    }];
+                } else if (Array.isArray(remarks)) {
+                    remarksJson = remarks;
                 }
-            }
 
-            const resolvedPincode = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
-            const lead_code = await generateNextLeadCodeLocal();
-            const insertPayload = {
-                lead_code,
-                name: name.trim(),
-                phone: String(phone).trim(),
-                email: email && email.trim() ? email.trim().toLowerCase() : null,
-                industry_id: industry_id || null,
-                address: address ? String(address).trim() : null,
-                city: city ? String(city).trim() : null,
-                state: state ? String(state).trim() : null,
-                pincode: resolvedPincode,
-                pin_code: resolvedPincode,
-                country: country ? String(country).trim() : 'India',
-                assigned_staff_id: resolvedStaffId,
-                branch_id: targetBranchId,
-                status: status || 'New',
-                remarks: remarksJson
-            };
-
-            let { data, error } = await supabase
-                .from('leads')
-                .insert([insertPayload])
-                .select(`
-                    *,
-                    industries ( id, name ),
-                    employees ( id, full_name, employee_id )
-                `)
-                .single();
-
-            if (error && error.message) {
-                let shouldRetry = false;
-                const errLower = error.message.toLowerCase();
-                ['email', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
-                    if (errLower.includes(col)) {
-                        delete insertPayload[col];
-                        shouldRetry = true;
+                // Automatically resolve assigned_staff_id from logged-in user if not explicitly provided
+                let resolvedStaffId = assigned_staff_id || null;
+                if (!resolvedStaffId && req.user?.id) {
+                    try {
+                        let empQuery = supabase.from('employees').select('id');
+                        if (req.user.employeeId) {
+                            empQuery = empQuery.eq('employee_id', req.user.employeeId);
+                        } else if (req.user.email) {
+                            empQuery = empQuery.or(`user_id.eq.${req.user.id},email.eq.${req.user.email}`);
+                        } else {
+                            empQuery = empQuery.eq('user_id', req.user.id);
+                        }
+                        const { data: userEmp } = await empQuery.maybeSingle();
+                        if (userEmp) {
+                            resolvedStaffId = userEmp.id;
+                        }
+                    } catch (empResErr) {
+                        console.warn('[leadController.create] Could not auto-resolve employee ID:', empResErr.message);
                     }
-                });
-                if (shouldRetry) {
-                    const retry = await supabase
-                        .from('leads')
-                        .insert([insertPayload])
-                        .select(`
-                            *,
-                            industries ( id, name ),
-                            employees ( id, full_name, employee_id )
-                        `)
-                        .single();
-                    data = retry.data;
-                    error = retry.error;
                 }
+
+                const resolvedPincode = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+                const lead_code = await generateNextLeadCodeLocal();
+                // Composed fallback address for legacy schema that only has single address text column
+                const composedParts = [
+                    address ? String(address).trim() : null,
+                    city ? String(city).trim() : null,
+                    state ? `${String(state).trim()} ${resolvedPincode || ''}`.trim() : resolvedPincode,
+                    country ? String(country).trim() : null
+                ].filter(Boolean);
+                const fallbackAddress = composedParts.length > 0 ? composedParts.join(', ') : (address ? String(address).trim() : null);
+
+                const cleanPhone = phone ? String(phone).trim() : null;
+
+                const insertPayload = {
+                    lead_code,
+                    name: name.trim(),
+                    contact_person: contact_person ? String(contact_person).trim() : null,
+                    source: source ? String(source).trim() : null,
+                    requirements: requirements ? String(requirements).trim() : null,
+                    contact_number: cleanPhone,
+                    email: email && email.trim() ? email.trim().toLowerCase() : null,
+                    industry_id: industry_id || null,
+                    address: fallbackAddress,
+                    city: city ? String(city).trim() : null,
+                    state: state ? String(state).trim() : null,
+                    pincode: resolvedPincode,
+                    country: country ? String(country).trim() : 'India',
+                    assigned_staff_id: resolvedStaffId,
+                    branch_id: targetBranchId,
+                    status: status || 'New',
+                    remarks: remarksJson
+                };
+
+            let currentInsert = { ...insertPayload };
+            let insertResult = null;
+            let insertError = null;
+
+            for (let attempt = 0; attempt <= 12; attempt++) {
+                const { data: resData, error: resErr } = await supabase
+                    .from('leads')
+                    .insert([currentInsert])
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .maybeSingle();
+
+                if (!resErr) {
+                    insertResult = resData;
+                    insertError = null;
+                    break;
+                }
+
+                insertError = resErr;
+                const errLower = (resErr.message || '').toLowerCase();
+                let pruned = false;
+
+                if (errLower.includes('contact_number') && currentInsert.contact_number !== undefined) {
+                    delete currentInsert.contact_number;
+                    if (cleanPhone) currentInsert.phone = cleanPhone;
+                    pruned = true;
+                } else if (errLower.includes('phone') && currentInsert.phone !== undefined) {
+                    delete currentInsert.phone;
+                    pruned = true;
+                }
+
+                for (const col of Object.keys(currentInsert)) {
+                    if (errLower.includes(col.toLowerCase())) {
+                        delete currentInsert[col];
+                        pruned = true;
+                        break;
+                    }
+                }
+
+                if (!pruned) break;
             }
 
-            if (error) throw error;
+            if (insertError) throw insertError;
+            const data = insertResult;
+            if (data) {
+                data.phone = data.contact_number || data.phone || cleanPhone || null;
+                data.contact_number = data.contact_number || data.phone || cleanPhone || null;
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -222,14 +278,34 @@ module.exports = {
 
     update: async (req, res) => {
         const { id } = req.params;
-        const { name, phone, email, industry_id, address, city, state, pincode, pin_code, country, assigned_staff_id, status, remarks, branch_id } = req.body;
+        const { 
+            name, 
+            phone, 
+            email, 
+            industry_id, 
+            address, 
+            city, 
+            state, 
+            pincode, 
+            pin_code, 
+            country, 
+            assigned_staff_id, 
+            status, 
+            remarks, 
+            branch_id,
+            contact_person,
+            source,
+            requirements
+        } = req.body;
         if (!name || name.trim() === '') {
             return res.status(400).json({ error: 'Lead name is required' });
         }
         try {
+            const rawPhone = phone !== undefined ? phone : req.body.contact_number;
+            const cleanPhone = rawPhone !== undefined ? (rawPhone ? String(rawPhone).trim() : null) : undefined;
+
             const updateFields = {
                 name,
-                phone: phone || null,
                 industry_id: industry_id || null,
                 address: address !== undefined ? (address ? String(address).trim() : null) : undefined,
                 assigned_staff_id: assigned_staff_id || null,
@@ -237,12 +313,25 @@ module.exports = {
                 updated_at: new Date()
             };
 
+            if (contact_person !== undefined) {
+                updateFields.contact_person = contact_person ? String(contact_person).trim() : null;
+            }
+            if (source !== undefined) {
+                updateFields.source = source ? String(source).trim() : null;
+            }
+            if (requirements !== undefined) {
+                updateFields.requirements = requirements ? String(requirements).trim() : null;
+            }
+
+            if (cleanPhone !== undefined) {
+                updateFields.contact_number = cleanPhone;
+            }
+
             if (city !== undefined) updateFields.city = city ? String(city).trim() : null;
             if (state !== undefined) updateFields.state = state ? String(state).trim() : null;
             if (pincode !== undefined || pin_code !== undefined) {
                 const p = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
                 updateFields.pincode = p;
-                updateFields.pin_code = p;
             }
             if (country !== undefined) updateFields.country = country ? String(country).trim() : 'India';
 
@@ -269,43 +358,60 @@ module.exports = {
                 }
             }
 
-            let { data, error } = await supabase
-                .from('leads')
-                .update(updateFields)
-                .eq('id', id)
-                .select(`
-                    *,
-                    industries ( id, name ),
-                    employees ( id, full_name, employee_id )
-                `)
-                .single();
+            let currentUpdate = { ...updateFields };
+            let updateResult = null;
+            let updateError = null;
 
-            if (error && error.message) {
-                let shouldRetry = false;
-                const errLower = error.message.toLowerCase();
-                ['email', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
-                    if (errLower.includes(col)) {
-                        delete updateFields[col];
-                        shouldRetry = true;
-                    }
-                });
-                if (shouldRetry) {
-                    const retry = await supabase
-                        .from('leads')
-                        .update(updateFields)
-                        .eq('id', id)
-                        .select(`
-                            *,
-                            industries ( id, name ),
-                            employees ( id, full_name, employee_id )
-                        `)
-                        .single();
-                    data = retry.data;
-                    error = retry.error;
+            for (let attempt = 0; attempt <= 12; attempt++) {
+                const { data: resData, error: resErr } = await supabase
+                    .from('leads')
+                    .update(currentUpdate)
+                    .eq('id', id)
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id )
+                    `)
+                    .maybeSingle();
+
+                if (!resErr) {
+                    updateResult = resData;
+                    updateError = null;
+                    break;
                 }
+
+                updateError = resErr;
+                const errLower = (resErr.message || '').toLowerCase();
+                let pruned = false;
+
+                if (errLower.includes('contact_number') && currentUpdate.contact_number !== undefined) {
+                    delete currentUpdate.contact_number;
+                    if (cleanPhone !== undefined) {
+                        currentUpdate.phone = cleanPhone;
+                    }
+                    pruned = true;
+                } else if (errLower.includes('phone') && currentUpdate.phone !== undefined) {
+                    delete currentUpdate.phone;
+                    pruned = true;
+                }
+
+                for (const col of Object.keys(currentUpdate)) {
+                    if (errLower.includes(col.toLowerCase())) {
+                        delete currentUpdate[col];
+                        pruned = true;
+                        break;
+                    }
+                }
+
+                if (!pruned) break;
             }
 
-            if (error) throw error;
+            if (updateError) throw updateError;
+            const data = updateResult;
+            if (data) {
+                data.phone = data.contact_number || data.phone || (cleanPhone !== undefined ? cleanPhone : null);
+                data.contact_number = data.contact_number || data.phone || (cleanPhone !== undefined ? cleanPhone : null);
+            }
             res.json(data);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -486,19 +592,41 @@ module.exports = {
             }
 
             // 5. Create Organization / Customer
+            // Resolve relationship manager (sales person)
+            let resolvedRmId = lead.assigned_staff_id || null;
+            if (!resolvedRmId && req.user) {
+                if (req.user.employeeRecordId) {
+                    resolvedRmId = req.user.employeeRecordId;
+                } else {
+                    try {
+                        let empQuery = supabase.from('employees').select('id');
+                        if (req.user.employeeId) {
+                            empQuery = empQuery.eq('employee_id', req.user.employeeId);
+                        } else if (req.user.id && !String(req.user.id).startsWith('branch_user_')) {
+                            empQuery = empQuery.eq('user_id', req.user.id);
+                        } else if (req.user.email) {
+                            empQuery = empQuery.eq('email', String(req.user.email).trim().toLowerCase());
+                        }
+                        const { data: userEmp } = await empQuery.maybeSingle();
+                        if (userEmp) resolvedRmId = userEmp.id;
+                    } catch (e) {}
+                }
+            }
+
             const orgPayload = {
                 name: lead.name,
+                contact_person: lead.contact_person || null,
+                contact_email: (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : null,
+                contact_number: leadPhone,
                 address: lead.address || null,
                 city: lead.city || null,
                 state: lead.state || null,
                 pincode: lead.pincode || lead.pin_code || null,
-                pin_code: lead.pincode || lead.pin_code || null,
                 country: lead.country || 'India',
-                phone: lead.phone || null,
                 user_id: userData.id,
                 industry_id: lead.industry_id || 1,
                 customer_code: customerCode,
-                relationship_manager_id: lead.assigned_staff_id || null
+                relationship_manager_id: resolvedRmId
             };
 
             if (lead.branch_id) {
@@ -514,8 +642,21 @@ module.exports = {
             // Graceful retry if optional columns are absent in local schema
             if (orgError && orgError.message) {
                 let shouldRetry = false;
-                ['relationship_manager_id', 'branch_id', 'phone', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
-                    if (orgError.message.includes(col)) {
+                const errLower = orgError.message.toLowerCase();
+                if (errLower.includes('contact_number')) {
+                    delete orgPayload.contact_number;
+                    if (leadPhone) orgPayload.contact_phone = leadPhone;
+                    shouldRetry = true;
+                } else if (errLower.includes('contact_phone')) {
+                    delete orgPayload.contact_phone;
+                    if (leadPhone) orgPayload.phone = leadPhone;
+                    shouldRetry = true;
+                } else if (errLower.includes('phone')) {
+                    delete orgPayload.phone;
+                    shouldRetry = true;
+                }
+                ['contact_person', 'contact_email', 'relationship_manager_id', 'branch_id', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
+                    if (errLower.includes(col)) {
                         delete orgPayload[col];
                         shouldRetry = true;
                     }
@@ -861,15 +1002,17 @@ module.exports = {
             }
 
             // 5. Create Organization / Customer
+            const leadPhone = lead.contact_number || lead.phone || null;
             const orgPayload = {
                 name: lead.name,
+                contact_person: lead.contact_person || null,
+                contact_email: (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : null,
+                contact_number: leadPhone,
                 address: lead.address || null,
                 city: lead.city || null,
                 state: lead.state || null,
                 pincode: lead.pincode || lead.pin_code || null,
-                pin_code: lead.pincode || lead.pin_code || null,
                 country: lead.country || 'India',
-                phone: lead.phone || null,
                 user_id: userData.id,
                 industry_id: lead.industry_id || 1,
                 customer_code: customerCode,
@@ -888,8 +1031,21 @@ module.exports = {
 
             if (orgError && orgError.message) {
                 let shouldRetry = false;
-                ['relationship_manager_id', 'branch_id', 'phone', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
-                    if (orgError.message.includes(col)) {
+                const errLower = orgError.message.toLowerCase();
+                if (errLower.includes('contact_number')) {
+                    delete orgPayload.contact_number;
+                    if (leadPhone) orgPayload.contact_phone = leadPhone;
+                    shouldRetry = true;
+                } else if (errLower.includes('contact_phone')) {
+                    delete orgPayload.contact_phone;
+                    if (leadPhone) orgPayload.phone = leadPhone;
+                    shouldRetry = true;
+                } else if (errLower.includes('phone')) {
+                    delete orgPayload.phone;
+                    shouldRetry = true;
+                }
+                ['contact_person', 'contact_email', 'relationship_manager_id', 'branch_id', 'city', 'state', 'pincode', 'pin_code', 'country'].forEach(col => {
+                    if (errLower.includes(col)) {
                         delete orgPayload[col];
                         shouldRetry = true;
                     }

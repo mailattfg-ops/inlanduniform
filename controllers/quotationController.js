@@ -43,31 +43,23 @@ const variantLocks = new Map();
 async function resolveOrCreateQuotationItemDesignNumber(item, options = {}) {
   const productId =
     item.product_id || (item.size_breakdown && item.size_breakdown.product_id);
-  if (!productId) {
-    return {
-      designNumber:
-        item.design_number ||
-        (item.size_breakdown && item.size_breakdown.design_number) ||
-        null,
-      alreadyExists: false,
-    };
-  }
+  const rawArt = item.art_number || item.size_breakdown?.art_number || "";
+  const rawItemName = item.product_name || item.name || item.size_breakdown?.product_name || "";
 
-  const { data: product, error: prodErr } = await supabase
-    .from("products")
-    .select("*, design_numbers(id, code)")
-    .eq("id", productId)
-    .maybeSingle();
-
-  if (prodErr || !product) {
-    return {
-      designNumber:
-        item.design_number ||
-        (item.size_breakdown && item.size_breakdown.design_number) ||
-        null,
-      alreadyExists: false,
-    };
-  }
+  console.log("\n=======================================================");
+  console.log("[DNS_RESOLVE] ─── Step 1: Processing Item for DNS ───");
+  console.log("[DNS_RESOLVE] Received Input Data:", {
+    productId,
+    art_number: rawArt,
+    product_name: rawItemName,
+    fabric_id: item.fabric_id || item.size_breakdown?.fabric_id || null,
+    attachment_fabric1_id: item.attachment_fabric1_id || item.size_breakdown?.attachment_fabric1_id || null,
+    attachment_fabric2_id: item.attachment_fabric2_id || item.size_breakdown?.attachment_fabric2_id || null,
+    button_id: item.button_id || item.size_breakdown?.button_id || null,
+    thread_id: item.thread_id || item.size_breakdown?.thread_id || null,
+    trims_count: Array.isArray(item.trims) ? item.trims.length : (Array.isArray(item.size_breakdown?.trims) ? item.size_breakdown.trims.length : 0),
+    dryRun: Boolean(options.dryRun),
+  });
 
   // 1. Resolve normalized fabric selections
   const fabricId =
@@ -147,18 +139,99 @@ async function resolveOrCreateQuotationItemDesignNumber(item, options = {}) {
     normalizedTrims.sort((a, b) => a.trim_id.localeCompare(b.trim_id));
   }
 
-  // 3. Build canonical material & trim combination signature
+  // 3. Product Lookup in Supabase
+  let product = null;
+  if (productId) {
+    const { data: p, error: prodErr } = await supabase
+      .from("products")
+      .select("*")
+      .eq("id", productId)
+      .maybeSingle();
+    if (!prodErr && p) {
+      product = p;
+      console.log("[DNS_RESOLVE] Step 2: Product found by productId:", { id: p.id, name: p.name, art: p.art_number });
+    } else if (prodErr) {
+      console.warn("[DNS_RESOLVE] Step 2: Notice on productId query:", prodErr.message);
+    }
+  }
+
+  // Fallback to match product by art_number
+  if (!product && rawArt) {
+    const art = String(rawArt).trim();
+    const { data: p, error: artErr } = await supabase
+      .from("products")
+      .select("*")
+      .ilike("art_number", art)
+      .maybeSingle();
+    if (p) {
+      product = p;
+      console.log("[DNS_RESOLVE] Step 2: Product matched by ART #:", { id: p.id, name: p.name, art: p.art_number });
+    } else if (artErr) {
+      console.warn("[DNS_RESOLVE] Step 2: Notice on art_number query:", artErr.message);
+    }
+  }
+
+  // Fallback to match product by name if available
+  if (!product && rawItemName) {
+    const pName = String(rawItemName).trim();
+    const { data: p } = await supabase
+      .from("products")
+      .select("*")
+      .ilike("name", pName)
+      .maybeSingle();
+    if (p) {
+      product = p;
+      console.log("[DNS_RESOLVE] Step 2: Product matched by name:", { id: p.id, name: p.name, art: p.art_number });
+    }
+  }
+
+  const safeProductId = product?.id
+    ? parseInt(product.id, 10)
+    : (productId && !isNaN(parseInt(productId, 10)) ? parseInt(productId, 10) : null);
+  const artNum = String(rawArt || product?.art_number || "").trim().toUpperCase();
+  const resolvedProdName = product?.name || rawItemName || (item.size_breakdown?.product_name) || "Uniform Item";
+
+  // Check if item has any garment/material/product specification
+  const hasSpec =
+    product ||
+    safeProductId ||
+    artNum ||
+    normFabricId ||
+    normAtt1Id ||
+    normAtt2Id ||
+    normalizedTrims.length > 0 ||
+    item.product_name;
+
+  if (!hasSpec) {
+    console.log("[DNS_RESOLVE] ℹ️ Item has neither product, art #, fabric, nor trims. Skipping DNS generation.");
+    return {
+      designNumber:
+        item.design_number ||
+        (item.size_breakdown && item.size_breakdown.design_number) ||
+        null,
+      design_number:
+        item.design_number ||
+        (item.size_breakdown && item.size_breakdown.design_number) ||
+        null,
+      alreadyExists: false,
+    };
+  }
+
+  // 4. Build canonical material & trim combination signature
   const combination = {
-    product_id: parseInt(productId, 10),
+    product_id: safeProductId,
+    product_name: resolvedProdName,
+    art_number: artNum || null,
     fabric_id: normFabricId,
     attachment_fabric1_id: normAtt1Id,
     attachment_fabric2_id: normAtt2Id,
     trims: normalizedTrims,
   };
   const signature = JSON.stringify(combination);
+  console.log("[DNS_RESOLVE] ─── Step 3: Canonical Recipe Signature ───", signature);
 
   // Concurrency lock for safe concurrent requests
-  const lockKey = `${productId}_${signature}`;
+  const lockKey = `${safeProductId || artNum || "spec"}_${signature}`;
   while (variantLocks.has(lockKey)) {
     await variantLocks.get(lockKey);
   }
@@ -170,177 +243,249 @@ async function resolveOrCreateQuotationItemDesignNumber(item, options = {}) {
   variantLocks.set(lockKey, lockPromise);
 
   try {
-    // Step A: Check if this combination matches the base product's definition
-    const baseMainFab = product.fabric_id
-      ? String(product.fabric_id).trim()
-      : product.class_fabric_consumption?._base_main_fabric_id
-        ? String(product.class_fabric_consumption._base_main_fabric_id).trim()
-        : null;
-    const baseAtt1 = product.attachment_fabric1_id
-      ? String(product.attachment_fabric1_id).trim()
-      : null;
-    const baseAtt2 = product.attachment_fabric2_id
-      ? String(product.attachment_fabric2_id).trim()
-      : null;
+    // Step A: Check if this combination already exists in design_numbers table
+    console.log("[DNS_RESOLVE] ─── Step 4A: Checking design_numbers table by signature ───");
+    try {
+      const { data: existingDn, error: dnQueryErr } = await supabase
+        .from("design_numbers")
+        .select("id, code, art_number")
+        .eq("material_combination", signature)
+        .maybeSingle();
 
-    const baseRawTrims =
-      Array.isArray(product.trims) && product.trims.length > 0
-        ? product.trims
-        : Array.isArray(product.class_fabric_consumption?._base_trims)
-          ? product.class_fabric_consumption._base_trims
-          : [];
-
-    let baseNormTrims = baseRawTrims
-      .filter((t) => t && t.trim_id && String(t.trim_id).trim() !== "")
-      .map((t) => ({
-        trim_id: String(t.trim_id).trim(),
-        count: String(
-          t.count !== undefined && t.count !== null && t.count !== ""
-            ? t.count
-            : "1",
-        ).trim(),
-      }))
-      .sort((a, b) => a.trim_id.localeCompare(b.trim_id));
-
-    if (baseNormTrims.length === 0) {
-      if (product.button_id)
-        baseNormTrims.push({
-          trim_id: String(product.button_id).trim(),
-          count: String(product.button_count || "10").trim(),
-        });
-      if (product.thread_id)
-        baseNormTrims.push({
-          trim_id: String(product.thread_id).trim(),
-          count: String(product.thread_count || "1").trim(),
-        });
-      baseNormTrims.sort((a, b) => a.trim_id.localeCompare(b.trim_id));
-    }
-
-    const matchesBaseProduct =
-      (normFabricId === baseMainFab || (!normFabricId && !baseMainFab)) &&
-      (normAtt1Id === baseAtt1 || (!normAtt1Id && !baseAtt1)) &&
-      (normAtt2Id === baseAtt2 || (!normAtt2Id && !baseAtt2)) &&
-      JSON.stringify(normalizedTrims) === JSON.stringify(baseNormTrims);
-
-    if (matchesBaseProduct && product.design_numbers?.code) {
-      return {
-        designNumber: product.design_numbers.code,
-        alreadyExists: true,
-      };
+      if (!dnQueryErr && existingDn && existingDn.code) {
+        console.log(`[DNS_RESOLVE] ✅ MATCH FOUND in design_numbers: ${existingDn.code} (ID: ${existingDn.id})`);
+        return {
+          designNumber: existingDn.code,
+          design_number: existingDn.code,
+          alreadyExists: true,
+          id: existingDn.id,
+        };
+      }
+      if (dnQueryErr) {
+        console.log("[DNS_RESOLVE] Notice on design_numbers query:", dnQueryErr.message);
+      } else {
+        console.log("[DNS_RESOLVE] No existing match found in design_numbers table.");
+      }
+    } catch (e) {
+      console.log("[DNS_RESOLVE] Notice: material_combination column check caught error:", e.message);
     }
 
     // Step B: Check if an existing variant in product_design_variants matches this combination
-    const { data: existingVariants, error: varFetchErr } = await supabase
-      .from("product_design_variants")
-      .select(
-        "id, design_number_id, material_combination, button_id, thread_id, design_numbers(id, code)",
-      )
-      .eq("product_id", productId);
+    console.log("[DNS_RESOLVE] ─── Step 4B: Checking product_design_variants table ───");
+    if (safeProductId) {
+      const { data: existingVariants, error: varFetchErr } = await supabase
+        .from("product_design_variants")
+        .select(
+          "id, design_number_id, material_combination, button_id, thread_id",
+        )
+        .eq("product_id", safeProductId);
 
-    if (!varFetchErr && existingVariants && existingVariants.length > 0) {
-      for (const variant of existingVariants) {
-        if (!variant.design_numbers?.code) continue;
-        if (variant.material_combination === signature) {
-          return {
-            designNumber: variant.design_numbers.code,
-            alreadyExists: true,
-          };
+      if (!varFetchErr && existingVariants && existingVariants.length > 0) {
+        console.log(`[DNS_RESOLVE] Found ${existingVariants.length} existing variant(s) for product ${safeProductId}. Comparing recipes...`);
+        const dnIds = existingVariants.map(v => v.design_number_id).filter(Boolean);
+        let dnMap = {};
+        if (dnIds.length > 0) {
+          const { data: dns } = await supabase.from("design_numbers").select("id, code").in("id", dnIds);
+          (dns || []).forEach(d => { dnMap[d.id] = d.code; });
         }
-        try {
-          if (variant.material_combination) {
-            const parsed = JSON.parse(variant.material_combination);
-            const pFab = parsed.fabric_id
-              ? String(parsed.fabric_id).trim()
-              : null;
-            const pAtt1 = parsed.attachment_fabric1_id
-              ? String(parsed.attachment_fabric1_id).trim()
-              : null;
-            const pAtt2 = parsed.attachment_fabric2_id
-              ? String(parsed.attachment_fabric2_id).trim()
-              : null;
-            const pTrims = (parsed.trims || [])
-              .map((t) => ({
-                trim_id: String(t.trim_id).trim(),
-                count: String(
-                  t.count !== undefined && t.count !== null && t.count !== ""
-                    ? t.count
-                    : "1",
-                ).trim(),
-              }))
-              .sort((a, b) => a.trim_id.localeCompare(b.trim_id));
 
-            if (
-              pFab === normFabricId &&
-              pAtt1 === normAtt1Id &&
-              pAtt2 === normAtt2Id &&
-              JSON.stringify(pTrims) === JSON.stringify(normalizedTrims)
-            ) {
-              return {
-                designNumber: variant.design_numbers.code,
-                alreadyExists: true,
-              };
-            }
+        for (const variant of existingVariants) {
+          const vCode = dnMap[variant.design_number_id];
+          if (!vCode) continue;
+          if (variant.material_combination === signature) {
+            console.log(`[DNS_RESOLVE] ✅ MATCH FOUND in product_design_variants exact signature: ${vCode}`);
+            return {
+              designNumber: vCode,
+              design_number: vCode,
+              alreadyExists: true,
+              id: variant.design_number_id,
+            };
           }
-        } catch (e) {
-          // Ignore JSON parse errors for legacy variant records
+          try {
+            if (variant.material_combination) {
+              const parsed = JSON.parse(variant.material_combination);
+              const pFab = parsed.fabric_id
+                ? String(parsed.fabric_id).trim()
+                : null;
+              const pAtt1 = parsed.attachment_fabric1_id
+                ? String(parsed.attachment_fabric1_id).trim()
+                : null;
+              const pAtt2 = parsed.attachment_fabric2_id
+                ? String(parsed.attachment_fabric2_id).trim()
+                : null;
+              const pTrims = (parsed.trims || [])
+                .map((t) => ({
+                  trim_id: String(t.trim_id).trim(),
+                  count: String(
+                    t.count !== undefined && t.count !== null && t.count !== ""
+                      ? t.count
+                      : "1",
+                  ).trim(),
+                }))
+                .sort((a, b) => a.trim_id.localeCompare(b.trim_id));
+
+              if (
+                pFab === normFabricId &&
+                pAtt1 === normAtt1Id &&
+                pAtt2 === normAtt2Id &&
+                JSON.stringify(pTrims) === JSON.stringify(normalizedTrims)
+              ) {
+                console.log(`[DNS_RESOLVE] ✅ MATCH FOUND in product_design_variants normalized recipe: ${vCode}`);
+                return {
+                  designNumber: vCode,
+                  design_number: vCode,
+                  alreadyExists: true,
+                  id: variant.design_number_id,
+                };
+              }
+            }
+          } catch (e) {
+            // Ignore JSON parse errors for legacy variant records
+          }
         }
+      } else {
+        console.log("[DNS_RESOLVE] No existing variants found for this product in product_design_variants.");
       }
+    } else {
+      console.log("[DNS_RESOLVE] Skipping product_design_variants check (no safeProductId).");
     }
 
-    // If dryRun requested, just indicate that a new design number will be created upon save
+    // If dryRun requested, return preview without inserting
     if (options.dryRun) {
+      console.log("[DNS_RESOLVE] dryRun=true: Combination is new, returning preview 'DNS (Auto)'.");
       return {
-        designNumber: "New (DNS-Auto)",
+        designNumber: null,
+        design_number: null,
+        previewCode: "DNS (Auto)",
         alreadyExists: false,
       };
     }
 
-    // Step C: If not in design number, create a new design number
+    // Step C: Combination does not exist — generate a new DNS code and persist full spec
+    console.log("[DNS_RESOLVE] ─── Step 4C: Minting NEW Design Number ───");
     const nextCode = await generateNextDesignNumberLocal();
-    const { data: newDn, error: dnError } = await supabase
+    console.log(`[DNS_RESOLVE] 🚀 Minting next design code: ${nextCode}`);
+
+    let newDn = null;
+    const fullPayload = {
+      code: nextCode,
+      name: `${resolvedProdName} (${artNum || "Spec"})`,
+      description: `Recipe: Main Fabric ${normFabricId || 'N/A'}, Trims: ${normalizedTrims.length}`,
+      art_number: artNum || null,
+      product_id: safeProductId,
+      fabric_id: normFabricId,
+      attachment_fabric1_id: normAtt1Id,
+      attachment_fabric2_id: normAtt2Id,
+      trims: normalizedTrims,
+      material_combination: signature,
+    };
+
+    console.log("[DNS_RESOLVE] Attempting fullPayload insert into design_numbers:", fullPayload);
+    const { data: dnData, error: dnError } = await supabase
       .from("design_numbers")
-      .insert([
-        {
-          code: nextCode,
-          type: "Product Variant",
-        },
-      ])
+      .insert([fullPayload])
       .select()
       .single();
 
-    if (dnError) throw dnError;
+    if (dnError) {
+      console.warn("⚠️ [DNS_RESOLVE] Notice: fullPayload insert into design_numbers failed:", dnError.message);
+      console.warn("⚠️ (If columns do not exist, run inlanduniform/migrations/RUN_DNS_FIX_MIGRATION.sql in Supabase SQL Editor!)");
+      
+      // Tier 1: Try insert with basic columns { code, name, description, art_number }
+      const tier1Payload = {
+        code: nextCode,
+        name: `${resolvedProdName} (${artNum || "Spec"})`,
+        description: `Recipe: Main Fabric ${normFabricId || 'N/A'}, Trims: ${normalizedTrims.length}`,
+        art_number: artNum || null,
+      };
+      const { data: t1Dn, error: t1Err } = await supabase
+        .from("design_numbers")
+        .insert([tier1Payload])
+        .select()
+        .single();
 
-    try {
-      await supabase.from("product_design_variants").insert([
-        {
-          product_id: parseInt(productId, 10),
+      if (!t1Err && t1Dn) {
+        console.log("[DNS_RESOLVE] ✅ Tier 1 insert succeeded:", t1Dn.code);
+        newDn = t1Dn;
+      } else {
+        if (t1Err) console.warn("[DNS_RESOLVE] Tier 1 insert failed:", t1Err.message);
+        // Tier 2: Minimal fallback to only { code } (universal across all schemas)
+        console.log("[DNS_RESOLVE] Attempting Tier 2 base insert: { code }...");
+        const { data: fallbackDn, error: fbError } = await supabase
+          .from("design_numbers")
+          .insert([{ code: nextCode }])
+          .select()
+          .single();
+
+        if (fbError) {
+          console.error("❌ [DNS_RESOLVE] Critical: Tier 2 base insert failed:", fbError.message);
+          throw fbError;
+        }
+        console.log("[DNS_RESOLVE] ✅ Tier 2 base insert succeeded:", fallbackDn.code);
+        newDn = fallbackDn;
+      }
+    } else {
+      console.log(`[DNS_RESOLVE] 🎉 SUCCESS! design_numbers record inserted with ID: ${dnData.id}, Code: ${dnData.code}`);
+      newDn = dnData;
+    }
+
+    // Step D: Link recipe in product_design_variants table
+    console.log("[DNS_RESOLVE] ─── Step 4D: Linking variant in product_design_variants ───");
+    if (safeProductId && newDn?.id) {
+      try {
+        const isUuid = (str) =>
+          typeof str === "string" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
+
+        const variantInsertData = {
+          product_id: safeProductId,
           design_number_id: newDn.id,
-          button_id: normButtonId,
-          thread_id: normThreadId,
+          button_id: isUuid(normButtonId) ? normButtonId : null,
+          thread_id: isUuid(normThreadId) ? normThreadId : null,
           button_count: parseInt(buttonCount, 10) || 0,
           thread_count: parseInt(threadCount, 10) || 0,
           variant_status: "active",
           material_combination: signature,
-        },
-      ]);
-    } catch (varInsertErr) {
-      console.warn(
-        "Notice: product_design_variants record insertion warning:",
-        varInsertErr.message,
-      );
+        };
+
+        const { data: varData, error: varErr } = await supabase
+          .from("product_design_variants")
+          .insert([variantInsertData])
+          .select()
+          .maybeSingle();
+
+        if (varErr) {
+          console.warn("[DNS_RESOLVE] ⚠️ Notice on product_design_variants insertion:", varErr.message);
+        } else {
+          console.log("[DNS_RESOLVE] ✅ product_design_variants record successfully linked!", varData?.id || "");
+        }
+      } catch (varInsertErr) {
+        console.warn(
+          "[DNS_RESOLVE] ⚠️ Exception during product_design_variants insert:",
+          varInsertErr.message,
+        );
+      }
+    } else {
+      console.log("[DNS_RESOLVE] ℹ️ safeProductId not present, skipping product_design_variants link.");
     }
+
+    console.log(`[DNS_RESOLVE] 🎯 Final Resolved Design Number: ${nextCode} (New Created: YES)`);
+    console.log("=======================================================\n");
 
     return {
       designNumber: nextCode,
+      design_number: nextCode,
       alreadyExists: false,
+      id: newDn?.id || null,
     };
   } catch (err) {
     console.error(
-      "Error in resolveOrCreateQuotationItemDesignNumber:",
+      "❌ [DNS_RESOLVE] Error in resolveOrCreateQuotationItemDesignNumber:",
       err.message,
     );
     return {
-      designNumber: product.design_numbers?.code || "DNS-STANDARD",
+      designNumber: "DNS-STANDARD",
+      design_number: "DNS-STANDARD",
       alreadyExists: false,
     };
   } finally {
@@ -464,12 +609,13 @@ async function updateFabricLatestSAMs(items) {
       }
     }
 
-    for (const [fabricId, latestSamValue] of fabricSamMap.entries()) {
-      if (!fabricId || isNaN(latestSamValue)) continue;
-      await supabase
-        .from("fabrics")
-        .update({ latest_sam: latestSamValue })
-        .eq("id", fabricId);
+    const fabricUpdates = Array.from(fabricSamMap.entries())
+      .filter(([fabricId, latestSamValue]) => fabricId && !isNaN(latestSamValue))
+      .map(([fabricId, latestSamValue]) =>
+        supabase.from("fabrics").update({ latest_sam: latestSamValue }).eq("id", fabricId)
+      );
+    if (fabricUpdates.length > 0) {
+      await Promise.all(fabricUpdates);
     }
   } catch (err) {
     console.error(
@@ -641,7 +787,7 @@ exports.listQuotations = async (req, res) => {
     let query = supabase
       .from("quotations")
       .select(
-        "*, organizations(name, branch_id), group_design_number:group_design_numbers(code), orders(id, order_no, status, branch_id)",
+        "*, organizations(*), group_design_number:group_design_numbers(code), orders(id, order_no, status, branch_id)",
       )
       .order("created_at", { ascending: false });
 
@@ -676,7 +822,7 @@ exports.getQuotationDetails = async (req, res) => {
     const { data: quotation, error: quoteError } = await supabase
       .from("quotations")
       .select(
-        "*, organizations(name), group_design_number:group_design_numbers(code)",
+        "*, organizations(*), group_design_number:group_design_numbers(code)",
       )
       .eq("id", id)
       .single();
@@ -813,13 +959,18 @@ async function resolveDesignCodes(items) {
   if (productIds.length > 0) {
     const { data: prods, error: prodsErr } = await supabase
       .from("products")
-      .select("id, design_numbers(code)")
+      .select("id, design_number_id")
       .in("id", productIds);
 
     if (!prodsErr && prods) {
-      productDesignCodes = prods
-        .map((p) => p.design_numbers?.code)
-        .filter(Boolean);
+      const dnIds = prods.map((p) => p.design_number_id).filter(Boolean);
+      if (dnIds.length > 0) {
+        const { data: dns } = await supabase
+          .from("design_numbers")
+          .select("code")
+          .in("id", dnIds);
+        productDesignCodes = (dns || []).map((d) => d.code).filter(Boolean);
+      }
     }
   }
 
@@ -846,13 +997,28 @@ async function enrichQuotationItemsWithDesignNumbers(items) {
   if (productIds.length > 0) {
     const { data: prods } = await supabase
       .from("products")
-      .select("id, name, art_number, design_numbers(code)")
+      .select("id, name, art_number, design_number_id")
       .in("id", productIds);
 
     if (prods) {
+      const dnIds = prods.map((p) => p.design_number_id).filter(Boolean);
+      let dnMap = {};
+      if (dnIds.length > 0) {
+        const { data: dns } = await supabase
+          .from("design_numbers")
+          .select("id, code")
+          .in("id", dnIds);
+        (dns || []).forEach((d) => {
+          dnMap[d.id] = d.code;
+        });
+      }
+
       const prodMap = {};
       prods.forEach((p) => {
-        prodMap[String(p.id)] = p;
+        prodMap[String(p.id)] = {
+          ...p,
+          design_numbers: p.design_number_id && dnMap[p.design_number_id] ? { code: dnMap[p.design_number_id] } : null,
+        };
       });
       items.forEach((it) => {
         const pId = it.product_id || it.size_breakdown?.product_id;
@@ -1011,13 +1177,21 @@ exports.createQuotation = async (req, res) => {
     }
 
     // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
+    console.log(`\n================== [CREATE QUOTATION START] ==================`);
+    console.log(`[CREATE QUOTATION] Received ${items.length} item(s) to process for organization ${organization_id}`);
     let anyDesignNumberAlreadyExists = false;
+    let quoteItemCounter = 0;
     for (const item of items) {
+      quoteItemCounter++;
+      const itemLabel = item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || `Item #${quoteItemCounter}`;
+      console.log(`\n[CREATE QUOTATION] Processing Item #${quoteItemCounter}: ${itemLabel}`);
+
       if (
         item.size_breakdown &&
         item.size_breakdown.is_set &&
         Array.isArray(item.size_breakdown.products)
       ) {
+        console.log(`[CREATE QUOTATION] Item #${quoteItemCounter} is a Set with ${item.size_breakdown.products.length} nested products:`);
         for (const p of item.size_breakdown.products) {
           const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
           if (resObj && resObj.designNumber) {
@@ -1026,6 +1200,7 @@ exports.createQuotation = async (req, res) => {
             if (resObj.alreadyExists) {
               anyDesignNumberAlreadyExists = true;
             }
+            console.log(`[CREATE QUOTATION] Set Product (${p.product_name || p.name}) Assigned DNS: ${resObj.designNumber}`);
           }
         }
       } else {
@@ -1037,9 +1212,11 @@ exports.createQuotation = async (req, res) => {
           if (resObj.alreadyExists) {
             anyDesignNumberAlreadyExists = true;
           }
+          console.log(`[CREATE QUOTATION] Item #${quoteItemCounter} (${itemLabel}) Assigned DNS: ${resObj.designNumber}`);
         }
       }
     }
+    console.log(`================== [CREATE QUOTATION: ALL ITEMS RESOLVED] ==================\n`);
 
     // Find or create group design number (with smart nested resolve and auto-fallback generation)
     const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(
@@ -1064,10 +1241,14 @@ exports.createQuotation = async (req, res) => {
       production_days_estimate: production_days_estimate || 0,
       expected_delivery_date: expected_delivery_date || null,
       profit_margin_percent: profit_margin_percent || 0,
-      final_quote_value: final_quote_value || 0,
-      status: "Draft",
+      status: "Pending Branch Approval",
       metrics_summary: {
         ...(metrics_summary || {}),
+        submitted_to_bm: true,
+        submitted_to_bm_at: new Date().toISOString(),
+        needs_revision: false,
+        bm_approved: false,
+        submitted_to_ops: false,
         estimated_expenses: estimated_expenses || 0,
       },
       group_design_number_id: groupDesignNumberId,
@@ -1213,9 +1394,10 @@ exports.createQuotation = async (req, res) => {
         "Initial quotation_items insert failed:",
         initialRes.error.message,
       );
-      // Tier 1: Try without separate cost columns (costs are already safely embedded in size_breakdown)
+      // Tier 1: Try without separate cost columns and product_type_id (costs & product info are embedded in size_breakdown & notes)
       const tier1Items = itemsToInsert.map((it) => {
         const {
+          product_type_id,
           fabric_cost_per_item,
           accessories_cost_per_item,
           labor_cost_per_item,
@@ -1231,12 +1413,13 @@ exports.createQuotation = async (req, res) => {
           "Tier 1 quotation_items insert failed:",
           t1Res.error.message,
         );
-        // Tier 2: Try minimal columns known to exist in older schema
+        // Tier 2: Try with size_breakdown + basic fields
         const tier2Items = itemsToInsert.map((it) => ({
           quotation_id: it.quotation_id,
           quantity: it.quantity,
           unit_price: it.unit_price,
           total_price: it.total_price,
+          size_breakdown: it.size_breakdown,
           notes: it.notes,
           is_manual: it.is_manual,
           manual_item_name: it.manual_item_name,
@@ -1245,7 +1428,18 @@ exports.createQuotation = async (req, res) => {
         if (!t2Res.error) {
           itemsError = null;
         } else {
-          itemsError = t2Res.error;
+          // Tier 3: Absolute minimal fields
+          const tier3Items = itemsToInsert.map((it) => ({
+            quotation_id: it.quotation_id,
+            quantity: it.quantity,
+            unit_price: it.unit_price,
+            total_price: it.total_price,
+            notes: it.notes,
+            is_manual: it.is_manual,
+            manual_item_name: it.manual_item_name,
+          }));
+          const t3Res = await supabase.from("quotation_items").insert(tier3Items);
+          itemsError = t3Res.error || null;
         }
       }
     } else {
@@ -1584,13 +1778,21 @@ exports.updateQuotation = async (req, res) => {
     }
 
     // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
+    console.log(`\n================== [UPDATE QUOTATION START] ==================`);
+    console.log(`[UPDATE QUOTATION] Received ${items.length} item(s) to process for quotation ${id}`);
     let anyDesignNumberAlreadyExists = false;
+    let updateItemCounter = 0;
     for (const item of items) {
+      updateItemCounter++;
+      const itemLabel = item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || `Item #${updateItemCounter}`;
+      console.log(`\n[UPDATE QUOTATION] Processing Item #${updateItemCounter}: ${itemLabel}`);
+
       if (
         item.size_breakdown &&
         item.size_breakdown.is_set &&
         Array.isArray(item.size_breakdown.products)
       ) {
+        console.log(`[UPDATE QUOTATION] Item #${updateItemCounter} is a Set with ${item.size_breakdown.products.length} nested products:`);
         for (const p of item.size_breakdown.products) {
           const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
           if (resObj && resObj.designNumber) {
@@ -1599,6 +1801,7 @@ exports.updateQuotation = async (req, res) => {
             if (resObj.alreadyExists) {
               anyDesignNumberAlreadyExists = true;
             }
+            console.log(`[UPDATE QUOTATION] Set Product (${p.product_name || p.name}) Assigned DNS: ${resObj.designNumber}`);
           }
         }
       } else {
@@ -1610,9 +1813,11 @@ exports.updateQuotation = async (req, res) => {
           if (resObj.alreadyExists) {
             anyDesignNumberAlreadyExists = true;
           }
+          console.log(`[UPDATE QUOTATION] Item #${updateItemCounter} (${itemLabel}) Assigned DNS: ${resObj.designNumber}`);
         }
       }
     }
+    console.log(`================== [UPDATE QUOTATION: ALL ITEMS RESOLVED] ==================\n`);
 
     // Retrieve existing quotation to preserve its group_design_number_id and enforce PRD M5.3 lock
     const { data: existingQuote } = await supabase
@@ -1801,9 +2006,10 @@ exports.updateQuotation = async (req, res) => {
         "Update quotation_items insert failed:",
         initialRes.error.message,
       );
-      // Tier 1: Try without separate cost columns (costs are already safely embedded in size_breakdown)
+      // Tier 1: Try without separate cost columns and product_type_id
       const tier1Items = itemsToInsert.map((it) => {
         const {
+          product_type_id,
           fabric_cost_per_item,
           accessories_cost_per_item,
           labor_cost_per_item,
@@ -1819,12 +2025,13 @@ exports.updateQuotation = async (req, res) => {
           "Tier 1 update quotation_items insert failed:",
           t1Res.error.message,
         );
-        // Tier 2: Try minimal columns known to exist in older schema
+        // Tier 2: Try with size_breakdown + basic fields
         const tier2Items = itemsToInsert.map((it) => ({
           quotation_id: it.quotation_id,
           quantity: it.quantity,
           unit_price: it.unit_price,
           total_price: it.total_price,
+          size_breakdown: it.size_breakdown,
           notes: it.notes,
           is_manual: it.is_manual,
           manual_item_name: it.manual_item_name,
@@ -1833,7 +2040,18 @@ exports.updateQuotation = async (req, res) => {
         if (!t2Res.error) {
           itemsError = null;
         } else {
-          itemsError = t2Res.error;
+          // Tier 3: Absolute minimal fields
+          const tier3Items = itemsToInsert.map((it) => ({
+            quotation_id: it.quotation_id,
+            quantity: it.quantity,
+            unit_price: it.unit_price,
+            total_price: it.total_price,
+            notes: it.notes,
+            is_manual: it.is_manual,
+            manual_item_name: it.manual_item_name,
+          }));
+          const t3Res = await supabase.from("quotation_items").insert(tier3Items);
+          itemsError = t3Res.error || null;
         }
       }
     } else {
@@ -2451,15 +2669,20 @@ exports.getSharePDF = async (req, res) => {
         console.warn("[Share PDF] Failed to load fabrics:", e.message);
       }
 
-      // Compute pricing
-      const subtotal =
-        (items || []).reduce(
-          (acc, item) => acc + Number(item.total_price),
-          0,
-        ) || 0;
-      const gstRate = Number(quote.metrics_summary?.gst_percent ?? 18);
-      const gstValue = subtotal * (gstRate / 100);
-      const finalValue = subtotal + gstValue;
+      // Compute pricing strictly from live quotation data
+      const subtotal = quote.metrics_summary?.pre_tax_subtotal != null
+        ? Number(quote.metrics_summary.pre_tax_subtotal)
+        : ((items || []).reduce(
+            (acc, item) => acc + Number(item.total_price || 0),
+            0,
+          ) || 0);
+      const gstRate = quote.metrics_summary?.gst_percent != null
+        ? Number(quote.metrics_summary.gst_percent)
+        : 0;
+      const finalValue = quote.final_quote_value != null
+        ? Number(quote.final_quote_value)
+        : subtotal * (1 + gstRate / 100);
+      const gstValue = finalValue - subtotal;
 
       const dateStr = new Date(quote.created_at).toLocaleDateString("en-IN", {
         month: "long",
@@ -3067,8 +3290,7 @@ exports.listGroupDesignCombinations = async (req, res) => {
     const { data: products, error: prodError } = await supabase.from("products")
       .select(`
                 *,
-                product_types(id, name),
-                design_number_ref:design_numbers(id, code)
+                product_types(id, name)
             `);
 
     if (prodError) throw prodError;
@@ -3244,7 +3466,7 @@ exports.listDesignNumbers = async (req, res) => {
   try {
     const { data: designNumbers, error: dnError } = await supabase
       .from("design_numbers")
-      .select("id, code, name, description, created_at")
+      .select("*")
       .order("code", { ascending: true });
 
     if (dnError) throw dnError;
@@ -3268,12 +3490,56 @@ exports.listDesignNumbers = async (req, res) => {
                 button_id,
                 button_count,
                 thread_id,
-                thread_count
+                thread_count,
+                material_combination
             `);
 
     if (varError) throw varError;
 
     const results = (designNumbers || []).map((dn) => {
+      let spec = null;
+
+      // 1. Check if dn directly contains the specification details (or serialized in material_combination)
+      let dnCombination = null;
+      if (dn.material_combination) {
+        try {
+          dnCombination = JSON.parse(dn.material_combination);
+        } catch (e) {}
+      }
+
+      const effectiveProdId = dn.product_id || dnCombination?.product_id || null;
+      const effectiveArt = dn.art_number || dnCombination?.art_number || null;
+      const effectiveFabId = dn.fabric_id || dnCombination?.fabric_id || null;
+      const effectiveAtt1 = dn.attachment_fabric1_id || dnCombination?.attachment_fabric1_id || null;
+      const effectiveAtt2 = dn.attachment_fabric2_id || dnCombination?.attachment_fabric2_id || null;
+      const effectiveTrims = Array.isArray(dn.trims) && dn.trims.length > 0 ? dn.trims : (dnCombination?.trims || []);
+
+      if (effectiveArt || effectiveFabId || effectiveProdId || effectiveTrims.length > 0) {
+        const prod = (products || []).find(
+          (p) => (effectiveProdId && p.id === effectiveProdId) || (effectiveArt && p.art_number === effectiveArt)
+        );
+        const trimsArr = Array.isArray(effectiveTrims) ? effectiveTrims : [];
+        const btnTrim = trimsArr.find(t => t.trim_id && (String(t.trim_id).toLowerCase().includes('btn') || String(t.trim_id).length === 36));
+        const thrTrim = trimsArr.find(t => t.trim_id && String(t.trim_id).toLowerCase().includes('thr'));
+
+        spec = {
+          product_id: effectiveProdId || prod?.id || null,
+          product_name: prod?.name || dnCombination?.product_name || dn.name || "Product Pattern",
+          art_number: effectiveArt || prod?.art_number || "—",
+          main_fabric_id: effectiveFabId || null,
+          attachment_fabric1_id: effectiveAtt1 || null,
+          attachment_fabric2_id: effectiveAtt2 || null,
+          main_fabric_meters: "1.25",
+          sam_value: prod?.sam_value || null,
+          button_id: btnTrim?.trim_id || null,
+          button_count: btnTrim?.count ? Number(btnTrim.count) : 0,
+          thread_id: thrTrim?.trim_id || null,
+          thread_count: thrTrim?.count ? Number(thrTrim.count) : 0,
+          trims: trimsArr,
+          type: "Design Variant",
+        };
+      }
+
       // Find if it's a main product design
       const mainProduct = (products || []).find(
         (p) => p.design_number_id === dn.id,
@@ -3284,71 +3550,79 @@ exports.listDesignNumbers = async (req, res) => {
         (v) => v.design_number_id === dn.id,
       );
 
-      let spec = null;
-      if (mainProduct) {
-        const consumption = mainProduct.class_fabric_consumption || {};
-        let mainFabricMeters = consumption._base_main_fabric;
-        if (!mainFabricMeters && mainProduct.materials) {
-          const match = mainProduct.materials.match(
-            /\[MainFabricMeters:\s*([\d\.]+)\]/,
+      if (!spec) {
+        if (mainProduct) {
+          const consumption = mainProduct.class_fabric_consumption || {};
+          let mainFabricMeters = consumption._base_main_fabric;
+          if (!mainFabricMeters && mainProduct.materials) {
+            const match = mainProduct.materials.match(
+              /\[MainFabricMeters:\s*([\d\.]+)\]/,
+            );
+            if (match) mainFabricMeters = match[1];
+          }
+
+          const buttonTrim = (consumption._base_trims || []).find(
+            (t) =>
+              t.category === "Buttons" ||
+              (t.name && t.name.toLowerCase().includes("button")),
           );
-          if (match) mainFabricMeters = match[1];
-        }
-
-        const buttonTrim = (consumption._base_trims || []).find(
-          (t) =>
-            t.category === "Buttons" ||
-            (t.name && t.name.toLowerCase().includes("button")),
-        );
-        const threadTrim = (consumption._base_trims || []).find(
-          (t) =>
-            t.category === "Sewing Thread" ||
-            (t.name && t.name.toLowerCase().includes("thread")),
-        );
-
-        spec = {
-          product_id: mainProduct.id,
-          product_name: mainProduct.name,
-          art_number: mainProduct.art_number || "—",
-          main_fabric_id: consumption._base_main_fabric_id || null,
-          main_fabric_meters: mainFabricMeters || "1.25",
-          sam_value: mainProduct.sam_value,
-          button_id: buttonTrim?.id || null,
-          button_count: buttonTrim ? Number(buttonTrim.count) || 0 : 0,
-          thread_id: threadTrim?.id || null,
-          thread_count: threadTrim ? Number(threadTrim.count) || 0 : 0,
-          type: "Main Product",
-        };
-      } else if (variant) {
-        const parentProduct = (products || []).find(
-          (p) => p.id === variant.product_id,
-        );
-        const parentConsumption = parentProduct
-          ? parentProduct.class_fabric_consumption || {}
-          : {};
-        let parentMainFabric = parentConsumption._base_main_fabric;
-        if (!parentMainFabric && parentProduct && parentProduct.materials) {
-          const match = parentProduct.materials.match(
-            /\[MainFabricMeters:\s*([\d\.]+)\]/,
+          const threadTrim = (consumption._base_trims || []).find(
+            (t) =>
+              t.category === "Sewing Thread" ||
+              (t.name && t.name.toLowerCase().includes("thread")),
           );
-          if (match) parentMainFabric = match[1];
-        }
 
-        spec = {
-          product_id: variant.product_id,
-          product_name: parentProduct
-            ? parentProduct.name
-            : "Unregistered Product",
-          art_number: parentProduct ? parentProduct.art_number : "—",
-          main_fabric_id: parentConsumption._base_main_fabric_id || null,
-          main_fabric_meters: parentMainFabric || "1.25",
-          sam_value: parentProduct ? parentProduct.sam_value : null,
-          button_id: variant.button_id,
-          button_count: variant.button_count || 0,
-          thread_id: variant.thread_id,
-          thread_count: variant.thread_count || 0,
-          type: "Variant",
-        };
+          spec = {
+            product_id: mainProduct.id,
+            product_name: mainProduct.name,
+            art_number: mainProduct.art_number || "—",
+            main_fabric_id: consumption._base_main_fabric_id || null,
+            main_fabric_meters: mainFabricMeters || "1.25",
+            sam_value: mainProduct.sam_value,
+            button_id: buttonTrim?.id || null,
+            button_count: buttonTrim ? Number(buttonTrim.count) || 0 : 0,
+            thread_id: threadTrim?.id || null,
+            thread_count: threadTrim ? Number(threadTrim.count) || 0 : 0,
+            type: "Main Product",
+          };
+        } else if (variant) {
+          const parentProduct = (products || []).find(
+            (p) => p.id === variant.product_id,
+          );
+          let varComb = null;
+          if (variant.material_combination) {
+            try { varComb = JSON.parse(variant.material_combination); } catch (e) {}
+          }
+          const parentConsumption = parentProduct
+            ? parentProduct.class_fabric_consumption || {}
+            : {};
+          let parentMainFabric = parentConsumption._base_main_fabric;
+          if (!parentMainFabric && parentProduct && parentProduct.materials) {
+            const match = parentProduct.materials.match(
+              /\[MainFabricMeters:\s*([\d\.]+)\]/,
+            );
+            if (match) parentMainFabric = match[1];
+          }
+
+          spec = {
+            product_id: variant.product_id,
+            product_name: parentProduct
+              ? parentProduct.name
+              : (varComb?.product_name || "Unregistered Product"),
+            art_number: parentProduct ? parentProduct.art_number : (varComb?.art_number || "—"),
+            main_fabric_id: varComb?.fabric_id || parentConsumption._base_main_fabric_id || null,
+            attachment_fabric1_id: varComb?.attachment_fabric1_id || null,
+            attachment_fabric2_id: varComb?.attachment_fabric2_id || null,
+            main_fabric_meters: parentMainFabric || "1.25",
+            sam_value: parentProduct ? parentProduct.sam_value : null,
+            button_id: variant.button_id,
+            button_count: variant.button_count || 0,
+            thread_id: variant.thread_id,
+            thread_count: variant.thread_count || 0,
+            trims: varComb?.trims || [],
+            type: "Variant",
+          };
+        }
       }
 
       return {
@@ -3396,7 +3670,11 @@ exports.resolveDesignNumber = async (req, res) => {
     const result = await resolveOrCreateQuotationItemDesignNumber(item, {
       dryRun,
     });
-    res.json(result);
+    res.json({
+      success: true,
+      ...result,
+      design_number: result.designNumber || result.design_number || null,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

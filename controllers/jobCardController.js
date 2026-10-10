@@ -440,71 +440,73 @@ async function syncJobCardsForOrder(order_id) {
 
     if (!jobCards || jobCards.length === 0) return readiness;
 
-    for (const jc of jobCards) {
-      const fId = jc.size_breakdown?.fabric_id;
-      const fName = jc.size_breakdown?.fabric_name;
-      const cRate = jc.size_breakdown?.main_fabric_meters || 1.25;
-      const fReadiness = await checkFabricReadiness(
-        fId,
-        fName,
-        jc.quantity,
-        cRate,
-      );
-      const isFabricDepleted = fReadiness.isFabricDepleted;
-
-      let holdReasons = [];
-      if (readiness.isMeasurementsPending) {
-        holdReasons.push(
-          `Awaiting ${readiness.pendingCount} recipient measurement(s) (${readiness.approvedMembers}/${readiness.totalMembers} approved) — release to cutting is blocked.`,
+    await Promise.all(
+      jobCards.map(async (jc) => {
+        const fId = jc.size_breakdown?.fabric_id;
+        const fName = jc.size_breakdown?.fabric_name;
+        const cRate = jc.size_breakdown?.main_fabric_meters || 1.25;
+        const fReadiness = await checkFabricReadiness(
+          fId,
+          fName,
+          jc.quantity,
+          cRate,
         );
-      }
-      if (isFabricDepleted) {
-        holdReasons.push(fReadiness.fabricHoldReason);
-      }
+        const isFabricDepleted = fReadiness.isFabricDepleted;
 
-      let newStatus = "Pending PO Handler";
-      if (readiness.isMeasurementsPending && isFabricDepleted) {
-        newStatus = "Held (Awaiting Measurements & PO Fabric)";
-      } else if (isFabricDepleted) {
-        newStatus = "Held (Awaiting PO Fabric)";
-      } else if (readiness.isMeasurementsPending) {
-        newStatus = "Held (Awaiting Measurements)";
-      } else {
-        newStatus = jc.status.startsWith("Held")
-          ? "Pending PO Handler"
-          : jc.status;
-      }
+        let holdReasons = [];
+        if (readiness.isMeasurementsPending) {
+          holdReasons.push(
+            `Awaiting ${readiness.pendingCount} recipient measurement(s) (${readiness.approvedMembers}/${readiness.totalMembers} approved) — release to cutting is blocked.`,
+          );
+        }
+        if (isFabricDepleted) {
+          holdReasons.push(fReadiness.fabricHoldReason);
+        }
 
-      const updatedBreakdown = {
-        ...(jc.size_breakdown || {}),
-        fabric_id: fReadiness.fabricId || fId || null,
-        fabric_name: fReadiness.fabricName || fName || null,
-        measurement_readiness: readiness.isMeasurementsPending
-          ? "Awaiting Measurements"
-          : "Ready",
-        material_readiness: isFabricDepleted ? "Awaiting PO Fabric" : "Ready",
-        pending_measurements: readiness.pendingCount,
-        available_fabric_meters: fReadiness.availableMeters,
-        required_fabric_meters: fReadiness.requiredMeters,
-      };
+        let newStatus = "Pending PO Handler";
+        if (readiness.isMeasurementsPending && isFabricDepleted) {
+          newStatus = "Held (Awaiting Measurements & PO Fabric)";
+        } else if (isFabricDepleted) {
+          newStatus = "Held (Awaiting PO Fabric)";
+        } else if (readiness.isMeasurementsPending) {
+          newStatus = "Held (Awaiting Measurements)";
+        } else {
+          newStatus = jc.status.startsWith("Held")
+            ? "Pending PO Handler"
+            : jc.status;
+        }
 
-      const updatePayload = {
-        hold_reason: holdReasons.length > 0 ? holdReasons.join(" | ") : null,
-        size_breakdown: updatedBreakdown,
-        updated_at: new Date().toISOString(),
-      };
+        const updatedBreakdown = {
+          ...(jc.size_breakdown || {}),
+          fabric_id: fReadiness.fabricId || fId || null,
+          fabric_name: fReadiness.fabricName || fName || null,
+          measurement_readiness: readiness.isMeasurementsPending
+            ? "Awaiting Measurements"
+            : "Ready",
+          material_readiness: isFabricDepleted ? "Awaiting PO Fabric" : "Ready",
+          pending_measurements: readiness.pendingCount,
+          available_fabric_meters: fReadiness.availableMeters,
+          required_fabric_meters: fReadiness.requiredMeters,
+        };
 
-      if (jc.status.startsWith("Held") || newStatus.startsWith("Held")) {
-        updatePayload.status = newStatus;
-        updatePayload.po_handler_action = newStatus.startsWith("Held")
-          ? "Hold"
-          : jc.po_handler_action === "Hold"
-            ? "Pending"
-            : jc.po_handler_action;
-      }
+        const updatePayload = {
+          hold_reason: holdReasons.length > 0 ? holdReasons.join(" | ") : null,
+          size_breakdown: updatedBreakdown,
+          updated_at: new Date().toISOString(),
+        };
 
-      await supabase.from("job_cards").update(updatePayload).eq("id", jc.id);
-    }
+        if (jc.status.startsWith("Held") || newStatus.startsWith("Held")) {
+          updatePayload.status = newStatus;
+          updatePayload.po_handler_action = newStatus.startsWith("Held")
+            ? "Hold"
+            : jc.po_handler_action === "Hold"
+              ? "Pending"
+              : jc.po_handler_action;
+        }
+
+        return supabase.from("job_cards").update(updatePayload).eq("id", jc.id);
+      })
+    );
 
     // Also update quotation metrics_summary if available
     if (readiness.quotationId && readiness.totalMembers > 0) {

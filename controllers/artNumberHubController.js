@@ -217,8 +217,10 @@ exports.getNextPatternCode = async (req, res) => {
 
         let maxNum = 0;
         (data || []).forEach(p => {
-            const num = parseInt(p.code, 10);
-            if (!isNaN(num) && num > maxNum) maxNum = num;
+            if (p.code && /^\d{1,3}$/.test(String(p.code).trim())) {
+                const num = parseInt(p.code, 10);
+                if (!isNaN(num) && num > maxNum && num < 1000) maxNum = num;
+            }
         });
 
         const nextCode = String(maxNum + 1).padStart(3, '0');

@@ -252,12 +252,15 @@ exports.createOrganization = async (req, res) => {
     city,
     state,
     pincode,
-    pin_code,
     country,
     phone,
     email,
     contact_email,
+    contact_title,
     contact_person,
+    contact_designation,
+    branch_id,
+    origin,
     username,
     password,
     industry_id,
@@ -374,7 +377,7 @@ exports.createOrganization = async (req, res) => {
     }
 
     // 3. Create Organization and link to user
-    const resolvedPincode = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+    const resolvedPincode = pincode ? String(pincode).trim() : null;
     const rawPhone = phone !== undefined ? phone : (req.body.contact_number !== undefined ? req.body.contact_number : req.body.contact_phone);
     const cleanPhone = rawPhone ? String(rawPhone).trim() : null;
     const resolvedContactEmail = contact_email || email || cleanEmail || null;
@@ -404,9 +407,16 @@ exports.createOrganization = async (req, res) => {
       }
     }
 
+    // Auto-resolve branch and intake origin from authenticated user session
+    const userBranchId = req.user?.branchId;
+    const targetBranchId = branch_id || userBranchId || null;
+    const targetOrigin = origin || (targetBranchId ? 'BRANCH' : 'HQ');
+
     const orgPayload = {
       name,
+      contact_title: contact_title ? String(contact_title).trim() : 'Mr.',
       contact_person: contact_person ? String(contact_person).trim() : null,
+      contact_designation: contact_designation ? String(contact_designation).trim() : null,
       contact_email: resolvedContactEmail ? String(resolvedContactEmail).trim().toLowerCase() : null,
       address: address ? String(address).trim() : null,
       city: city ? String(city).trim() : null,
@@ -418,6 +428,8 @@ exports.createOrganization = async (req, res) => {
       industry_id: industry_id || 1, // Default to 1 (School) for backward compatibility
       customer_code: finalCustomerCode,
       relationship_manager_id: resolvedRmId,
+      branch_id: targetBranchId,
+      origin: targetOrigin,
       receivables: receivables !== undefined && receivables !== null && !isNaN(parseFloat(receivables)) ? parseFloat(receivables) : 0,
       credits: credits !== undefined && credits !== null && !isNaN(parseFloat(credits)) ? parseFloat(credits) : 0,
       gst_number: gst_number ? String(gst_number).trim().toUpperCase() : null,
@@ -512,12 +524,13 @@ exports.updateOrganization = async (req, res) => {
     city,
     state,
     pincode,
-    pin_code,
     country,
     phone,
     email,
     contact_email,
+    contact_title,
     contact_person,
+    contact_designation,
     industry_id,
     relationship_manager_id,
     customer_code,
@@ -542,7 +555,9 @@ exports.updateOrganization = async (req, res) => {
   try {
     const updatePayload = {};
     if (name !== undefined) updatePayload.name = name;
+    if (contact_title !== undefined) updatePayload.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
     if (contact_person !== undefined) updatePayload.contact_person = contact_person ? String(contact_person).trim() : null;
+    if (contact_designation !== undefined) updatePayload.contact_designation = contact_designation ? String(contact_designation).trim() : null;
     if (contact_email !== undefined || email !== undefined) {
       const em = contact_email || email;
       updatePayload.contact_email = em ? String(em).trim().toLowerCase() : null;
@@ -550,8 +565,8 @@ exports.updateOrganization = async (req, res) => {
     if (address !== undefined) updatePayload.address = address ? String(address).trim() : null;
     if (city !== undefined) updatePayload.city = city ? String(city).trim() : null;
     if (state !== undefined) updatePayload.state = state ? String(state).trim() : null;
-    if (pincode !== undefined || pin_code !== undefined) {
-      const p = (pincode !== undefined ? pincode : pin_code) ? String(pincode || pin_code).trim() : null;
+    if (pincode !== undefined) {
+      const p = pincode ? String(pincode).trim() : null;
       updatePayload.pincode = p;
     }
     if (country !== undefined) updatePayload.country = country ? String(country).trim() : 'India';
@@ -1053,7 +1068,7 @@ exports.getOrganizationLedger = async (req, res) => {
     try {
       const { data: directOrgInvoices } = await supabase
         .from("invoices")
-        .select("*")
+        .select("*, invoice_items(*)")
         .eq("organization_id", id);
       (directOrgInvoices || []).forEach((i) => invMap.set(i.id, i));
     } catch (e) {
@@ -1063,20 +1078,20 @@ exports.getOrganizationLedger = async (req, res) => {
     if (quotationIds.length > 0) {
       const { data: qInvoices } = await supabase
         .from("invoices")
-        .select("*")
+        .select("*, invoice_items(*)")
         .in("quotation_id", quotationIds);
       (qInvoices || []).forEach((i) => invMap.set(i.id, i));
     }
     if (orderIds.length > 0) {
       const { data: oInvoices } = await supabase
         .from("invoices")
-        .select("*")
+        .select("*, invoice_items(*)")
         .in("order_id", orderIds);
       (oInvoices || []).forEach((i) => invMap.set(i.id, i));
     }
     const { data: nameInvoices } = await supabase
       .from("invoices")
-      .select("*")
+      .select("*, invoice_items(*)")
       .ilike("customer_name", org.name);
     (nameInvoices || []).forEach((i) => invMap.set(i.id, i));
 

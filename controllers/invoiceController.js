@@ -521,3 +521,32 @@ exports.deleteInvoice = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
+// 6. Get Single Invoice by ID (with Line Items and due info)
+exports.getInvoiceById = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data: invoice, error } = await supabase
+            .from('invoices')
+            .select('*, invoice_items(*)')
+            .eq('id', id)
+            .single();
+
+        if (error || !invoice) {
+            return res.status(404).json({ error: 'Invoice not found' });
+        }
+
+        const dueInfo = calculateDueInfo(
+            invoice.invoice_date || invoice.created_at,
+            invoice.credit_period_days || 30,
+            invoice.payment_status,
+            invoice.paid_amount,
+            invoice.total_amount
+        );
+
+        res.json({ ...invoice, ...dueInfo });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+

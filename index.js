@@ -67,6 +67,15 @@ app.get("/api/ping", async (req, res) => {
   }
 });
 
+app.get("/api/seed-lead", async (req, res) => {
+  try {
+    const result = await seedDemoLead();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/", (req, res) => {
   res.json({ message: "Welcome to the Backend API - V3" });
 });

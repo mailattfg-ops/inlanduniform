@@ -140,6 +140,64 @@ exports.recordPayment = async (req, res) => {
             return res.status(500).json({ error: updateError.message });
         }
 
+        // Auto-advance linked lead in Sales Pipeline to 'Deals'
+        try {
+            const { data: fullQuote } = await supabase.from('quotations').select('organization_id').eq('id', parsedQuoteId).maybeSingle();
+            if (fullQuote && fullQuote.organization_id) {
+                const { data: matchedLead } = await supabase
+                    .from('leads')
+                    .select('id, status, remarks')
+                    .eq('organization_id', fullQuote.organization_id)
+                    .maybeSingle();
+
+                if (matchedLead && matchedLead.status !== 'SO Converted Deals') {
+                    const now = new Date();
+                    const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+                    const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+
+                    let curRemarks = Array.isArray(matchedLead.remarks) ? [...matchedLead.remarks] : [];
+                    curRemarks.push({
+                        date: dateStr,
+                        time: timeStr,
+                        text: `Deal Closed: Initial advance payment of ₹${parseFloat(amount)} recorded for Quotation #${quotation.quotation_no || parsedQuoteId}. Pipeline advanced to Deals.`,
+                        stage: "Deals",
+                        response_type: "positive",
+                        author: {
+                            name: req.user?.fullName || req.user?.full_name || "Finance Staff",
+                            designation: req.user?.designation || req.user?.role || "Staff",
+                            department: "Accounts & Commercials"
+                        }
+                    });
+
+                    await supabase
+                        .from('leads')
+                        .update({
+                            status: 'Deals',
+                            remarks: curRemarks,
+                            updated_at: new Date()
+                        })
+                        .eq('id', matchedLead.id);
+
+                    await supabase.from('lead_stage_history').insert([{
+                        lead_id: matchedLead.id,
+                        stage: 'Deals',
+                        transition_reason: `Initial payment of ₹${parseFloat(amount)} received for Quotation #${quotation.quotation_no || parsedQuoteId}`
+                    }]).catch(() => {});
+
+                    await supabase.from('lead_activities').insert([{
+                        lead_id: matchedLead.id,
+                        stage: 'Deals',
+                        activity_type: 'initial_payment_received',
+                        performed_by_name: req.user?.fullName || req.user?.full_name || "Finance Staff",
+                        notes: `Deal Closed: Initial advance payment of ₹${parseFloat(amount)} recorded. Pipeline advanced to Deals.`,
+                        outcome: 'deal_won'
+                    }]).catch(() => {});
+                }
+            }
+        } catch (leadDealErr) {
+            console.warn('[paymentController] Could not auto-advance lead to Deals:', leadDealErr.message);
+        }
+
         // Log action if available
         try {
             const { logAction } = require('../utils/logger');

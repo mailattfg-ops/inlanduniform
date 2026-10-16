@@ -802,13 +802,25 @@ exports.listQuotations = async (req, res) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    const enrichedQuotes = (data || []).map((q) => ({
-      ...q,
-      estimated_expenses:
-        q.estimated_expenses !== undefined && q.estimated_expenses !== null
-          ? q.estimated_expenses
-          : q.metrics_summary?.estimated_expenses || 0,
-    }));
+    const enrichedQuotes = (data || []).map((q) => {
+      let fv = Number(q.final_quote_value) || 0;
+      if (fv === 0) {
+        const preTax = Number(q.metrics_summary?.pre_tax_subtotal) || Number(q.estimated_expenses) || 0;
+        const gstPercent = Number(q.metrics_summary?.gst_percent) || 0;
+        const taxAmount = q.metrics_summary?.tax_amount !== undefined
+          ? Number(q.metrics_summary.tax_amount)
+          : (preTax * (gstPercent / 100));
+        fv = Number((preTax + taxAmount).toFixed(2));
+      }
+      return {
+        ...q,
+        final_quote_value: fv,
+        estimated_expenses:
+          q.estimated_expenses !== undefined && q.estimated_expenses !== null
+            ? q.estimated_expenses
+            : q.metrics_summary?.estimated_expenses || 0,
+      };
+    });
     res.json(enrichedQuotes);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -820,14 +832,18 @@ exports.getQuotationDetails = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Fetch the quotation header
-    const { data: quotation, error: quoteError } = await supabase
+    // Fetch the quotation header (support both numeric ID and quotation_no)
+    let query = supabase
       .from("quotations")
       .select(
         "*, organizations(*), group_design_number:group_design_numbers(code)",
-      )
-      .eq("id", id)
-      .single();
+      );
+    if (/^\d+$/.test(String(id).trim())) {
+      query = query.eq("id", parseInt(id, 10));
+    } else {
+      query = query.eq("quotation_no", String(id).trim());
+    }
+    const { data: quotation, error: quoteError } = await query.single();
 
     if (quoteError) throw quoteError;
     if (!quotation) {
@@ -860,12 +876,13 @@ exports.getQuotationDetails = async (req, res) => {
         });
     }
 
-    // Fetch all items within this quotation
+    // Fetch all items within this quotation using quotation.id
+    const quoteNumericId = quotation.id;
     let items = [];
     const { data: rawItems, error: itemsError } = await supabase
       .from("quotation_items")
       .select("*, product_types(name)")
-      .eq("quotation_id", id);
+      .eq("quotation_id", quoteNumericId);
 
     if (itemsError) {
       console.warn(
@@ -923,14 +940,36 @@ exports.getQuotationDetails = async (req, res) => {
 
     const enrichedItems = await enrichQuotationItemsWithDesignNumbers(items);
 
+    let resolvedFinalQuoteValue = Number(quotation.final_quote_value) || 0;
+    if (resolvedFinalQuoteValue === 0) {
+      const preTax = Number(quotation.metrics_summary?.pre_tax_subtotal) || Number(quotation.estimated_expenses) || 0;
+      const gstPercent = Number(quotation.metrics_summary?.gst_percent) || 0;
+      const taxAmount = quotation.metrics_summary?.tax_amount !== undefined
+        ? Number(quotation.metrics_summary.tax_amount)
+        : (preTax * (gstPercent / 100));
+      resolvedFinalQuoteValue = Number((preTax + taxAmount).toFixed(2));
+
+      // Asynchronously heal the database record so it is permanently updated
+      if (resolvedFinalQuoteValue > 0) {
+        supabase
+          .from("quotations")
+          .update({ final_quote_value: resolvedFinalQuoteValue })
+          .eq("id", id)
+          .then(() => {})
+          .catch((e) => console.warn("Failed to auto-heal quotation final_quote_value:", e.message));
+      }
+    }
+
     res.json({
       ...quotation,
+      final_quote_value: resolvedFinalQuoteValue,
       estimated_expenses:
         quotation.estimated_expenses !== undefined &&
         quotation.estimated_expenses !== null
           ? quotation.estimated_expenses
           : quotation.metrics_summary?.estimated_expenses || 0,
       items: enrichedItems || [],
+      quotation_items: enrichedItems || [],
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -999,7 +1038,7 @@ async function enrichQuotationItemsWithDesignNumbers(items) {
   if (productIds.length > 0) {
     const { data: prods } = await supabase
       .from("products")
-      .select("id, name, art_number, design_number_id")
+      .select("id, name, art_number, gender, design_number_id, product_type_id, product_types(name)")
       .in("id", productIds);
 
     if (prods) {
@@ -1030,26 +1069,69 @@ async function enrichQuotationItemsWithDesignNumbers(items) {
           if (matched.design_numbers?.code) {
             it.size_breakdown.product_design_number =
               matched.design_numbers.code;
+            it.design_number = it.design_number || matched.design_numbers.code;
           }
           if (matched.name) {
-            it.product_name = matched.name;
-            it.size_breakdown.product_name = matched.name;
+            it.product_name = it.product_name || matched.name;
+            it.size_breakdown.product_name = it.size_breakdown.product_name || matched.name;
           }
-          if (matched.art_number && !it.size_breakdown.art_number) {
-            it.size_breakdown.art_number = matched.art_number;
+          if (matched.art_number) {
+            it.art_number = it.art_number || matched.art_number;
+            it.size_breakdown.art_number = it.size_breakdown.art_number || matched.art_number;
           }
-        } else if (!it.product_name && it.size_breakdown?.product_name) {
-          it.product_name = it.size_breakdown.product_name;
+          if (matched.gender) {
+            it.gender = it.gender || matched.gender;
+            it.size_breakdown.gender = it.size_breakdown.gender || matched.gender;
+          }
+          if (matched.product_types?.name) {
+            it.product_type_name = it.product_type_name || matched.product_types.name;
+            if (!it.product_types) it.product_types = { name: matched.product_types.name };
+          }
         }
       });
     }
-  } else {
-    items.forEach((it) => {
-      if (!it.product_name && it.size_breakdown?.product_name) {
-        it.product_name = it.size_breakdown.product_name;
-      }
-    });
   }
+
+  // Fallback checks from size_breakdown and notes for all items
+  items.forEach((it) => {
+    if (!it.art_number && it.size_breakdown?.art_number) {
+      it.art_number = it.size_breakdown.art_number;
+    }
+    if (!it.gender && it.size_breakdown?.gender) {
+      it.gender = it.size_breakdown.gender;
+    }
+    if (!it.product_name && (it.manual_item_name || it.size_breakdown?.product_name)) {
+      it.product_name = it.manual_item_name || it.size_breakdown?.product_name;
+    }
+    if (!it.design_number && (it.size_breakdown?.design_number || it.size_breakdown?.product_design_number)) {
+      it.design_number = it.size_breakdown?.design_number || it.size_breakdown?.product_design_number;
+    }
+  });
+
+  // Resolve product_types by product_type_id if missing
+  const typeIds = items
+    .map((it) => it.product_type_id || it.size_breakdown?.product_type_id)
+    .filter(Boolean);
+  if (typeIds.length > 0) {
+    const { data: types } = await supabase
+      .from("product_types")
+      .select("id, name")
+      .in("id", typeIds);
+    if (types) {
+      const typeMap = {};
+      types.forEach((t) => {
+        typeMap[String(t.id)] = t.name;
+      });
+      items.forEach((it) => {
+        const tId = it.product_type_id || it.size_breakdown?.product_type_id;
+        if (tId && typeMap[String(tId)]) {
+          it.product_type_name = it.product_type_name || typeMap[String(tId)];
+          if (!it.product_types) it.product_types = { name: typeMap[String(tId)] };
+        }
+      });
+    }
+  }
+
   return items;
 }
 
@@ -1232,6 +1314,17 @@ exports.createQuotation = async (req, res) => {
         ? quotation_no.trim()
         : `QT-${Date.now().toString().slice(-6)}`;
 
+    // Calculate or resolve final_quote_value
+    let resolvedFinalQuoteValue = Number(final_quote_value) || 0;
+    if (!resolvedFinalQuoteValue) {
+      const preTax = Number(metrics_summary?.pre_tax_subtotal) || Number(estimated_expenses) || 0;
+      const gstPercent = Number(metrics_summary?.gst_percent) || 0;
+      const taxAmount = metrics_summary?.tax_amount !== undefined 
+        ? Number(metrics_summary.tax_amount) 
+        : (preTax * (gstPercent / 100));
+      resolvedFinalQuoteValue = Number((preTax + taxAmount).toFixed(2));
+    }
+
     // Insert the quotation header (with fallback if estimated_expenses column is missing from schema cache)
     const quoteInsertPayload = {
       quotation_no: finalQuotationNo,
@@ -1243,6 +1336,7 @@ exports.createQuotation = async (req, res) => {
       production_days_estimate: production_days_estimate || 0,
       expected_delivery_date: expected_delivery_date || null,
       profit_margin_percent: profit_margin_percent || 0,
+      final_quote_value: resolvedFinalQuoteValue,
       status: "Pending Branch Approval",
       metrics_summary: {
         ...(metrics_summary || {}),
@@ -1517,16 +1611,31 @@ exports.createQuotation = async (req, res) => {
             await supabase
               .from("leads")
               .update({
-                status: "Proposal Sent",
+                status: "Quotations",
                 remarks: curRemarks,
                 updated_at: new Date()
               })
               .eq("id", l.id);
+
+            await supabase.from("lead_stage_history").insert([{
+              lead_id: l.id,
+              stage: "Quotations",
+              transition_reason: `Quotation #${quote.quotation_no || quote.id} generated`
+            }]).catch(() => {});
+
+            await supabase.from("lead_activities").insert([{
+              lead_id: l.id,
+              stage: "Quotations",
+              activity_type: "quotation_dispatched",
+              performed_by_name: req.user?.fullName || req.user?.full_name || "Sales Representative",
+              notes: `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Quotations.`,
+              outcome: "quotation_sent"
+            }]).catch(() => {});
           }
         }
       }
     } catch (leadProgErr) {
-      console.warn("Could not auto-advance lead pipeline to Proposal Sent:", leadProgErr.message);
+      console.warn("Could not auto-advance lead pipeline to Quotations:", leadProgErr.message);
     }
 
     res.json({

@@ -79,6 +79,7 @@ async function findOrCreateProductDesignNumber(code) {
 
 async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
     if (!art_number) return;
+    if (art_number.startsWith('ACC-') || art_number.startsWith('TRIM-') || art_number.startsWith('FAB-')) return;
     try {
         const parts = art_number.split('-');
         let dressCode = null;
@@ -191,10 +192,11 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
             .eq('code', patternCode)
             .maybeSingle();
 
-        if (!foundPattern && patternCode) {
+        if (!foundPattern && patternCode && /^\d{1,3}$/.test(String(patternCode).trim())) {
+            const cleanPat = String(patternCode).trim().padStart(3, '0');
             const { data: newPat } = await supabase
                 .from('art_patterns')
-                .insert([{ code: patternCode, name: `Pattern ${patternCode}` }])
+                .insert([{ code: cleanPat, name: `Pattern ${cleanPat}` }])
                 .select('id')
                 .maybeSingle();
             foundPattern = newPat;

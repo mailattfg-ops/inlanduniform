@@ -355,23 +355,23 @@ exports.createOrder = async (req, res) => {
                             .from('leads')
                             .select('id, status, remarks, name')
                             .ilike('name', org.name.trim())
-                            .in('status', ['Proposal Sent', 'Qualified', 'Contacted', 'New']);
+                            .in('status', ['Deals', 'Quotations', 'Proposal Sent', 'Hot Leads', 'Qualified', 'Follow-ups', 'Contacted', 'Sales Leads', 'New Leads', 'Open Leads', 'New']);
                         leads = matchedLeads;
                     }
                 }
 
                 if (leads && leads.length > 0) {
                     const now = new Date();
-                    const dateStr = now.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-                    const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                    const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+                    const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
 
                     for (const l of leads) {
                         let curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
                         curRemarks.push({
                             date: dateStr,
                             time: timeStr,
-                            text: `Converted: Sales Order #${newOrder.order_no} created and confirmed! Customer won!`,
-                            stage: 'Converted',
+                            text: `Converted: Sales Order #${newOrder.order_no} created and confirmed! Pipeline completed at SO Converted Deals.`,
+                            stage: 'SO Converted Deals',
                             response_type: 'positive',
                             author: {
                                 name: req.user?.fullName || req.user?.full_name || 'Operations Staff',
@@ -383,16 +383,31 @@ exports.createOrder = async (req, res) => {
                         await supabase
                             .from('leads')
                             .update({
-                                status: 'Converted',
+                                status: 'SO Converted Deals',
                                 remarks: curRemarks,
                                 updated_at: new Date()
                             })
                             .eq('id', l.id);
+
+                        await supabase.from('lead_stage_history').insert([{
+                            lead_id: l.id,
+                            stage: 'SO Converted Deals',
+                            transition_reason: `Converted to Sales Order #${newOrder.order_no}`
+                        }]).catch(() => {});
+
+                        await supabase.from('lead_activities').insert([{
+                            lead_id: l.id,
+                            stage: 'SO Converted Deals',
+                            activity_type: 'sales_order_converted',
+                            performed_by_name: req.user?.fullName || req.user?.full_name || 'Operations Staff',
+                            notes: `Converted to Sales Order #${newOrder.order_no}. Pipeline completed successfully!`,
+                            outcome: 'so_converted'
+                        }]).catch(() => {});
                     }
                 }
             }
         } catch (leadConvErr) {
-            console.warn('Could not auto-advance lead pipeline to Converted:', leadConvErr.message);
+            console.warn('Could not auto-advance lead pipeline to SO Converted Deals:', leadConvErr.message);
         }
 
         res.status(201).json(newOrder);

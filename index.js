@@ -52,6 +52,9 @@ app.use("/api/invoices", require("./routes/invoices.js"));
 app.use("/api/delivery-challans", require("./routes/deliveryChallans.js"));
 app.use("/api/measurement-tokens", require("./routes/measurementTokens.js"));
 app.use("/api/taxes", require("./routes/taxMaster.js"));
+app.use("/api/roles", require("./routes/roles.js"));
+app.use("/api/measures", require("./routes/measures.js"));
+app.use("/api/zones", require("./routes/zones.js"));
 
 // Protected routes example
 app.get("/api/user/profile", authMiddleware, (req, res) => {

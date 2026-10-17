@@ -14,6 +14,8 @@ function getDefaultPermissionsForDepartment(dept, desig) {
     return [
       'branch_inventory', 'branch_sales', 'branch_transfers',
       'view_employees', 'view_organizations', 'manage_schools', 'view_schools',
+      'view_leads', 'manage_leads', 'manage_lead_stage_assign_staff', 'manage_lead_stage_sales_contact',
+      'manage_lead_stage_followups', 'manage_lead_stage_meetings', 'manage_lead_stage_hot_leads',
       'view_products', 'manage_products', 'view_measurements', 'manage_measurements',
       'manage_quotations', 'view_quotations', 'submit_quotations_ops', 'corporate_approver',
       'manage_invoices', 'view_invoices'
@@ -24,8 +26,16 @@ function getDefaultPermissionsForDepartment(dept, desig) {
     return ['factory_floor', 'view_measurements', 'view_products'];
   }
 
+  if (d.includes('telecalling') || d.includes('call') || d.includes('tele') || title.includes('telecaller')) {
+    return ['view_all_leads', 'view_leads', 'manage_leads', 'manage_lead_stage_feeds', 'manage_lead_stage_assign_branch', 'manage_lead_stage_followups', 'view_organizations', 'view_schools'];
+  }
+
   if (d.includes('marketing') || d.includes('sales')) {
-    return ['manage_quotations', 'view_quotations', 'submit_quotations_bm', 'branch_sales', 'view_organizations', 'view_schools', 'view_products', 'view_leads', 'manage_leads'];
+    return [
+      'manage_quotations', 'view_quotations', 'submit_quotations_bm', 'branch_sales',
+      'view_organizations', 'view_schools', 'view_products', 'view_leads', 'manage_leads',
+      'manage_lead_stage_sales_contact', 'manage_lead_stage_followups', 'manage_lead_stage_meetings', 'manage_lead_stage_hot_leads'
+    ];
   }
 
   if (d.includes('measurement') || d.includes('fitting')) {
@@ -44,7 +54,7 @@ function getDefaultPermissionsForDepartment(dept, desig) {
     return ['view_employees', 'manage_employees'];
   }
 
-  return ['branch_sales', 'view_products', 'view_measurements'];
+  return ['branch_sales', 'view_products', 'view_measurements', 'view_leads'];
 }
 
 exports.listEmployees = async (req, res) => {

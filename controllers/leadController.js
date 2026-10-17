@@ -18,8 +18,19 @@ const STAGES = {
 // Helper to check global admin
 const isGlobalAdmin = (user) => {
     if (!user) return false;
-    const role = user.role || '';
-    return role === 'Admin' || role === 'Super Admin' || role === 'SuperAdmin';
+    const role = (user.role || '').toLowerCase();
+    const permissions = Array.isArray(user.permissions) ? user.permissions : [];
+    return role === 'admin' || role === 'super admin' || role === 'superadmin' || role === 'corporate' || permissions.includes('all');
+};
+
+// Universal Permission Checker for CRM & Lead Pipeline Stages
+const hasPermission = (user, requiredPerms) => {
+    if (!user) return false;
+    if (isGlobalAdmin(user)) return true;
+    const userPerms = Array.isArray(user.permissions) ? user.permissions : [];
+    if (userPerms.includes('all')) return true;
+    const reqList = Array.isArray(requiredPerms) ? requiredPerms : [requiredPerms];
+    return reqList.some(p => userPerms.includes(p));
 };
 
 // Helper to generate next lead code (LN001, LN002, etc.)
@@ -116,7 +127,7 @@ async function resolveStaffIdentity(req) {
     const email = req.user?.email;
 
     try {
-        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department');
+        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department, branch_id');
         if (empRecordId) query = query.eq('id', empRecordId);
         else if (empCode) query = query.eq('employee_id', empCode);
         else if (email) query = query.eq('email', email);
@@ -129,7 +140,8 @@ async function resolveStaffIdentity(req) {
                 employee_id: employee.employee_id,
                 full_name: employee.full_name,
                 designation: employee.designation || 'Staff',
-                department: employee.department || 'Operations'
+                department: employee.department || 'Operations',
+                branch_id: employee.branch_id || req.user?.branchId || null
             };
         }
     } catch (err) {
@@ -401,22 +413,106 @@ module.exports = {
     // 1. List Leads with Stage & Cold Normalization
     list: async (req, res) => {
         try {
-            const isAdmin = isGlobalAdmin(req.user);
-            const userBranchId = req.user?.branchId;
+            const user = req.user;
+            const staff = await resolveStaffIdentity(req);
+            const userRole = (user?.role || '').toLowerCase();
+            const staffDesig = (staff?.designation || '').toLowerCase();
+            const staffDept = (staff?.department || '').toLowerCase();
+            const userBranchId = user?.branchId || staff?.branch_id;
+
+            // 1. Basic Read Permission Check
+            const canViewAny = isGlobalAdmin(user) || hasPermission(user, [
+                'view_all_leads',
+                'view_leads',
+                'manage_leads',
+                'manage_schools',
+                'view_schools',
+                'branch_sales'
+            ]);
+
+            if (!canViewAny) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to view leads' });
+            }
+
+            let selectFieldsWithZone = `
+                *,
+                industries ( id, name ),
+                employees ( id, full_name, employee_id, branch_id ),
+                zones ( id, name, code, branch_id )
+            `;
+            let selectFieldsFallback = `
+                *,
+                industries ( id, name ),
+                employees ( id, full_name, employee_id, branch_id )
+            `;
 
             let query = supabase
                 .from('leads')
-                .select(`
-                    *,
-                    industries ( id, name ),
-                    employees ( id, full_name, employee_id, branch_id )
-                `);
+                .select(selectFieldsWithZone);
 
-            if (!isAdmin && userBranchId) {
-                query = query.eq('branch_id', userBranchId);
+            // 2. Global / Unrestricted Visibility:
+            // Users with 'view_all_leads' (Telecalling / HQ / Corporate) or Global Admin see ALL leads across all branches
+            const canViewAll = isGlobalAdmin(user) || hasPermission(user, 'view_all_leads');
+
+            if (!canViewAll) {
+                // Determine whether user is a Branch Manager vs Salesperson vs General Branch Staff
+                const isBranchManager = Boolean(
+                    userBranchId && (
+                        userRole.includes('branch manager') ||
+                        staffDesig.includes('branch manager') ||
+                        (staffDesig.includes('manager') && !staffDesig.includes('sales')) ||
+                        userRole.includes('manager') ||
+                        hasPermission(user, ['manage_lead_stage_assign_staff', 'corporate_approver'])
+                    )
+                );
+
+                const isSalesperson = !isBranchManager && Boolean(
+                    staff?.id && (
+                        staffDesig.includes('sales') ||
+                        userRole.includes('sales') ||
+                        staffDept.includes('sales') ||
+                        hasPermission(user, 'manage_lead_stage_sales_contact')
+                    )
+                );
+
+                if (isBranchManager) {
+                    // Branch manager should be able to see ALL the leads of that branch
+                    query = query.eq('branch_id', userBranchId);
+                } else if (isSalesperson) {
+                    // Sales person should see all their assigned leads
+                    query = query.eq('assigned_staff_id', staff.id);
+                } else if (userBranchId) {
+                    // General branch staff sees leads of their branch
+                    query = query.eq('branch_id', userBranchId);
+                } else if (staff?.id) {
+                    // Staff without branch assignment sees their own leads
+                    query = query.eq('assigned_staff_id', staff.id);
+                }
             }
 
-            const { data, error } = await query.order('created_at', { ascending: false });
+            let { data, error } = await query.order('created_at', { ascending: false });
+
+            if (error && (error.code === 'PGRST200' || error.message?.toLowerCase().includes('zone'))) {
+                let fallbackQuery = supabase
+                    .from('leads')
+                    .select(selectFieldsFallback);
+
+                if (!canViewAll) {
+                    if (isBranchManager) {
+                        fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                    } else if (isSalesperson) {
+                        fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
+                    } else if (userBranchId) {
+                        fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                    } else if (staff?.id) {
+                        fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
+                    }
+                }
+
+                const fallbackRes = await fallbackQuery.order('created_at', { ascending: false });
+                data = fallbackRes.data;
+                error = fallbackRes.error;
+            }
 
             if (error) {
                 console.error('❌ Table "leads" query failed:', error.message);
@@ -453,15 +549,29 @@ module.exports = {
                 .select(`
                     *,
                     industries ( id, name ),
-                    employees ( id, full_name, employee_id, branch_id )
+                    employees ( id, full_name, employee_id, branch_id ),
+                    zones ( id, name, code, branch_id )
                 `)
                 .eq('id', id)
                 .single();
 
             if (error) {
-                const fallbackRes = await supabase.from('leads').select('*').eq('id', id).single();
-                if (fallbackRes.error) throw fallbackRes.error;
-                data = fallbackRes.data;
+                const fallbackRes = await supabase
+                    .from('leads')
+                    .select(`
+                        *,
+                        industries ( id, name ),
+                        employees ( id, full_name, employee_id, branch_id )
+                    `)
+                    .eq('id', id)
+                    .single();
+                if (fallbackRes.error) {
+                    const basicRes = await supabase.from('leads').select('*').eq('id', id).single();
+                    if (basicRes.error) throw basicRes.error;
+                    data = basicRes.data;
+                } else {
+                    data = fallbackRes.data;
+                }
             }
 
             if (data) {
@@ -511,6 +621,10 @@ module.exports = {
         }
 
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_leads', 'view_all_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to register leads (requires manage_leads)' });
+            }
+
             const isAdmin = isGlobalAdmin(req.user);
             const userBranchId = req.user?.branchId;
             const staff = await resolveStaffIdentity(req);
@@ -579,6 +693,7 @@ module.exports = {
                 country: country ? String(country).trim() : 'India',
                 assigned_staff_id: resolvedStaffId,
                 branch_id: targetBranchId,
+                zone_id: req.body.zone_id ? parseInt(req.body.zone_id, 10) : null,
                 status: determinedStatus,
                 area: area ? String(area).trim() : null,
                 google_maps_link: google_maps_link ? String(google_maps_link).trim() : null,
@@ -619,7 +734,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentInsert[col] !== undefined) {
                         delete currentInsert[col];
                         pruned = true;
@@ -686,6 +801,10 @@ module.exports = {
         }
 
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_lead_stage_feeds', 'manage_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to log field feeds (requires manage_lead_stage_feeds)' });
+            }
+
             const isAdmin = isGlobalAdmin(req.user);
             const userBranchId = req.user?.branchId;
             const staff = await resolveStaffIdentity(req);
@@ -712,6 +831,7 @@ module.exports = {
                 pincode: resolvedPincode,
                 country: country ? String(country).trim() : 'India',
                 branch_id: targetBranchId,
+                zone_id: req.body.zone_id ? parseInt(req.body.zone_id, 10) : null,
                 origin: targetOrigin,
                 status: STAGES.FEEDS,
                 is_cold: false,
@@ -746,7 +866,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentInsert[col] !== undefined) {
                         delete currentInsert[col];
                         pruned = true;
@@ -812,6 +932,10 @@ module.exports = {
         }
 
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_leads', 'view_all_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to edit lead records (requires manage_leads)' });
+            }
+
             const cleanPhone = phone ? String(phone).trim() : (req.body.contact_number ? String(req.body.contact_number).trim() : undefined);
             const resolvedPincode = pincode !== undefined ? (pincode ? String(pincode).trim() : null) : undefined;
 
@@ -833,6 +957,7 @@ module.exports = {
             if (resolvedPincode !== undefined) updateFields.pincode = resolvedPincode;
             if (email !== undefined) updateFields.email = email && email.trim() ? email.trim() : null;
             if (branch_id !== undefined) updateFields.branch_id = branch_id;
+            if (req.body.zone_id !== undefined) updateFields.zone_id = req.body.zone_id ? parseInt(req.body.zone_id, 10) : null;
             if (contact_title !== undefined) updateFields.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
             if (contact_person !== undefined) updateFields.contact_person = contact_person ? String(contact_person).trim() : null;
             if (contact_designation !== undefined) updateFields.contact_designation = contact_designation ? String(contact_designation).trim() : null;
@@ -879,7 +1004,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentUpdate[col] !== undefined) {
                         delete currentUpdate[col];
                         pruned = true;
@@ -901,6 +1026,10 @@ module.exports = {
     delete: async (req, res) => {
         const { id } = req.params;
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_leads', 'manage_system'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to delete leads (requires manage_leads)' });
+            }
+
             await supabase.from('lead_activities').delete().eq('lead_id', id).catch(() => {});
             await supabase.from('lead_stage_history').delete().eq('lead_id', id).catch(() => {});
             const { error } = await supabase.from('leads').delete().eq('id', id);
@@ -921,6 +1050,10 @@ module.exports = {
         }
 
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_lead_stage_assign_branch', 'manage_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to assign branches to leads (requires manage_lead_stage_assign_branch)' });
+            }
+
             const staff = await resolveStaffIdentity(req);
             const { data: lead, error: fetchErr } = await supabase.from('leads').select('*').eq('id', id).single();
             if (fetchErr || !lead) return res.status(404).json({ error: 'Lead not found' });
@@ -974,6 +1107,10 @@ module.exports = {
         }
 
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_lead_stage_assign_staff', 'manage_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to assign sales executives to leads (requires manage_lead_stage_assign_staff)' });
+            }
+
             const staff = await resolveStaffIdentity(req);
             const { data: lead, error: fetchErr } = await supabase.from('leads').select('*').eq('id', id).single();
             if (fetchErr || !lead) return res.status(404).json({ error: 'Lead not found' });
@@ -1048,6 +1185,25 @@ module.exports = {
             const targetStage = stage ? normalizeLeadStage(stage, lead) : currentStatus;
             const rawResponse = response_type || responseType || outcome || 'hold';
             const normResponse = String(rawResponse).toLowerCase();
+
+            // Stage-Specific Permission Control (Configured from User Roles & Permissions)
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, 'manage_leads')) {
+                if (targetStage === STAGES.FEEDS && !hasPermission(req.user, 'manage_lead_stage_feeds')) {
+                    return res.status(403).json({ error: 'Access Denied: You do not have permission to process field feeds (requires manage_lead_stage_feeds)' });
+                }
+                if (targetStage === STAGES.SALES_LEADS && !hasPermission(req.user, 'manage_lead_stage_sales_contact')) {
+                    return res.status(403).json({ error: 'Access Denied: You do not have permission to initiate sales outreach (requires manage_lead_stage_sales_contact)' });
+                }
+                if (targetStage === STAGES.FOLLOW_UPS && !hasPermission(req.user, 'manage_lead_stage_followups')) {
+                    return res.status(403).json({ error: 'Access Denied: You do not have permission to log follow-up notes (requires manage_lead_stage_followups)' });
+                }
+                if (targetStage === STAGES.MEETINGS && !hasPermission(req.user, 'manage_lead_stage_meetings')) {
+                    return res.status(403).json({ error: 'Access Denied: You do not have permission to record meeting outcomes (requires manage_lead_stage_meetings)' });
+                }
+                if (targetStage === STAGES.HOT_LEADS && !hasPermission(req.user, ['manage_lead_stage_hot_leads', 'manage_lead_stage_meetings'])) {
+                    return res.status(403).json({ error: 'Access Denied: You do not have permission to qualify hot leads (requires manage_lead_stage_hot_leads)' });
+                }
+            }
 
             let nextStatus = currentStatus;
             let nextIsCold = lead.is_cold || false;
@@ -1316,6 +1472,10 @@ module.exports = {
     convertLeadToCustomer: async (req, res) => {
         const { id } = req.params;
         try {
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_lead_stage_hot_leads', 'manage_leads'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to convert leads to customers (requires manage_lead_stage_hot_leads)' });
+            }
+
             const { data: lead, error: fetchError } = await supabase.from('leads').select('*').eq('id', id).single();
             if (fetchError || !lead) return res.status(404).json({ error: 'Lead not found' });
 

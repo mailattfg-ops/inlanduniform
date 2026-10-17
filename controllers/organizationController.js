@@ -59,7 +59,7 @@ exports.getOrganizations = async (req, res) => {
 
     let query = supabase
       .from("organizations")
-      .select("*, industries(name)")
+      .select("*, industries(name), zones(id, name, code)")
       .order("created_at", { ascending: false });
 
     const roleLower = (userRole || "").toLowerCase();
@@ -87,7 +87,33 @@ exports.getOrganizations = async (req, res) => {
       query = query.eq("industry_id", industryId);
     }
 
-    const { data, error } = await query;
+    let { data, error } = await query;
+
+    if (error && (error.message?.toLowerCase().includes("zone") || error.code === "PGRST200")) {
+      let fallbackQuery = supabase
+        .from("organizations")
+        .select("*, industries(name)")
+        .order("created_at", { ascending: false });
+
+      if (
+        roleLower === "organisation" ||
+        roleLower === "organization" ||
+        roleLower === "school" ||
+        roleLower === "entity" ||
+        roleLower === "student" ||
+        roleLower === "member" ||
+        userOrgId
+      ) {
+        if (userOrgId) fallbackQuery = fallbackQuery.eq("id", userOrgId);
+      } else if (!isAdmin && userBranchId) {
+        fallbackQuery = fallbackQuery.eq("branch_id", userBranchId);
+      }
+      if (industryId) fallbackQuery = fallbackQuery.eq("industry_id", industryId);
+
+      const fallbackRes = await fallbackQuery;
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
 
     if (error) {
       console.error('❌ [DATABASE ERROR] Table "organizations" query failed:');
@@ -429,6 +455,7 @@ exports.createOrganization = async (req, res) => {
       customer_code: finalCustomerCode,
       relationship_manager_id: resolvedRmId,
       branch_id: targetBranchId,
+      zone_id: req.body.zone_id ? parseInt(req.body.zone_id, 10) : null,
       origin: targetOrigin,
       receivables: receivables !== undefined && receivables !== null && !isNaN(parseFloat(receivables)) ? parseFloat(receivables) : 0,
       credits: credits !== undefined && credits !== null && !isNaN(parseFloat(credits)) ? parseFloat(credits) : 0,
@@ -640,6 +667,12 @@ exports.updateOrganization = async (req, res) => {
       updatePayload.credit_period_days = credit_period_days !== null && !isNaN(parseInt(credit_period_days, 10))
         ? parseInt(credit_period_days, 10)
         : 30;
+    }
+    if (req.body.branch_id !== undefined) {
+      updatePayload.branch_id = req.body.branch_id ? parseInt(req.body.branch_id, 10) : null;
+    }
+    if (req.body.zone_id !== undefined) {
+      updatePayload.zone_id = req.body.zone_id ? parseInt(req.body.zone_id, 10) : null;
     }
 
     // Robust execution loop: iteratively prune any columns that PostgREST schema does not have

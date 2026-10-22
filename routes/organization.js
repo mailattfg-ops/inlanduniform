@@ -41,6 +41,23 @@ router.get('/:id/staff', (req, res, next) => {
   return checkPermission(['manage_schools', 'view_schools'])(req, res, next);
 }, organizationController.getAssignedStaff);
 router.post('/:id/staff', checkPermission(['manage_schools']), organizationController.assignStaff);
+
+// Organization double-entry financial journals
+router.get('/:id/journals', (req, res, next) => {
+  const role = (req.user?.role || '').toLowerCase();
+  if (req.user?.memberId || ['entity', 'student', 'member'].includes(role)) {
+    return res.status(403).json({ error: 'Access Denied: Individual members cannot view financial journals.' });
+  }
+  if (req.user?.organizationId && String(req.user.organizationId) === String(req.params.id)) {
+    return next();
+  }
+  return checkPermission(['manage_schools', 'view_schools', 'branch_sales'])(req, res, next);
+}, organizationController.getOrganizationJournals);
+
+router.post('/:id/journals', (req, res, next) => {
+  return checkPermission(['manage_schools', 'branch_sales'])(req, res, next);
+}, organizationController.createOrganizationJournal);
+
 router.post('/', checkPermission(['manage_schools']), organizationController.createOrganization);
 router.put('/:id', checkPermission(['manage_schools']), organizationController.updateOrganization);
 router.delete('/:id', checkPermission(['manage_schools']), organizationController.deleteOrganization);

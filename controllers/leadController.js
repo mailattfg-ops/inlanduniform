@@ -451,8 +451,8 @@ module.exports = {
                 .select(selectFieldsWithZone);
 
             // 2. Global / Unrestricted Visibility:
-            // Users with 'view_all_leads' (Telecalling / HQ / Corporate) or Global Admin see ALL leads across all branches
-            const canViewAll = isGlobalAdmin(user) || hasPermission(user, 'view_all_leads');
+            // Users with 'view_all_leads' (Telecalling / HQ / Corporate), Global Admin, or HQ staff (!userBranchId) see ALL leads across all branches
+            const canViewAll = isGlobalAdmin(user) || hasPermission(user, ['view_all_leads', 'manage_leads', 'manage_lead_stage_feeds']) || !userBranchId;
 
             if (!canViewAll) {
                 // Determine whether user is a Branch Manager vs Salesperson vs General Branch Staff
@@ -476,17 +476,16 @@ module.exports = {
                 );
 
                 if (isBranchManager) {
-                    // Branch manager should be able to see ALL the leads of that branch
-                    query = query.eq('branch_id', userBranchId);
+                    // Branch manager sees branch leads and unassigned feeds
+                    query = query.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
                 } else if (isSalesperson) {
-                    // Sales person should see all their assigned leads
-                    query = query.eq('assigned_staff_id', staff.id);
+                    // Sales person sees their assigned leads and unassigned feeds
+                    query = query.or(`assigned_staff_id.eq.${staff.id},and(status.eq.Feeds,branch_id.is.null)`);
                 } else if (userBranchId) {
-                    // General branch staff sees leads of their branch
-                    query = query.eq('branch_id', userBranchId);
+                    // General branch staff sees leads of their branch and unassigned feeds
+                    query = query.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
                 } else if (staff?.id) {
-                    // Staff without branch assignment sees their own leads
-                    query = query.eq('assigned_staff_id', staff.id);
+                    query = query.or(`assigned_staff_id.eq.${staff.id},branch_id.is.null,origin.eq.HQ`);
                 }
             }
 
@@ -499,13 +498,13 @@ module.exports = {
 
                 if (!canViewAll) {
                     if (isBranchManager) {
-                        fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                        fallbackQuery = fallbackQuery.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
                     } else if (isSalesperson) {
-                        fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
+                        fallbackQuery = fallbackQuery.or(`assigned_staff_id.eq.${staff.id},and(status.eq.Feeds,branch_id.is.null)`);
                     } else if (userBranchId) {
-                        fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                        fallbackQuery = fallbackQuery.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
                     } else if (staff?.id) {
-                        fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
+                        fallbackQuery = fallbackQuery.or(`assigned_staff_id.eq.${staff.id},branch_id.is.null,origin.eq.HQ`);
                     }
                 }
 
@@ -789,7 +788,9 @@ module.exports = {
             country,
             remarks,
             branch_id,
-            origin
+            origin,
+            industry_id,
+            zone_id
         } = req.body;
 
         const clientPhone = contact_number || phone;
@@ -818,6 +819,7 @@ module.exports = {
             const feedPayload = {
                 lead_code,
                 name: name.trim(),
+                industry_id: industry_id ? parseInt(industry_id, 10) : (req.body.industry_id ? parseInt(req.body.industry_id, 10) : null),
                 contact_title: contact_title ? String(contact_title).trim() : 'Mr.',
                 contact_person: contact_person ? String(contact_person).trim() : null,
                 contact_designation: contact_designation ? String(contact_designation).trim() : null,
@@ -831,7 +833,7 @@ module.exports = {
                 pincode: resolvedPincode,
                 country: country ? String(country).trim() : 'India',
                 branch_id: targetBranchId,
-                zone_id: req.body.zone_id ? parseInt(req.body.zone_id, 10) : null,
+                zone_id: zone_id ? parseInt(zone_id, 10) : (req.body.zone_id ? parseInt(req.body.zone_id, 10) : null),
                 origin: targetOrigin,
                 status: STAGES.FEEDS,
                 is_cold: false,
@@ -866,7 +868,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentInsert[col] !== undefined) {
                         delete currentInsert[col];
                         pruned = true;
@@ -893,7 +895,8 @@ module.exports = {
             res.json({
                 success: true,
                 message: 'Field feed logged successfully',
-                feed: data
+                feed: data,
+                lead: data
             });
         } catch (err) {
             console.error('[leadController.createFeed] Exception:', err);
@@ -932,8 +935,8 @@ module.exports = {
         }
 
         try {
-            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_leads', 'view_all_leads'])) {
-                return res.status(403).json({ error: 'Access Denied: You do not have permission to edit lead records (requires manage_leads)' });
+            if (!isGlobalAdmin(req.user) && !hasPermission(req.user, ['manage_leads', 'view_all_leads', 'manage_lead_stage_feeds'])) {
+                return res.status(403).json({ error: 'Access Denied: You do not have permission to edit lead records (requires manage_leads or manage_lead_stage_feeds)' });
             }
 
             const cleanPhone = phone ? String(phone).trim() : (req.body.contact_number ? String(req.body.contact_number).trim() : undefined);
@@ -941,7 +944,7 @@ module.exports = {
 
             const updateFields = {
                 name: name.trim(),
-                industry_id: industry_id || null,
+                industry_id: req.body.industry_id !== undefined ? (req.body.industry_id ? parseInt(req.body.industry_id, 10) : null) : (industry_id ? parseInt(industry_id, 10) : null),
                 address: address !== undefined ? (address ? String(address).trim() : null) : undefined,
                 assigned_staff_id: assigned_staff_id || null,
                 city: city !== undefined ? (city ? String(city).trim() : null) : undefined,
@@ -957,6 +960,7 @@ module.exports = {
             if (resolvedPincode !== undefined) updateFields.pincode = resolvedPincode;
             if (email !== undefined) updateFields.email = email && email.trim() ? email.trim() : null;
             if (branch_id !== undefined) updateFields.branch_id = branch_id;
+            if (req.body.origin !== undefined) updateFields.origin = req.body.origin;
             if (req.body.zone_id !== undefined) updateFields.zone_id = req.body.zone_id ? parseInt(req.body.zone_id, 10) : null;
             if (contact_title !== undefined) updateFields.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
             if (contact_person !== undefined) updateFields.contact_person = contact_person ? String(contact_person).trim() : null;
@@ -1004,7 +1008,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentUpdate[col] !== undefined) {
                         delete currentUpdate[col];
                         pruned = true;

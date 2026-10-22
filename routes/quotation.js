@@ -46,6 +46,9 @@ router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations
 // Submit quotation directly to operations team (Branch Managers with Ops Submission authority)
 router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.submitToOps);
 
+// Log follow-up activity on quotation
+router.post('/:id/follow-up', authMiddleware, quotationController.logQuotationFollowUp);
+
 // Delete quotation (Restricted strictly to managers/admins)
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);
 

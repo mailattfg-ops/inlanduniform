@@ -532,7 +532,22 @@ exports.createOrganization = async (req, res) => {
       data.contact_phone = savedNum;
     }
 
-    // 4. Log the action
+    // 4. Auto-create default 'Main' department for new customer
+    try {
+      await supabase
+        .from("departments")
+        .insert([
+          {
+            organization_id: data.id,
+            name: "Main",
+            section: "Main",
+          },
+        ]);
+    } catch (dErr) {
+      console.warn("[createOrganization] Could not auto-create default Main department:", dErr.message);
+    }
+
+    // 5. Log the action
     await logAction(req.user.id, "CREATE", "organization", data.id, {
       name: data.name,
     });
@@ -768,10 +783,51 @@ exports.getOrganizationDetails = async (req, res) => {
   }
   try {
     // 1. Get Departments
-    const { data: departments } = await supabase
+    let { data: departments } = await supabase
       .from("departments")
       .select("*")
       .eq("organization_id", id);
+
+    // If customer has no departments, auto-create default 'Main' department
+    if (!departments || departments.length === 0) {
+      try {
+        const { data: defaultDept } = await supabase
+          .from("departments")
+          .insert([
+            {
+              organization_id: id,
+              name: "Main",
+              section: "Main",
+            },
+          ])
+          .select("*")
+          .single();
+
+        if (defaultDept) {
+          departments = [defaultDept];
+          // Assign any unassigned members of this customer to the default Main department
+          await supabase
+            .from("registry_members")
+            .update({ department_id: defaultDept.id })
+            .eq("organization_id", id)
+            .is("department_id", null);
+        }
+      } catch (deptErr) {
+        console.warn("[getOrganizationDetails] Could not create default Main department:", deptErr.message);
+      }
+    } else {
+      // If customer has departments, make sure any unassigned members are assigned to 'Main' if Main exists
+      const mainDept = (departments || []).find(
+        (d) => (d.name || "").trim().toLowerCase() === "main"
+      );
+      if (mainDept) {
+        await supabase
+          .from("registry_members")
+          .update({ department_id: mainDept.id })
+          .eq("organization_id", id)
+          .is("department_id", null);
+      }
+    }
 
     const enrichedDepartments = (departments || []).map((d) => ({
       ...d,
@@ -1279,8 +1335,159 @@ exports.getOrganizationLedger = async (req, res) => {
         total_payments: payments.length,
       },
       transactions,
+      invoices: invoices.map((inv) => {
+        const linkedOrder = orders.find((o) => o.id === inv.order_id);
+        return {
+          ...inv,
+          order_no: linkedOrder?.order_no || (inv.sale_type === 'retail' ? 'Retail Direct' : null)
+        };
+      }),
+      orders: orders || [],
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Double-Entry Financial Journal Vouchers for Organizations
+exports.getOrganizationJournals = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('journal_entries')
+      .select('*, journal_entry_lines(*)')
+      .eq('organization_id', id)
+      .order('date', { ascending: false });
+
+    if (error) {
+      // Return empty array gracefully if table is not yet created in Supabase
+      console.warn('Could not query journal_entries:', error.message);
+      return res.json({ success: true, journals: [] });
+    }
+
+    const formatted = (data || []).map(j => {
+      const rows = j.journal_entry_lines || [];
+      const debited = rows.filter(r => (parseFloat(r.debit) || 0) > 0).map(r => r.account);
+      const credited = rows.filter(r => (parseFloat(r.credit) || 0) > 0).map(r => r.account);
+      return {
+        id: j.id,
+        journal_no: j.journal_no,
+        reference_no: j.reference_no,
+        title: j.title,
+        date: j.date,
+        notes: j.notes,
+        currency: j.currency,
+        total_debit: parseFloat(j.total_debit) || 0,
+        total_credit: parseFloat(j.total_credit) || 0,
+        status: j.status || 'Posted',
+        account_summary: debited[0] ? `${debited[0]} (Dr)` : 'Custom Journal',
+        offset_summary: credited[0] ? `${credited[0]} (Cr)` : 'General Ledger',
+        rows: rows,
+        created_at: j.created_at
+      };
+    });
+
+    res.json({ success: true, journals: formatted });
+  } catch (err) {
+    console.error('getOrganizationJournals error:', err);
+    res.json({ success: true, journals: [] });
+  }
+};
+
+exports.createOrganizationJournal = async (req, res) => {
+  const { id } = req.params;
+  const {
+    journal_no,
+    reference_no,
+    title,
+    date,
+    notes,
+    currency,
+    rows,
+    total_debit,
+    total_credit
+  } = req.body;
+
+  try {
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Journal title is required' });
+    }
+    if (!notes || !notes.trim()) {
+      return res.status(400).json({ error: 'Notes / narration is required' });
+    }
+    if (!Array.isArray(rows) || rows.length < 2) {
+      return res.status(400).json({ error: 'Double-entry journal requires at least two account lines' });
+    }
+
+    const debitTotal = parseFloat(total_debit) || 0;
+    const creditTotal = parseFloat(total_credit) || 0;
+    const difference = Math.abs(debitTotal - creditTotal);
+
+    if (debitTotal <= 0 || creditTotal <= 0 || difference > 0.01) {
+      return res.status(400).json({ error: 'Journal must be balanced! Debits must equal Credits.' });
+    }
+
+    const finalJournalNo = journal_no && journal_no.trim()
+      ? journal_no.trim()
+      : `JN-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const { data: journal, error: jError } = await supabase
+      .from('journal_entries')
+      .insert([
+        {
+          organization_id: id,
+          journal_no: finalJournalNo,
+          reference_no: reference_no ? reference_no.trim() : null,
+          title: title.trim(),
+          date: date || new Date().toISOString().split('T')[0],
+          notes: notes.trim(),
+          currency: currency || 'INR - Indian Rupee',
+          total_debit: debitTotal,
+          total_credit: creditTotal,
+          status: 'Posted',
+          created_by: req.user?.id || null
+        }
+      ])
+      .select()
+      .single();
+
+    if (jError) {
+      console.error('Failed to create journal_entries header:', jError);
+      return res.status(500).json({ error: jError.message });
+    }
+
+    const lineInserts = rows.map(r => ({
+      journal_id: journal.id,
+      account: r.account,
+      description: r.description ? r.description.trim() : null,
+      contact: r.contact ? r.contact.trim() : null,
+      debit: parseFloat(r.debit) || 0,
+      credit: parseFloat(r.credit) || 0
+    }));
+
+    const { error: lineError } = await supabase
+      .from('journal_entry_lines')
+      .insert(lineInserts);
+
+    if (lineError) {
+      console.error('Failed to insert journal_entry_lines:', lineError);
+      return res.status(500).json({ error: lineError.message });
+    }
+
+    const debited = lineInserts.filter(r => r.debit > 0).map(r => r.account);
+    const credited = lineInserts.filter(r => r.credit > 0).map(r => r.account);
+
+    res.status(201).json({
+      success: true,
+      journal: {
+        ...journal,
+        account_summary: debited[0] ? `${debited[0]} (Dr)` : 'Custom Journal',
+        offset_summary: credited[0] ? `${credited[0]} (Cr)` : 'General Ledger',
+        rows: lineInserts
+      }
+    });
+  } catch (err) {
+    console.error('createOrganizationJournal error:', err);
     res.status(500).json({ error: err.message });
   }
 };

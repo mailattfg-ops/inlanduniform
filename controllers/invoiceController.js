@@ -377,7 +377,7 @@ exports.listInvoices = async (req, res) => {
 
         let query = supabase
             .from('invoices')
-            .select('*, invoice_items(*)')
+            .select('*, invoice_items(*), orders(id, order_no)')
             .order('created_at', { ascending: false });
 
         if (filterOrgId) {
@@ -423,6 +423,7 @@ exports.listInvoices = async (req, res) => {
             );
             return {
                 ...inv,
+                order_no: inv.orders?.order_no || null,
                 ...dueInfo
             };
         });
@@ -528,7 +529,7 @@ exports.getInvoiceById = async (req, res) => {
         const { id } = req.params;
         const { data: invoice, error } = await supabase
             .from('invoices')
-            .select('*, invoice_items(*)')
+            .select('*, invoice_items(*), orders(id, order_no)')
             .eq('id', id)
             .single();
 
@@ -544,7 +545,7 @@ exports.getInvoiceById = async (req, res) => {
             invoice.total_amount
         );
 
-        res.json({ ...invoice, ...dueInfo });
+        res.json({ ...invoice, order_no: invoice.orders?.order_no || null, ...dueInfo });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

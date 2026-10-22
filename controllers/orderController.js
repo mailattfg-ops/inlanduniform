@@ -40,7 +40,7 @@ exports.listOrders = async (req, res) => {
 
         let query = supabase
             .from('orders')
-            .select('*, quotations!inner(id, quotation_no, title, final_quote_value, paid_amount, organization_id, organizations(name))');
+            .select('*, quotations!inner(id, quotation_no, title, final_quote_value, paid_amount, expected_delivery_date, organization_id, metrics_summary, organizations(id, name, address, delivery_address, delivery_city, delivery_state, delivery_pincode, delivery_country, city, state, pincode, contact_person, phone))');
 
         if (userOrgId) {
             query = query.eq('quotations.organization_id', userOrgId);
@@ -78,7 +78,7 @@ exports.getOrderDetails = async (req, res) => {
         }
         const { data: order, error } = await supabase
             .from('orders')
-            .select('*, quotations(id, quotation_no, title, final_quote_value, paid_amount, expected_delivery_date, organization_id, organizations(name, address))')
+            .select('*, quotations(id, quotation_no, title, final_quote_value, paid_amount, expected_delivery_date, organization_id, metrics_summary, organizations(id, name, address, delivery_address, delivery_city, delivery_state, delivery_pincode, delivery_country, city, state, pincode, contact_person, contact_title, contact_designation, phone, contact_email))')
             .eq('id', safeId)
             .single();
 
@@ -130,6 +130,29 @@ exports.getOrderDetails = async (req, res) => {
             return it;
         });
 
+        // Enrich product_types if missing
+        const pTypeIds = Array.from(new Set(items.map(it => it.product_type_id).filter(Boolean)));
+        if (pTypeIds.length > 0 && items.some(it => !it.product_types?.name)) {
+            try {
+                const { data: pTypes } = await supabase
+                    .from('product_types')
+                    .select('id, name')
+                    .in('id', pTypeIds);
+                if (pTypes) {
+                    const pTypeMap = {};
+                    pTypes.forEach(pt => { pTypeMap[pt.id] = pt; });
+                    items.forEach(it => {
+                        if (!it.product_types && it.product_type_id && pTypeMap[it.product_type_id]) {
+                            it.product_types = pTypeMap[it.product_type_id];
+                            it.product_type_name = pTypeMap[it.product_type_id].name;
+                        }
+                    });
+                }
+            } catch (ptErr) {
+                console.warn('Product types enrichment error:', ptErr.message);
+            }
+        }
+
         // Enrich items with actual product names and design numbers
         const productIds = Array.from(new Set(
             items.map(it => it.product_id || it.size_breakdown?.product_id).filter(Boolean)
@@ -172,6 +195,40 @@ exports.getOrderDetails = async (req, res) => {
                     it.product_name = it.size_breakdown.product_name;
                 }
             });
+        }
+
+        // Enrich items with fabric details if present
+        const fabricIds = Array.from(new Set(
+            items.map(it => it.fabric_id || it.size_breakdown?.fabric_id).filter(Boolean)
+        ));
+        if (fabricIds.length > 0) {
+            try {
+                const { data: fabs } = await supabase
+                    .from('fabrics')
+                    .select('id, name, fabric_code, color')
+                    .in('id', fabricIds);
+                if (fabs) {
+                    const fabMap = {};
+                    fabs.forEach(f => {
+                        fabMap[String(f.id)] = f;
+                    });
+                    items.forEach(it => {
+                        const fId = it.fabric_id || it.size_breakdown?.fabric_id;
+                        if (fId && fabMap[String(fId)]) {
+                            it.fabric_name = fabMap[String(fId)].name;
+                            it.fabric_code = fabMap[String(fId)].fabric_code;
+                            it.fabric_color = fabMap[String(fId)].color;
+                        }
+                    });
+                }
+            } catch (fabErr) {
+                console.warn('Fabric enrichment warning:', fabErr.message);
+            }
+        }
+
+        // Ensure organizations.email is populated from contact_email
+        if (order.quotations?.organizations) {
+            order.quotations.organizations.email = order.quotations.organizations.contact_email || null;
         }
 
         res.json({

@@ -72,6 +72,55 @@ exports.listStudents = async (req, res) => {
       return res.json([]);
     }
 
+    // Ensure any members without department are linked to 'Main'
+    const targetOrgId = schoolId || (user.organizationId || user.schoolId);
+    const unassignedMembers = (members || []).filter(
+      (m) => !m.department_id || !m.departments
+    );
+    if (unassignedMembers.length > 0 && targetOrgId) {
+      try {
+        let { data: mainDept } = await supabase
+          .from("departments")
+          .select("*")
+          .eq("organization_id", targetOrgId)
+          .ilike("name", "Main")
+          .maybeSingle();
+
+        if (!mainDept) {
+          const { data: newDept } = await supabase
+            .from("departments")
+            .insert([
+              {
+                organization_id: targetOrgId,
+                name: "Main",
+                section: "Main",
+              },
+            ])
+            .select("*")
+            .single();
+          mainDept = newDept;
+        }
+
+        if (mainDept) {
+          const unassignedIds = unassignedMembers.map((m) => m.id);
+          await supabase
+            .from("registry_members")
+            .update({ department_id: mainDept.id })
+            .in("id", unassignedIds);
+
+          unassignedMembers.forEach((m) => {
+            m.department_id = mainDept.id;
+            m.departments = mainDept;
+          });
+        }
+      } catch (uErr) {
+        console.warn(
+          "[listStudents] Could not link unassigned members to Main:",
+          uErr.message,
+        );
+      }
+    }
+
     // 2. Aggregate Measurement Statuses for loaded members (Prioritize Pending over Approved)
     const memberIds = members.map((m) => m.id).filter(Boolean);
     let measurements = [];
@@ -97,6 +146,7 @@ exports.listStudents = async (req, res) => {
 
     const enriched = members.map((m) => ({
       ...m,
+      departments: m.departments || { name: "Main", section: "Main" },
       measurement_status: statusMap[String(m.id)] || "Missing",
     }));
 
@@ -223,7 +273,36 @@ exports.createStudent = async (req, res) => {
       .select()
       .single();
 
-    if (userError) throw userError;
+    // Auto-fallback to Main department if class_id is not supplied
+    let targetClassId = class_id;
+    if (!targetClassId && school_id) {
+      try {
+        let { data: mainDept } = await supabase
+          .from("departments")
+          .select("id")
+          .eq("organization_id", school_id)
+          .ilike("name", "Main")
+          .maybeSingle();
+
+        if (!mainDept) {
+          const { data: newDept } = await supabase
+            .from("departments")
+            .insert([
+              {
+                organization_id: school_id,
+                name: "Main",
+                section: "Main",
+              },
+            ])
+            .select("id")
+            .single();
+          mainDept = newDept;
+        }
+        if (mainDept) targetClassId = mainDept.id;
+      } catch (dErr) {
+        console.warn("[createStudent] Could not resolve Main department:", dErr.message);
+      }
+    }
 
     // 4. Create Student record linked to this user
     const { data: studentData, error: studentError } = await supabase
@@ -233,7 +312,7 @@ exports.createStudent = async (req, res) => {
           full_name,
           admission_no,
           organization_id: school_id,
-          department_id: class_id,
+          department_id: targetClassId,
           contact_mobile,
           gender,
           status: req.body.status || "Active",
@@ -505,7 +584,7 @@ exports.bulkCreateStudents = async (req, res) => {
 
       // Resolve department_id if given as string name or numeric ID
       let resolvedDeptId = null;
-      if (department_id) {
+      if (department_id && String(department_id).trim() !== "") {
         const lookupKey = `${organization_id}_${String(department_id).toLowerCase().trim()}`;
         if (deptMap.has(lookupKey)) {
           resolvedDeptId = deptMap.get(lookupKey);
@@ -520,6 +599,7 @@ exports.bulkCreateStudents = async (req, res) => {
                 {
                   organization_id,
                   name: String(department_id).trim(),
+                  section: String(department_id).trim(),
                 },
               ])
               .select("id, name")
@@ -539,6 +619,50 @@ exports.bulkCreateStudents = async (req, res) => {
             console.warn(
               "[BULK REGISTER] Could not auto-create department:",
               createDeptErr.message,
+            );
+          }
+        }
+      } else {
+        // Fallback to "Main" department when no department is specified
+        const mainLookupKey = `${organization_id}_main`;
+        if (deptMap.has(mainLookupKey)) {
+          resolvedDeptId = deptMap.get(mainLookupKey);
+        } else {
+          try {
+            let { data: mainDept } = await supabase
+              .from("departments")
+              .select("id, name")
+              .eq("organization_id", organization_id)
+              .ilike("name", "Main")
+              .maybeSingle();
+
+            if (!mainDept) {
+              const { data: newDept } = await supabase
+                .from("departments")
+                .insert([
+                  {
+                    organization_id,
+                    name: "Main",
+                    section: "Main",
+                  },
+                ])
+                .select("id, name")
+                .single();
+              mainDept = newDept;
+            }
+
+            if (mainDept) {
+              resolvedDeptId = mainDept.id;
+              deptMap.set(mainLookupKey, mainDept.id);
+              deptMap.set(
+                `${organization_id}_${String(mainDept.id)}`,
+                mainDept.id,
+              );
+            }
+          } catch (mainDeptErr) {
+            console.warn(
+              "[BULK REGISTER] Could not auto-create/fetch Main department:",
+              mainDeptErr.message,
             );
           }
         }

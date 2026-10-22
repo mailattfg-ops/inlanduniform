@@ -37,7 +37,7 @@ exports.getDepartments = async (req, res) => {
       query = query.eq("organization_id", orgId);
     }
 
-    const { data, error } = await query;
+    let { data, error } = await query;
     if (error) {
       console.error('❌ [DATABASE ERROR] Table "departments" query failed:');
       console.error('  Code:', error.code, '| Message:', error.message);
@@ -47,6 +47,46 @@ exports.getDepartments = async (req, res) => {
         console.error('  Hint: A referenced column does not exist on departments or joined organizations.');
       }
       return res.status(500).json({ error: error.message, code: error.code });
+    }
+
+    // Auto-create default 'Main' department if target organization has no departments
+    const targetOrgId = userOrgId || orgId;
+    if (targetOrgId && (!data || data.length === 0)) {
+      try {
+        const { data: defaultDept } = await supabase
+          .from("departments")
+          .insert([
+            {
+              organization_id: targetOrgId,
+              name: "Main",
+              section: "Main",
+            },
+          ])
+          .select("*, organizations(name)")
+          .single();
+
+        if (defaultDept) {
+          data = [defaultDept];
+          await supabase
+            .from("registry_members")
+            .update({ department_id: defaultDept.id })
+            .eq("organization_id", targetOrgId)
+            .is("department_id", null);
+        }
+      } catch (deptErr) {
+        console.warn("[getDepartments] Could not auto-create default Main department:", deptErr.message);
+      }
+    } else if (targetOrgId && data && data.length > 0) {
+      const mainDept = data.find(
+        (d) => (d.name || "").trim().toLowerCase() === "main"
+      );
+      if (mainDept) {
+        await supabase
+          .from("registry_members")
+          .update({ department_id: mainDept.id })
+          .eq("organization_id", targetOrgId)
+          .is("department_id", null);
+      }
     }
 
     // Map 'section' column to 'division' for frontend consistency
@@ -64,7 +104,7 @@ exports.getDepartments = async (req, res) => {
 };
 
 exports.createDepartment = async (req, res) => {
-  const { orgId, name, division, grade } = req.body;
+  const { orgId, name, division, grade, migration } = req.body;
   try {
     const { data, error } = await supabase
       .from("departments")
@@ -80,9 +120,62 @@ exports.createDepartment = async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    let migratedMembersCount = 0;
+    let mainDeptDeleted = false;
+
+    // Handle migration from default Main department if requested
+    if (migration && migration.mainDeptId) {
+      const { replaceMainDept, migrateMembersFromMain, mainDeptId } = migration;
+
+      if (migrateMembersFromMain) {
+        // Move members assigned to mainDeptId to the new department
+        const { data: m1 } = await supabase
+          .from("registry_members")
+          .update({ department_id: data.id })
+          .eq("organization_id", orgId)
+          .eq("department_id", mainDeptId)
+          .select("id");
+
+        // Also assign any unassigned members of this customer to new department
+        const { data: m2 } = await supabase
+          .from("registry_members")
+          .update({ department_id: data.id })
+          .eq("organization_id", orgId)
+          .is("department_id", null)
+          .select("id");
+
+        migratedMembersCount = (m1?.length || 0) + (m2?.length || 0);
+      }
+
+      if (replaceMainDept) {
+        // If members weren't moved to new department, clear foreign keys so delete succeeds
+        if (!migrateMembersFromMain) {
+          await supabase
+            .from("registry_members")
+            .update({ department_id: null })
+            .eq("organization_id", orgId)
+            .eq("department_id", mainDeptId);
+        }
+
+        const { error: delErr } = await supabase
+          .from("departments")
+          .delete()
+          .eq("id", mainDeptId);
+
+        if (!delErr) {
+          mainDeptDeleted = true;
+        } else {
+          console.warn("[createDepartment] Could not delete main department:", delErr.message);
+        }
+      }
+    }
+
     res.json({
       success: true,
       data: { ...data, division: data.section },
+      migratedMembersCount,
+      mainDeptDeleted,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,13 +1,21 @@
 const supabase = require('../config/supabase');
 
 const parseMaterialsMetadata = (rawText) => {
-    if (!rawText) return { main_fabric_id: null, attachment_fabric1_id: null, attachment_fabric2_id: null, main_fabric_meters: null, cleanMaterials: '' };
+    if (!rawText) return { main_fabric_id: null, attachment_fabric1_id: null, attachment_fabric2_id: null, main_fabric_meters: null, description: null, cleanMaterials: '' };
     
     let text = rawText;
     let main_fabric_id = null;
     let attachment_fabric1_id = null;
     let attachment_fabric2_id = null;
     let main_fabric_meters = null;
+    let description = null;
+
+    // Parse description if serialized
+    const descMatch = text.match(/\[Description:\s*([^\]]+)\]/);
+    if (descMatch) {
+        description = descMatch[1].trim();
+        text = text.replace(/\[Description:\s*([^\]]+)\]/, '').trim();
+    }
 
     // Parse main_fabric_id
     const mainMatch = text.match(/\[MainFabricId:\s*([^\]]+)\]/);
@@ -38,11 +46,12 @@ const parseMaterialsMetadata = (rawText) => {
         text = text.replace(/\[AttachmentFabric2Id:\s*([^\]]+)\]/, '').trim();
     }
 
-    return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters, cleanMaterials: text };
+    return { main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters, description, cleanMaterials: text };
 };
 
-const serializeMaterialsMetadata = (materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters) => {
+const serializeMaterialsMetadata = (materials, main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, main_fabric_meters, description) => {
     let text = materials || '';
+    if (description && description.trim()) text = `[Description: ${description.trim()}] ${text}`;
     if (main_fabric_id) text = `[MainFabricId: ${main_fabric_id}] ${text}`;
     if (attachment_fabric1_id) text = `[AttachmentFabric1Id: ${attachment_fabric1_id}] ${text}`;
     if (attachment_fabric2_id) text = `[AttachmentFabric2Id: ${attachment_fabric2_id}] ${text}`;
@@ -297,6 +306,7 @@ exports.listProducts = async (req, res) => {
 
             return {
                 ...p,
+                description: p.description || meta.description || null,
                 main_fabric: resolvedMainFabric,
                 main_fabric_meters: resolvedMainFabric,
                 design_number: dnMap[p.design_number_id] || null,
@@ -443,7 +453,7 @@ async function safeUpdateProduct(id, payload) {
 exports.createProduct = async (req, res) => {
     try {
         let { 
-            name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
+            name, art_number, gender, measurements, materials, description, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value, base_price,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
             other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
@@ -502,13 +512,15 @@ exports.createProduct = async (req, res) => {
             main_fabric_id,
             attachment_fabric1_id,
             attachment_fabric2_id,
-            main_fabric
+            main_fabric,
+            description
         );
         
         const insertPayload = { 
             name, 
             art_number, 
             gender, 
+            description: description || null,
             measurements, 
             materials: serializedMaterials, 
             ...(entry_methods !== undefined ? { entry_methods } : {}), 
@@ -517,6 +529,7 @@ exports.createProduct = async (req, res) => {
             product_type_id, 
             sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
             retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+            base_price: base_price !== '' && base_price !== null && base_price !== undefined ? parseFloat(base_price) : 0,
             main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
             attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
             attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,
@@ -613,7 +626,7 @@ exports.updateProduct = async (req, res) => {
     try {
         const { id } = req.params;
         let { 
-            name, art_number, gender, measurements, materials, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value,
+            name, art_number, gender, measurements, materials, description, entry_methods, size_chart_id, category, product_type_id, sam_value, retail_sam_value, base_price,
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
             other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
@@ -668,13 +681,14 @@ exports.updateProduct = async (req, res) => {
             main_fabric_id,
             attachment_fabric1_id,
             attachment_fabric2_id,
-            main_fabric
+            main_fabric,
+            description
         );
 
         // Fetch current base product values to detect button/thread changes
         const { data: currentProduct } = await supabase
             .from('products')
-            .select('button_id, thread_id, button_count, thread_count, design_number_id')
+            .select('button_id, thread_id, button_count, thread_count, design_number_id, base_price')
             .eq('id', id)
             .maybeSingle();
 
@@ -731,6 +745,7 @@ exports.updateProduct = async (req, res) => {
                 name, 
                 art_number, 
                 gender, 
+                description: description || null,
                 measurements, 
                 materials: serializedMaterials, 
                 ...(entry_methods !== undefined ? { entry_methods } : {}), 
@@ -739,6 +754,7 @@ exports.updateProduct = async (req, res) => {
                 product_type_id, 
                 sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
                 retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+                base_price: base_price !== '' && base_price !== null && base_price !== undefined ? parseFloat(base_price) : (currentProduct?.base_price !== undefined ? currentProduct.base_price : 0),
                 main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
                 attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
                 attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,
@@ -780,6 +796,7 @@ exports.updateProduct = async (req, res) => {
             name, 
             art_number, 
             gender, 
+            description: description || null,
             measurements, 
             materials: serializedMaterials, 
             ...(entry_methods !== undefined ? { entry_methods } : {}), 
@@ -788,6 +805,7 @@ exports.updateProduct = async (req, res) => {
             product_type_id, 
             sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
             retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
+            base_price: base_price !== '' && base_price !== null && base_price !== undefined ? parseFloat(base_price) : 0,
             main_fabric: main_fabric !== '' && main_fabric !== null && main_fabric !== undefined ? parseFloat(main_fabric) : 0,
             attachment_fabric1: attachment_fabric1 !== '' && attachment_fabric1 !== null && attachment_fabric1 !== undefined ? parseFloat(attachment_fabric1) : null,
             attachment_fabric2: attachment_fabric2 !== '' && attachment_fabric2 !== null && attachment_fabric2 !== undefined ? parseFloat(attachment_fabric2) : null,

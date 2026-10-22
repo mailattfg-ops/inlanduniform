@@ -2176,6 +2176,81 @@ exports.updateQuotation = async (req, res) => {
     // Auto-update fabrics latest_sam values from quotation
     await updateFabricLatestSAMs(items);
 
+    // Auto-advance linked lead to Deals (SO Draft) upon Ops quotation approval
+    if (quote.status === "Approved" && organization_id) {
+      try {
+        let { data: matchedLeads } = await supabase
+          .from("leads")
+          .select("id, status, remarks")
+          .eq("organization_id", organization_id);
+
+        if (!matchedLeads || matchedLeads.length === 0) {
+          const { data: org } = await supabase
+            .from("organizations")
+            .select("name")
+            .eq("id", organization_id)
+            .maybeSingle();
+
+          if (org && org.name) {
+            const { data: leadsByName } = await supabase
+              .from("leads")
+              .select("id, status, remarks")
+              .ilike("name", org.name.trim());
+            matchedLeads = leadsByName;
+          }
+        }
+
+        if (matchedLeads && matchedLeads.length > 0) {
+          const now = new Date();
+          const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+          const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+          for (const ml of matchedLeads) {
+            if (ml.status !== "SO Converted Deals") {
+              let curRemarks = Array.isArray(ml.remarks) ? [...ml.remarks] : [];
+              curRemarks.push({
+                date: dateStr,
+                time: timeStr,
+                text: `Quotation #${quote.quotation_no || id} approved by Operations Team. Advanced to Deals as SO Draft.`,
+                stage: "Deals",
+                response_type: "positive",
+                author: {
+                  name: req.user?.fullName || req.user?.full_name || "Operations Team",
+                  role: "Operations"
+                }
+              });
+
+              await supabase
+                .from("leads")
+                .update({
+                  status: "Deals",
+                  remarks: curRemarks,
+                  updated_at: new Date()
+                })
+                .eq("id", ml.id);
+
+              await supabase.from("lead_stage_history").insert([{
+                lead_id: ml.id,
+                stage: "Deals",
+                transition_reason: `Quotation #${quote.quotation_no || id} approved by Operations Team (SO Draft)`
+              }]).catch(() => {});
+
+              await supabase.from("lead_activities").insert([{
+                lead_id: ml.id,
+                stage: "Deals",
+                activity_type: "quotation_approved_by_ops",
+                performed_by_name: req.user?.fullName || req.user?.full_name || "Operations Team",
+                notes: `Quotation #${quote.quotation_no || id} approved by Operations Team. Pipeline advanced to Deals as SO Draft.`,
+                outcome: "deal_won"
+              }]).catch(() => {});
+            }
+          }
+        }
+      } catch (leadAdvErr) {
+        console.warn("Could not auto-advance lead to Deals upon Ops approval:", leadAdvErr.message);
+      }
+    }
+
     // Log action if available
     try {
       const { logAction } = require("../utils/logger");
@@ -3790,3 +3865,111 @@ exports.resolveDesignNumber = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// Log follow-up activity on quotation
+exports.logQuotationFollowUp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      outcome,
+      response_type,
+      responseType,
+      remarks,
+      text,
+      next_followup_date,
+      nextFollowUpDate
+    } = req.body;
+
+    const note = (remarks || text || '').toString().trim();
+    if (!note) {
+      return res.status(400).json({ error: 'Follow-up remarks are required' });
+    }
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const followUpOutcome = response_type || responseType || outcome || 'hold';
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Sales Representative';
+    const now = new Date();
+    const newFollowUp = {
+      id: Date.now(),
+      created_at: now.toISOString(),
+      date: now.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }),
+      time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      response_type: followUpOutcome,
+      outcome: followUpOutcome,
+      remarks: note,
+      next_followup_date: next_followup_date || nextFollowUpDate || null,
+      author: {
+        name: authorName,
+        email: req.user?.email || null,
+        role: req.user?.role || 'Staff'
+      }
+    };
+
+    const curFollowups = Array.isArray(quotation.metrics_summary?.followups)
+      ? quotation.metrics_summary.followups
+      : [];
+    const updatedMetrics = {
+      ...(quotation.metrics_summary || {}),
+      followups: [newFollowUp, ...curFollowups],
+      last_followup: newFollowUp,
+      last_followup_at: now.toISOString()
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to update quotation with follow-up' });
+    }
+
+    // Also mirror to active lead if organization_id matches
+    if (quotation.organization_id) {
+      try {
+        const { data: leads } = await supabase
+          .from('leads')
+          .select('id, status, remarks')
+          .eq('organization_id', quotation.organization_id)
+          .limit(1);
+
+        if (leads && leads.length > 0) {
+          const lead = leads[0];
+          await supabase.from('lead_activities').insert([{
+            lead_id: lead.id,
+            stage: 'Quotations',
+            activity_type: 'Quotation Follow-up',
+            response_type: followUpOutcome,
+            outcome: followUpOutcome,
+            remarks: `[Quote #${quotation.quotation_no}] ${note}`,
+            performed_by: req.user?.id || null,
+            created_at: now.toISOString()
+          }]);
+        }
+      } catch (mirrorErr) {
+        console.warn('Could not mirror quotation follow-up to lead activities:', mirrorErr.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Follow-up recorded successfully',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.logQuotationFollowUp] Error:', err);
+    return res.status(500).json({ error: 'Internal server error logging follow-up' });
+  }
+};
+

@@ -130,12 +130,29 @@ exports.fabrics = {
         finalCode = await generateNextFabricCodeLocal();
       }
 
+      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      let finalName = name;
+      const parts = [garment_category, brand_name, quality, shade]
+        .map((s) => (s || "").toString().trim())
+        .filter(Boolean);
+      let standardName = parts.join(" - ");
+      if (width && width.toString().trim()) {
+        const w = width.toString().trim();
+        const widthStr = w.endsWith('"') ? w : `${w}"`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+      }
+      if (standardName) {
+        finalName = standardName;
+      } else if (!finalName || finalName.trim() === "") {
+        finalName = finalCode || "Unnamed Fabric";
+      }
+
       const { data, error } = await supabase
         .from("fabrics")
         .insert([
           {
             code: finalCode,
-            name,
+            name: finalName,
             brand_name: brand_name || null,
             quantity: quantity || 0,
             shade: shade || null,
@@ -182,11 +199,26 @@ exports.fabrics = {
       garment_category,
     } = req.body;
     try {
+      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      let finalName = name;
+      const parts = [garment_category, brand_name, quality, shade]
+        .map((s) => (s || "").toString().trim())
+        .filter(Boolean);
+      let standardName = parts.join(" - ");
+      if (width && width.toString().trim()) {
+        const w = width.toString().trim();
+        const widthStr = w.endsWith('"') ? w : `${w}"`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+      }
+      if (standardName) {
+        finalName = standardName;
+      }
+
       const { data, error } = await supabase
         .from("fabrics")
         .update({
           code,
-          name,
+          name: finalName,
           brand_name: brand_name || null,
           quantity: quantity || 0,
           shade: shade || null,

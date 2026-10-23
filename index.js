@@ -49,6 +49,10 @@ app.use("/api/accessories", (req, res, next) => {
   req.url = "/accessory-categories" + (req.url === "/" ? "" : req.url);
   require("./routes/inventory.js")(req, res, next);
 });
+app.use("/api/purchase-orders", (req, res, next) => {
+  req.url = "/purchase-orders" + (req.url === "/" ? "" : req.url);
+  require("./routes/inventory.js")(req, res, next);
+});
 app.use("/api/dashboard", require("./routes/dashboard.js"));
 app.use("/api/size-charts", require("./routes/size-charts.js"));
 app.use("/api/audit", require("./routes/audit.js"));

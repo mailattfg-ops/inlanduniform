@@ -260,7 +260,7 @@ exports.createInvoiceFromOrder = async (req, res) => {
             return res.status(400).json({ error: 'order_id is required' });
         }
 
-        // Fetch Order with Quotation & Items
+        // Fetch Order with Quotation & Organization
         const { data: order, error: orderErr } = await supabase
             .from('orders')
             .select(`
@@ -282,15 +282,18 @@ exports.createInvoiceFromOrder = async (req, res) => {
                     organizations (
                         id,
                         name,
+                        address,
+                        city,
+                        state,
+                        pincode,
+                        country,
+                        gst_number,
                         credit_period_days,
-                        client_tag
-                    ),
-                    quotation_items (
-                        id,
-                        product_type_id,
-                        unit_price,
-                        quantity,
-                        product_types (name)
+                        client_tag,
+                        contact_person,
+                        phone,
+                        email,
+                        delivery_address
                     )
                 )
             `)
@@ -311,30 +314,60 @@ exports.createInvoiceFromOrder = async (req, res) => {
             ? parseInt(credit_period_days, 10) 
             : (org?.credit_period_days ? parseInt(org.credit_period_days, 10) : 30);
 
+        // Fetch quotation items directly to guarantee complete item specifications
+        let qItems = [];
+        if (quote?.id) {
+            const { data: directQItems } = await supabase
+                .from('quotation_items')
+                .select('*, product_types(name)')
+                .eq('quotation_id', quote.id);
+            if (directQItems && directQItems.length > 0) {
+                qItems = directQItems;
+            } else {
+                const { data: fallbackQItems } = await supabase
+                    .from('quotation_items')
+                    .select('*')
+                    .eq('quotation_id', quote.id);
+                qItems = fallbackQItems || [];
+            }
+        }
+
         // Convert quotation items to invoice items
         let invoiceItems = [];
-        const qItems = quote?.quotation_items || [];
+        const effectiveTaxRate = parseFloat(quote?.tax_rate !== undefined && quote?.tax_rate !== null ? quote.tax_rate : 5);
 
         if (qItems.length > 0) {
-            invoiceItems = qItems.map(qi => ({
-                item_description: qi.product_types?.name || `Order Item #${qi.id}`,
-                quantity: qi.quantity || 1,
-                unit_price: parseFloat(qi.unit_price || 0),
-                tax_rate: parseFloat(quote.tax_rate || 5)
-            }));
+            invoiceItems = qItems.map((qi, idx) => {
+                const pType = qi.product_types?.name || qi.product_type_name || '';
+                const spec = qi.specification || qi.sub_details || qi.product_name || qi.name || '';
+                const desc = (pType && spec) ? `${pType} - ${spec}` : (pType || spec || qi.item_description || `Order Item #${idx + 1}`);
+
+                return {
+                    item_description: desc,
+                    design_number: qi.design_number || qi.art_number || null,
+                    barcode: qi.barcode || null,
+                    quantity: parseInt(qi.quantity || qi.total_qty || 1, 10),
+                    unit_price: parseFloat(qi.unit_price || qi.final_unit_price || 0),
+                    tax_rate: parseFloat(qi.tax_rate !== undefined && qi.tax_rate !== null ? qi.tax_rate : effectiveTaxRate)
+                };
+            });
         } else if (Array.isArray(order.items) && order.items.length > 0) {
             invoiceItems = order.items.map((oi, idx) => ({
-                item_description: oi.name || oi.product_name || `Item ${idx + 1}`,
-                quantity: oi.quantity || 1,
+                item_description: oi.name || oi.product_name || oi.item_description || `Item ${idx + 1}`,
+                design_number: oi.design_number || oi.art_number || null,
+                barcode: oi.barcode || null,
+                quantity: parseInt(oi.quantity || 1, 10),
                 unit_price: parseFloat(oi.unit_price || (parseFloat(quote?.final_quote_value || 0) / (oi.quantity || 1))),
-                tax_rate: parseFloat(quote?.tax_rate || 5)
+                tax_rate: effectiveTaxRate
             }));
         } else {
             invoiceItems = [{
-                item_description: `Bulk Order Execution: ${order.order_no} (${quote?.title || 'Custom Uniforms'})`,
+                item_description: `Sales Order Execution: ${order.order_no} (${quote?.title || 'Custom Uniforms'})`,
+                design_number: null,
+                barcode: null,
                 quantity: 1,
                 unit_price: parseFloat(quote?.final_quote_value || 0),
-                tax_rate: parseFloat(quote?.tax_rate || 5)
+                tax_rate: effectiveTaxRate
             }];
         }
 
@@ -353,7 +386,7 @@ exports.createInvoiceFromOrder = async (req, res) => {
             payment_status: 'Unpaid',
             paid_amount: 0,
             items: invoiceItems,
-            notes: notes || `Generated from Sales Order ${order.order_no}`
+            notes: notes || `Generated against Sales Order ${order.order_no}`
         };
 
         return exports.createInvoice(req, res);
@@ -523,13 +556,30 @@ exports.deleteInvoice = async (req, res) => {
     }
 };
 
-// 6. Get Single Invoice by ID (with Line Items and due info)
+// 6. Get Single Invoice by ID (with Line Items, organization info, and due info)
 exports.getInvoiceById = async (req, res) => {
     try {
         const { id } = req.params;
         const { data: invoice, error } = await supabase
             .from('invoices')
-            .select('*, invoice_items(*), orders(id, order_no)')
+            .select(`
+                *,
+                invoice_items(*),
+                orders (
+                    id,
+                    order_no,
+                    status,
+                    quotations (
+                        id,
+                        quotation_no,
+                        title,
+                        tax_rate,
+                        is_tax_inclusive,
+                        organizations (*)
+                    )
+                ),
+                organizations (*)
+            `)
             .eq('id', id)
             .single();
 
@@ -545,7 +595,15 @@ exports.getInvoiceById = async (req, res) => {
             invoice.total_amount
         );
 
-        res.json({ ...invoice, order_no: invoice.orders?.order_no || null, ...dueInfo });
+        const orderNo = invoice.orders?.order_no || null;
+        const customerProfile = invoice.organizations || invoice.orders?.quotations?.organizations || null;
+
+        res.json({
+            ...invoice,
+            order_no: orderNo,
+            customer: customerProfile,
+            ...dueInfo
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

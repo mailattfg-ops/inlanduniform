@@ -25,8 +25,8 @@ async function ensureStockRecord(productId, size) {
           product_id: productId,
           size: size,
           quantity: 0,
-          reserved_quantity: 0,
           low_stock_threshold: 5,
+          updated_at: new Date(),
         },
       ])
       .select()

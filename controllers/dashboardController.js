@@ -154,7 +154,7 @@ exports.getStats = async (req, res) => {
             supabase.from('buttons').select('*', { count: 'exact', head: true }),
             supabase.from('trims').select('*', { count: 'exact', head: true }),
             supabase.from('quotations').select('id, final_quote_value, paid_amount, payment_status, status'),
-            supabase.from('orders').select('id, order_no, status, barcode, created_at, quotations(id, quotation_no, title, final_quote_value, paid_amount, payment_status, organizations(name))').order('created_at', { ascending: false }),
+            supabase.from('orders').select('id, order_no, status, barcode, created_at, quotations(id, quotation_no, title, final_quote_value, paid_amount, payment_status, expected_delivery_date, organizations(name))').order('created_at', { ascending: false }),
             supabase.from('job_cards').select('id, job_card_no, status, notes, created_at'),
             supabase.from('registry_members').select('*', { count: 'exact', head: true }).gte('created_at', firstDayOfMonth)
         ]);
@@ -171,23 +171,78 @@ exports.getStats = async (req, res) => {
         const jobCards = jobCardsRes.data || [];
         const newMembersThisMonth = newMembersRes.count || 0;
 
-        // Live Financial Stats from Quotations
-        let totalContractValue = 0;
-        let collectedRevenue = 0;
+        // 1. Quotations Telemetry (Proposal pipeline)
+        let pendingQuotationsCount = 0;
         let paidQuotationsCount = 0;
         let partialQuotationsCount = 0;
-        let pendingQuotationsCount = 0;
-
         quotations.forEach(q => {
-            const val = parseFloat(q.final_quote_value) || 0;
-            const paid = parseFloat(q.paid_amount) || 0;
-            totalContractValue += val;
-            collectedRevenue += paid;
             if (q.payment_status === 'Paid') paidQuotationsCount++;
             else if (q.payment_status === 'Partially Paid') partialQuotationsCount++;
             else pendingQuotationsCount++;
         });
-        const outstandingBalance = Math.max(0, totalContractValue - collectedRevenue);
+
+        // 2. Live Financial Stats strictly from Sales Orders (Confirmed Commercial Orders)
+        let totalSalesOrderValue = 0;
+        let collectedSalesOrderRevenue = 0;
+        let paidOrdersCount = 0;
+        let partialOrdersCount = 0;
+        let unpaidOrdersCount = 0;
+        let dueOrdersCount = 0;
+        let dueAmount = 0;
+        let overdueOrdersCount = 0;
+        let overdueAmount = 0;
+        const overdueOrdersList = [];
+
+        const todayDateStr = new Date().toISOString().split('T')[0];
+
+        orders.forEach(o => {
+            const st = (o.status || '').toLowerCase();
+            if (['cancelled', 'corporate rejected'].includes(st)) {
+                return;
+            }
+
+            const quoteVal = parseFloat(o.quotations?.final_quote_value) || 0;
+            const paidVal = parseFloat(o.quotations?.paid_amount) || 0;
+            const balance = Math.max(0, quoteVal - paidVal);
+
+            totalSalesOrderValue += quoteVal;
+            collectedSalesOrderRevenue += paidVal;
+
+            if (paidVal >= quoteVal && quoteVal > 0) {
+                paidOrdersCount++;
+            } else if (paidVal > 0) {
+                partialOrdersCount++;
+            } else {
+                unpaidOrdersCount++;
+            }
+
+            // Check for Due / Overdue receivables
+            if (balance > 0) {
+                dueOrdersCount++;
+                dueAmount += balance;
+
+                const deliveryDate = o.quotations?.expected_delivery_date
+                    ? String(o.quotations.expected_delivery_date).split('T')[0]
+                    : null;
+
+                // Overdue: if expected delivery date is past today
+                if (deliveryDate && deliveryDate < todayDateStr) {
+                    overdueOrdersCount++;
+                    overdueAmount += balance;
+
+                    overdueOrdersList.push({
+                        id: o.id,
+                        order_no: o.order_no,
+                        client_name: o.quotations?.organizations?.name || 'Client',
+                        balance: parseFloat(balance.toFixed(2)),
+                        delivery_date: deliveryDate,
+                        order_status: o.status
+                    });
+                }
+            }
+        });
+
+        const outstandingBalance = Math.max(0, totalSalesOrderValue - collectedSalesOrderRevenue);
 
         // Live Orders & Pipeline from Orders
         let activeOrdersCount = 0;
@@ -208,19 +263,30 @@ exports.getStats = async (req, res) => {
             }
         });
 
-        const recentOrders = orders.slice(0, 5).map(o => ({
-            id: o.id,
-            order_no: o.order_no,
-            status: o.status,
-            barcode: o.barcode,
-            created_at: o.created_at,
-            client_name: o.quotations?.organizations?.name || 'Client',
-            title: o.quotations?.title || 'Uniform Order',
-            quotation_no: o.quotations?.quotation_no,
-            quote_value: parseFloat(o.quotations?.final_quote_value || 0),
-            paid_amount: parseFloat(o.quotations?.paid_amount || 0),
-            payment_status: o.quotations?.payment_status || 'Pending'
-        }));
+        const recentOrders = orders.slice(0, 5).map(o => {
+            const quoteVal = parseFloat(o.quotations?.final_quote_value || 0);
+            const paidVal = parseFloat(o.quotations?.paid_amount || 0);
+            const balance = Math.max(0, quoteVal - paidVal);
+            const deliveryDateStr = o.quotations?.expected_delivery_date ? String(o.quotations.expected_delivery_date).split('T')[0] : null;
+            const isOverdue = balance > 0 && deliveryDateStr && deliveryDateStr < todayDateStr;
+
+            return {
+                id: o.id,
+                order_no: o.order_no,
+                status: o.status,
+                barcode: o.barcode,
+                created_at: o.created_at,
+                client_name: o.quotations?.organizations?.name || 'Client',
+                title: o.quotations?.title || 'Uniform Order',
+                quotation_no: o.quotations?.quotation_no,
+                quote_value: quoteVal,
+                paid_amount: paidVal,
+                balance: parseFloat(balance.toFixed(2)),
+                payment_status: o.quotations?.payment_status || (paidVal >= quoteVal ? 'Paid' : paidVal > 0 ? 'Partially Paid' : 'Pending'),
+                delivery_date: deliveryDateStr,
+                is_overdue: Boolean(isOverdue)
+            };
+        });
 
         // Live Job Cards & Production Floor Status
         let totalJobCards = jobCards.length;
@@ -253,10 +319,24 @@ exports.getStats = async (req, res) => {
             measurementCompletionRate,
             newMembersThisMonth: newMembersThisMonth || 0,
 
-            // Financial & Commercial Pipeline (Real Values)
-            totalContractValue: parseFloat(totalContractValue.toFixed(2)),
-            collectedRevenue: parseFloat(collectedRevenue.toFixed(2)),
+            // Financial & Commercial Pipeline strictly from Sales Orders
+            totalContractValue: parseFloat(totalSalesOrderValue.toFixed(2)),
+            collectedRevenue: parseFloat(collectedSalesOrderRevenue.toFixed(2)),
             outstandingBalance: parseFloat(outstandingBalance.toFixed(2)),
+
+            // Real Sales Order Payment & Due Telemetry
+            paidOrdersCount,
+            partialOrdersCount,
+            unpaidOrdersCount,
+            dueOrdersCount,
+            dueAmount: parseFloat(dueAmount.toFixed(2)),
+            overdueOrdersCount,
+            overdueAmount: parseFloat(overdueAmount.toFixed(2)),
+            overdueOrdersList: overdueOrdersList.slice(0, 5),
+            hasOverdue: overdueOrdersCount > 0,
+            hasDue: dueOrdersCount > 0,
+
+            // Legacy quotation states
             paidQuotationsCount,
             partialQuotationsCount,
             pendingQuotationsCount,

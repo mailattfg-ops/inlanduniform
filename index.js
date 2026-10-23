@@ -36,6 +36,23 @@ app.use("/api/art-number-hub", require("./routes/artNumberHub.js"));
 app.use("/api/templates", require("./routes/template.js"));
 app.use("/api/staff-measurements", require("./routes/staffMeasurement.js"));
 app.use("/api/inventory", require("./routes/inventory.js"));
+// Direct aliases for fabrics, trims, and accessories
+app.use("/api/fabrics", (req, res, next) => {
+  req.url = "/fabrics" + (req.url === "/" ? "" : req.url);
+  require("./routes/inventory.js")(req, res, next);
+});
+app.use("/api/trims", (req, res, next) => {
+  req.url = "/trims" + (req.url === "/" ? "" : req.url);
+  require("./routes/inventory.js")(req, res, next);
+});
+app.use("/api/accessories", (req, res, next) => {
+  req.url = "/accessory-categories" + (req.url === "/" ? "" : req.url);
+  require("./routes/inventory.js")(req, res, next);
+});
+app.use("/api/purchase-orders", (req, res, next) => {
+  req.url = "/purchase-orders" + (req.url === "/" ? "" : req.url);
+  require("./routes/inventory.js")(req, res, next);
+});
 app.use("/api/dashboard", require("./routes/dashboard.js"));
 app.use("/api/size-charts", require("./routes/size-charts.js"));
 app.use("/api/audit", require("./routes/audit.js"));

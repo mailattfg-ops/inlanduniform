@@ -130,12 +130,29 @@ exports.fabrics = {
         finalCode = await generateNextFabricCodeLocal();
       }
 
+      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      let finalName = name;
+      const parts = [garment_category, brand_name, quality, shade]
+        .map((s) => (s || "").toString().trim())
+        .filter(Boolean);
+      let standardName = parts.join(" - ");
+      if (width && width.toString().trim()) {
+        const w = width.toString().trim();
+        const widthStr = w.endsWith('"') ? w : `${w}"`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+      }
+      if (standardName) {
+        finalName = standardName;
+      } else if (!finalName || finalName.trim() === "") {
+        finalName = finalCode || "Unnamed Fabric";
+      }
+
       const { data, error } = await supabase
         .from("fabrics")
         .insert([
           {
             code: finalCode,
-            name,
+            name: finalName,
             brand_name: brand_name || null,
             quantity: quantity || 0,
             shade: shade || null,
@@ -182,11 +199,26 @@ exports.fabrics = {
       garment_category,
     } = req.body;
     try {
+      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      let finalName = name;
+      const parts = [garment_category, brand_name, quality, shade]
+        .map((s) => (s || "").toString().trim())
+        .filter(Boolean);
+      let standardName = parts.join(" - ");
+      if (width && width.toString().trim()) {
+        const w = width.toString().trim();
+        const widthStr = w.endsWith('"') ? w : `${w}"`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+      }
+      if (standardName) {
+        finalName = standardName;
+      }
+
       const { data, error } = await supabase
         .from("fabrics")
         .update({
           code,
-          name,
+          name: finalName,
           brand_name: brand_name || null,
           quantity: quantity || 0,
           shade: shade || null,
@@ -1337,9 +1369,41 @@ exports.purchaseOrders = {
 
       if (itemsErr) throw itemsErr;
 
-      // Populate fabric and trim references safely
+      // Populate fabric, trim, and product references safely
       const fabricIds = (rawItems || []).map(i => i.fabric_id).filter(Boolean);
       const trimIds = (rawItems || []).map(i => i.trim_id).filter(Boolean);
+
+      // Extract product IDs
+      const productItemMap = new Map();
+      const productIds = [];
+      (rawItems || []).forEach(item => {
+        let pId = null;
+        let pSize = null;
+        let pName = null;
+        let pArt = null;
+
+        if (item.item_name) {
+          if (item.item_name.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(item.item_name);
+              pId = parsed.product_id;
+              pSize = parsed.size;
+              pName = parsed.name;
+              pArt = parsed.art_number;
+            } catch (e) {}
+          } else if (item.item_name.startsWith('PRODUCT:')) {
+            const parts = item.item_name.split(':');
+            pId = parts[1];
+            pSize = parts[2] || 'M';
+            pName = parts.slice(3).join(':');
+          }
+        }
+
+        if (pId) {
+          productIds.push(pId);
+          productItemMap.set(item.id, { product_id: pId, size: pSize, name: pName, art_number: pArt });
+        }
+      });
 
       const fabricsMap = new Map();
       if (fabricIds.length > 0) {
@@ -1382,11 +1446,37 @@ exports.purchaseOrders = {
         }
       }
 
-      const populatedItems = (rawItems || []).map(item => ({
-        ...item,
-        fabrics: item.fabric_id ? fabricsMap.get(String(item.fabric_id)) : null,
-        trims: item.trim_id ? trimsMap.get(String(item.trim_id)) : null
-      }));
+      const productsMap = new Map();
+      if (productIds.length > 0) {
+        const { data: prodData } = await supabase
+          .from("products")
+          .select("id, name, art_number, category, base_size")
+          .in("id", productIds);
+        (prodData || []).forEach(p => productsMap.set(String(p.id), p));
+      }
+
+      const populatedItems = (rawItems || []).map(item => {
+        const pMeta = productItemMap.get(item.id);
+        const productFromDb = pMeta ? productsMap.get(String(pMeta.product_id)) : null;
+
+        let productObj = null;
+        if (pMeta || item.item_type === 'product') {
+          productObj = {
+            id: pMeta?.product_id || null,
+            name: productFromDb?.name || pMeta?.name || item.item_name || 'Finished Product',
+            art_number: productFromDb?.art_number || pMeta?.art_number || 'N/A',
+            size: pMeta?.size || productFromDb?.base_size || 'M',
+            category: productFromDb?.category || 'Product'
+          };
+        }
+
+        return {
+          ...item,
+          fabrics: item.fabric_id ? fabricsMap.get(String(item.fabric_id)) : null,
+          trims: item.trim_id ? trimsMap.get(String(item.trim_id)) : null,
+          products: productObj
+        };
+      });
 
       res.json({
         ...po,
@@ -1399,7 +1489,8 @@ exports.purchaseOrders = {
   create: async (req, res) => {
     const { supplier_name, notes, items } = req.body;
     try {
-      const poNumber = `PO-MAN-${Date.now().toString().slice(-6)}`;
+      const isUUID = (str) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str.trim());
+      const poNumber = `PO-MAN-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
       // Insert PO Header
       const { data: po, error: poErr } = await supabase
@@ -1416,29 +1507,80 @@ exports.purchaseOrders = {
         .select()
         .single();
 
-      if (poErr) throw poErr;
+      if (poErr) {
+        console.error("❌ [PO CREATE ERROR] Header insert failed:", poErr.message);
+        throw poErr;
+      }
 
       // Insert PO Items
       if (items && items.length > 0) {
-        const itemsToInsert = items.map((item) => ({
-          purchase_order_id: po.id,
-          fabric_id: item.fabric_id,
-          quantity: parseFloat(item.quantity || 0),
-          status: "Pending",
-        }));
+        const itemsToInsert = items.map((item) => {
+          const itemType = item.item_type || (item.fabric_id ? 'fabric' : (item.trim_id ? 'trim' : (item.product_id ? 'product' : 'fabric')));
+          
+          let itemName = item.item_name || '';
+          if (itemType === 'product' && !itemName) {
+            itemName = JSON.stringify({
+              product_id: item.product_id,
+              size: item.size || 'M',
+              name: item.name || item.product_name || '',
+              art_number: item.art_number || ''
+            });
+          } else if (!itemName) {
+            itemName = item.name || (itemType === 'fabric' ? 'Fabric' : (itemType === 'trim' ? 'Trim' : 'Item'));
+          }
 
+          const basePayload = {
+            purchase_order_id: po.id,
+            item_type: itemType,
+            quantity: parseFloat(item.quantity || 0),
+            unit: item.unit || (itemType === 'fabric' ? 'meters' : 'pcs'),
+            unit_price: parseFloat(item.unit_price || 0),
+            status: "Pending",
+            item_name: itemName,
+          };
+
+          if (itemType === 'fabric' && isUUID(item.fabric_id)) {
+            basePayload.fabric_id = item.fabric_id.trim();
+          }
+          if (itemType === 'trim' && isUUID(item.trim_id)) {
+            basePayload.trim_id = item.trim_id.trim();
+          }
+
+          return basePayload;
+        });
+
+        // Insert items, handling fallback if some columns aren't accepted
         const { error: itemsErr } = await supabase
           .from("purchase_order_items")
           .insert(itemsToInsert);
 
         if (itemsErr) {
-          await supabase.from("purchase_orders").delete().eq("id", po.id);
-          throw itemsErr;
+          console.warn("Standard PO items insert warning, attempting sanitized insert:", itemsErr.message);
+          // Fallback with minimal columns including mandatory unit_price
+          const fallbackItems = itemsToInsert.map(i => ({
+            purchase_order_id: i.purchase_order_id,
+            fabric_id: isUUID(i.fabric_id) ? i.fabric_id : null,
+            trim_id: isUUID(i.trim_id) ? i.trim_id : null,
+            item_type: i.item_type || 'fabric',
+            item_name: i.item_name || '',
+            quantity: parseFloat(i.quantity || 0),
+            unit_price: parseFloat(i.unit_price || 0),
+            unit: i.unit || 'pcs',
+            status: "Pending"
+          }));
+
+          const { error: fbErr } = await supabase.from("purchase_order_items").insert(fallbackItems);
+          if (fbErr) {
+            console.error("❌ [PO CREATE ERROR] Fallback items insert failed:", fbErr.message);
+            await supabase.from("purchase_orders").delete().eq("id", po.id);
+            throw fbErr;
+          }
         }
       }
 
       res.json({ success: true, purchaseOrderId: po.id });
     } catch (err) {
+      console.error("❌ [PO CREATE ERROR] Caught exception:", err.message);
       res.status(500).json({ error: err.message });
     }
   },
@@ -1446,6 +1588,8 @@ exports.purchaseOrders = {
     const { id } = req.params;
     const { status } = req.body;
     try {
+      const { ensureStockRecord } = require("../services/inventoryService");
+
       // Fetch current PO
       const { data: po, error: fetchErr } = await supabase
         .from("purchase_orders")
@@ -1470,7 +1614,7 @@ exports.purchaseOrders = {
 
       if (updateErr) throw updateErr;
 
-      // If PO is received, credit raw fabric and trim quantities and close items
+      // If PO is received, credit raw fabric, trim, and product quantities and close items
       if (status === "Received" && po.status !== "Received") {
         const { data: items } = await supabase
           .from("purchase_order_items")
@@ -1484,43 +1628,149 @@ exports.purchaseOrders = {
             .update({ status: "Received", updated_at: new Date() })
             .eq("id", item.id);
 
-          // Add physical stock quantity for Fabrics
-          if (item.fabric_id) {
-            const { data: fabric } = await supabase
-              .from("fabrics")
-              .select("quantity")
-              .eq("id", item.fabric_id)
-              .maybeSingle();
+          const itemQty = parseFloat(item.quantity || 0);
+          if (itemQty <= 0) continue;
 
-            if (fabric) {
-              const newQty =
-                parseFloat(fabric.quantity || 0) + parseFloat(item.quantity || 0);
-              await supabase
+          // 1. FABRICS: Add physical stock quantity
+          if (item.fabric_id || item.item_type === 'fabric') {
+            const targetFabricId = item.fabric_id;
+            if (targetFabricId) {
+              const { data: fabric } = await supabase
                 .from("fabrics")
-                .update({
+                .select("id, quantity, meters")
+                .eq("id", targetFabricId)
+                .maybeSingle();
+
+              if (fabric) {
+                const newQty = parseFloat(fabric.quantity || 0) + itemQty;
+                const updatePayload = {
                   quantity: newQty,
-                })
-                .eq("id", item.fabric_id);
+                  updated_at: new Date(),
+                };
+                if (fabric.meters !== undefined && fabric.meters !== null) {
+                  updatePayload.meters = parseFloat(fabric.meters || 0) + itemQty;
+                }
+                await supabase
+                  .from("fabrics")
+                  .update(updatePayload)
+                  .eq("id", targetFabricId);
+
+                console.log(`[Inventory] PO #${id} Received: Credited ${itemQty}m to Fabric #${targetFabricId} (New Qty: ${newQty})`);
+              }
             }
           }
 
-          // Add physical stock quantity for Trims
-          if (item.trim_id) {
-            const { data: trim } = await supabase
-              .from("trims")
-              .select("quantity")
-              .eq("id", item.trim_id)
-              .maybeSingle();
-
-            if (trim) {
-              const newQty =
-                parseFloat(trim.quantity || 0) + parseFloat(item.quantity || 0);
-              await supabase
+          // 2. TRIMS / ACCESSORIES: Add physical stock quantity
+          if (item.trim_id || item.item_type === 'trim') {
+            const targetTrimId = item.trim_id;
+            if (targetTrimId) {
+              const { data: trim } = await supabase
                 .from("trims")
-                .update({
-                  quantity: newQty,
-                })
-                .eq("id", item.trim_id);
+                .select("id, quantity")
+                .eq("id", targetTrimId)
+                .maybeSingle();
+
+              if (trim) {
+                const newQty = parseFloat(trim.quantity || 0) + itemQty;
+                await supabase
+                  .from("trims")
+                  .update({
+                    quantity: newQty,
+                    updated_at: new Date(),
+                  })
+                  .eq("id", targetTrimId);
+
+                console.log(`[Inventory] PO #${id} Received: Credited ${itemQty} to Trim #${targetTrimId} (New Qty: ${newQty})`);
+              } else {
+                // Check buttons table
+                const { data: btn } = await supabase
+                  .from("buttons")
+                  .select("id, stock_quantity")
+                  .eq("id", targetTrimId)
+                  .maybeSingle();
+
+                if (btn) {
+                  const newQty = parseFloat(btn.stock_quantity || 0) + itemQty;
+                  await supabase
+                    .from("buttons")
+                    .update({ stock_quantity: newQty, updated_at: new Date() })
+                    .eq("id", targetTrimId);
+
+                  console.log(`[Inventory] PO #${id} Received: Credited ${itemQty} to Button #${targetTrimId}`);
+                } else {
+                  // Check threads table
+                  const { data: thr } = await supabase
+                    .from("threads")
+                    .select("id, stock_quantity")
+                    .eq("id", targetTrimId)
+                    .maybeSingle();
+
+                  if (thr) {
+                    const newQty = parseFloat(thr.stock_quantity || 0) + itemQty;
+                    await supabase
+                      .from("threads")
+                      .update({ stock_quantity: newQty, updated_at: new Date() })
+                      .eq("id", targetTrimId);
+
+                    console.log(`[Inventory] PO #${id} Received: Credited ${itemQty} to Thread #${targetTrimId}`);
+                  }
+                }
+              }
+            }
+          }
+
+          // 3. FINISHED PRODUCTS: Add physical stock quantity into product_stocks
+          let productId = null;
+          let productSize = 'M';
+
+          if (item.item_name) {
+            if (item.item_name.startsWith('{')) {
+              try {
+                const parsed = JSON.parse(item.item_name);
+                productId = parsed.product_id;
+                if (parsed.size) productSize = parsed.size;
+              } catch (e) {}
+            } else if (item.item_name.startsWith('PRODUCT:')) {
+              const parts = item.item_name.split(':');
+              productId = parts[1];
+              if (parts[2]) productSize = parts[2];
+            }
+          }
+
+          if (item.item_type === 'product' && !productId && item.item_name) {
+            const rawId = item.item_name.trim();
+            if (/^\d+$/.test(rawId)) {
+              productId = rawId;
+            } else {
+              const { data: pByArt } = await supabase
+                .from("products")
+                .select("id, base_size")
+                .or(`art_number.eq.${rawId},name.eq.${rawId}`)
+                .maybeSingle();
+              if (pByArt) {
+                productId = pByArt.id;
+                productSize = pByArt.base_size || 'M';
+              }
+            }
+          }
+
+          if (productId) {
+            try {
+              const stock = await ensureStockRecord(productId, productSize);
+              if (stock) {
+                const newQty = (parseFloat(stock.quantity) || 0) + itemQty;
+                await supabase
+                  .from("product_stocks")
+                  .update({
+                    quantity: newQty,
+                    updated_at: new Date(),
+                  })
+                  .eq("id", stock.id);
+
+                console.log(`[Inventory] PO #${id} Received: Credited ${itemQty} to Product #${productId} (Size: ${productSize}) -> New Stock: ${newQty}`);
+              }
+            } catch (stockErr) {
+              console.error(`[Inventory] Failed to credit product stock for Product #${productId}:`, stockErr.message);
             }
           }
         }

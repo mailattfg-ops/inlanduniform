@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { calculateDueInfo } = require('./invoiceController');
 
 exports.getStats = async (req, res) => {
     try {
@@ -144,7 +145,8 @@ exports.getStats = async (req, res) => {
             quotesRes,
             ordersRes,
             jobCardsRes,
-            newMembersRes
+            newMembersRes,
+            invoicesRes
         ] = await Promise.all([
             supabase.from('registry_members').select('*', { count: 'exact', head: true }),
             supabase.from('organizations').select('*', { count: 'exact', head: true }),
@@ -156,7 +158,8 @@ exports.getStats = async (req, res) => {
             supabase.from('quotations').select('id, final_quote_value, paid_amount, payment_status, status'),
             supabase.from('orders').select('id, order_no, status, barcode, created_at, quotations(id, quotation_no, title, final_quote_value, paid_amount, payment_status, expected_delivery_date, organizations(name))').order('created_at', { ascending: false }),
             supabase.from('job_cards').select('id, job_card_no, status, notes, created_at'),
-            supabase.from('registry_members').select('*', { count: 'exact', head: true }).gte('created_at', firstDayOfMonth)
+            supabase.from('registry_members').select('*', { count: 'exact', head: true }).gte('created_at', firstDayOfMonth),
+            supabase.from('invoices').select('id, invoice_number, total_amount, paid_amount, status, due_date, credit_period_days, invoice_date, created_at, customer_name, order_id, orders(order_no), organizations(name)')
         ]);
 
         const totalMembers = membersRes.count || 0;
@@ -170,6 +173,7 @@ exports.getStats = async (req, res) => {
         const orders = ordersRes.data || [];
         const jobCards = jobCardsRes.data || [];
         const newMembersThisMonth = newMembersRes.count || 0;
+        const invoices = (invoicesRes && invoicesRes.data) || [];
 
         // 1. Quotations Telemetry (Proposal pipeline)
         let pendingQuotationsCount = 0;
@@ -181,19 +185,12 @@ exports.getStats = async (req, res) => {
             else pendingQuotationsCount++;
         });
 
-        // 2. Live Financial Stats strictly from Sales Orders (Confirmed Commercial Orders)
+        // 2. Live Financial Stats from Sales Orders (Confirmed Commercial Orders)
         let totalSalesOrderValue = 0;
         let collectedSalesOrderRevenue = 0;
         let paidOrdersCount = 0;
         let partialOrdersCount = 0;
         let unpaidOrdersCount = 0;
-        let dueOrdersCount = 0;
-        let dueAmount = 0;
-        let overdueOrdersCount = 0;
-        let overdueAmount = 0;
-        const overdueOrdersList = [];
-
-        const todayDateStr = new Date().toISOString().split('T')[0];
 
         orders.forEach(o => {
             const st = (o.status || '').toLowerCase();
@@ -203,7 +200,6 @@ exports.getStats = async (req, res) => {
 
             const quoteVal = parseFloat(o.quotations?.final_quote_value) || 0;
             const paidVal = parseFloat(o.quotations?.paid_amount) || 0;
-            const balance = Math.max(0, quoteVal - paidVal);
 
             totalSalesOrderValue += quoteVal;
             collectedSalesOrderRevenue += paidVal;
@@ -215,30 +211,51 @@ exports.getStats = async (req, res) => {
             } else {
                 unpaidOrdersCount++;
             }
+        });
 
-            // Check for Due / Overdue receivables
-            if (balance > 0) {
-                dueOrdersCount++;
-                dueAmount += balance;
+        // 3. Payment Dues & Overdues strictly calculated against the due date in invoices
+        let overdueOrdersCount = 0;
+        let overdueAmount = 0;
+        let dueOrdersCount = 0;
+        let dueAmount = 0;
+        const overdueOrdersList = [];
 
-                const deliveryDate = o.quotations?.expected_delivery_date
-                    ? String(o.quotations.expected_delivery_date).split('T')[0]
-                    : null;
+        invoices.forEach(inv => {
+            const total = parseFloat(inv.total_amount || 0);
+            const paid = parseFloat(inv.paid_amount || 0);
+            const balance = Math.max(0, total - paid);
+            const status = inv.status || 'Unpaid';
 
-                // Overdue: if expected delivery date is past today
-                if (deliveryDate && deliveryDate < todayDateStr) {
-                    overdueOrdersCount++;
-                    overdueAmount += balance;
+            if (balance <= 0 || status === 'Paid' || status === 'Fully Paid') {
+                return;
+            }
 
-                    overdueOrdersList.push({
-                        id: o.id,
-                        order_no: o.order_no,
-                        client_name: o.quotations?.organizations?.name || 'Client',
-                        balance: parseFloat(balance.toFixed(2)),
-                        delivery_date: deliveryDate,
-                        order_status: o.status
-                    });
-                }
+            const dueInfo = calculateDueInfo(
+                inv.invoice_date || inv.created_at,
+                inv.credit_period_days || 30,
+                status,
+                paid,
+                total,
+                inv.due_date
+            );
+
+            dueOrdersCount++;
+            dueAmount += balance;
+
+            if (dueInfo.is_overdue || dueInfo.due_status === 'Overdue') {
+                overdueOrdersCount++;
+                overdueAmount += balance;
+
+                overdueOrdersList.push({
+                    id: inv.id,
+                    invoice_no: inv.invoice_number || `INV-${inv.id}`,
+                    order_no: inv.orders?.order_no || (inv.order_id ? `Order #${inv.order_id}` : null),
+                    client_name: inv.organizations?.name || inv.customer_name || 'Client',
+                    balance: parseFloat(balance.toFixed(2)),
+                    due_date: dueInfo.due_date || inv.due_date,
+                    days_overdue: dueInfo.days_overdue,
+                    order_status: dueInfo.due_status
+                });
             }
         });
 

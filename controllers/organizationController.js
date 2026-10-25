@@ -1041,36 +1041,74 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-function calculateLedgerDueInfo(invoiceDate, creditPeriodDays, paymentStatus, balanceAmount) {
-  if (paymentStatus === "Paid" || Number(balanceAmount) <= 0) {
+// Safe date parsing helper to avoid timezone offset shifts
+function parseLedgerDateToMidnight(dateInput) {
+  if (!dateInput) return null;
+  if (dateInput instanceof Date) {
+    if (isNaN(dateInput.getTime())) return null;
+    return new Date(dateInput.getFullYear(), dateInput.getMonth(), dateInput.getDate());
+  }
+  if (typeof dateInput === 'string') {
+    const datePart = dateInput.split('T')[0].trim();
+    const match = datePart.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) {
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const day = parseInt(match[3], 10);
+      return new Date(year, month, day);
+    }
+    const parsed = new Date(dateInput);
+    if (!isNaN(parsed.getTime())) {
+      return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+    }
+  }
+  return null;
+}
+
+function formatLedgerDateOnly(d) {
+  if (!d || isNaN(d.getTime())) return '';
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function calculateLedgerDueInfo(invoiceDate, creditPeriodDays, paymentStatus, balanceAmount, explicitDueDate) {
+  if (paymentStatus === "Paid" || paymentStatus === "Fully Paid" || Number(balanceAmount) <= 0) {
     return {
       due_status: "Paid",
       due_label: "Paid in Full",
       diff_days: 0,
+      days_overdue: 0,
+      days_remaining: 0,
       is_due_today: false,
       is_overdue: false,
     };
   }
 
-  const invDate = invoiceDate ? new Date(invoiceDate) : new Date();
   const period = parseInt(creditPeriodDays, 10) || 30;
-  const dueDate = new Date(invDate);
-  dueDate.setDate(dueDate.getDate() + period);
+
+  // Primary: calculate directly against the explicit invoice due date
+  let dueMidnight = parseLedgerDateToMidnight(explicitDueDate);
+
+  // Fallback if due_date is not explicitly present: calculate from invoiceDate + creditPeriodDays
+  if (!dueMidnight) {
+    const invMidnight = parseLedgerDateToMidnight(invoiceDate) || parseLedgerDateToMidnight(new Date());
+    dueMidnight = new Date(invMidnight.getTime() + period * 24 * 60 * 60 * 1000);
+  }
 
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dueMidnight = new Date(dueDate);
-  dueMidnight.setHours(0, 0, 0, 0);
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
   const msPerDay = 24 * 60 * 60 * 1000;
-  const diffDays = Math.round((today.getTime() - dueMidnight.getTime()) / msPerDay);
+  const diffDays = Math.round((todayMidnight.getTime() - dueMidnight.getTime()) / msPerDay);
 
   let due_status = "Active";
   let due_label = `${Math.abs(diffDays)} days remaining`;
 
   if (diffDays === 0) {
     due_status = "Due";
-    due_label = "Due Today (Last day of credit period)";
+    due_label = "Due Today";
   } else if (diffDays > 0) {
     due_status = "Overdue";
     due_label = `Overdue by ${diffDays} day${diffDays === 1 ? "" : "s"}`;
@@ -1080,7 +1118,9 @@ function calculateLedgerDueInfo(invoiceDate, creditPeriodDays, paymentStatus, ba
     due_status,
     due_label,
     diff_days: diffDays,
-    due_date: dueDate.toISOString(),
+    days_overdue: diffDays > 0 ? diffDays : 0,
+    days_remaining: diffDays < 0 ? Math.abs(diffDays) : 0,
+    due_date: formatLedgerDateOnly(dueMidnight),
     is_due_today: diffDays === 0,
     is_overdue: diffDays > 0,
   };
@@ -1218,8 +1258,9 @@ exports.getOrganizationLedger = async (req, res) => {
       const dueInfo = calculateLedgerDueInfo(
         invDate,
         invCreditPeriod,
-        inv.payment_status,
-        amount - paid
+        inv.payment_status || inv.status,
+        amount - paid,
+        inv.due_date
       );
 
       rawTransactions.push({
@@ -1227,7 +1268,7 @@ exports.getOrganizationLedger = async (req, res) => {
         raw_id: inv.id,
         date: invDate,
         type: "INVOICE",
-        reference_no: inv.invoice_no,
+        reference_no: inv.invoice_number || inv.invoice_no,
         description: inv.sale_type === "retail" ? `Retail Tax Invoice (Manual)` : `Bulk Order Invoice for ${orderRef}`,
         order_ref: orderRef,
         sale_type: inv.sale_type || (linkedOrder ? "bulk" : "retail"),
@@ -1235,11 +1276,13 @@ exports.getOrganizationLedger = async (req, res) => {
         due_date: inv.due_date || dueInfo.due_date,
         due_status: dueInfo.due_status,
         due_label: dueInfo.due_label,
+        days_overdue: dueInfo.days_overdue,
+        days_remaining: dueInfo.days_remaining,
         is_due_today: dueInfo.is_due_today,
         is_overdue: dueInfo.is_overdue,
         debit: amount,
         credit: 0,
-        status: inv.payment_status || "Unpaid",
+        status: inv.payment_status || inv.status || "Unpaid",
         payment_mode: null,
         notes: inv.notes,
       });

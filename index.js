@@ -61,6 +61,7 @@ app.use("/api/payments", require("./routes/payment.js"));
 app.use("/api/orders", require("./routes/order.js"));
 app.use("/api/sam-management", require("./routes/samManagement.js"));
 app.use("/api/company-settings", require("./routes/companySettings.js"));
+app.use("/api/company", require("./routes/companySettings.js"));
 app.use("/api/vendors", require("./routes/vendors.js"));
 app.use("/api/leads", require("./routes/leads.js"));
 app.use("/api/branches", require("./routes/branches.js"));

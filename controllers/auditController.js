@@ -2,8 +2,10 @@ const supabase = require('../config/supabase');
 
 exports.getAuditLogs = async (req, res) => {
     try {
-        // Fetch logs and join with user_profiles to get the performer's name
-        const { data: logs, error } = await supabase
+        const { user_id, entity_type, from, to, limit } = req.query;
+
+        // Build query and join with user_profiles to get the performer's name
+        let query = supabase
             .from('audit_logs')
             .select(`
                 *,
@@ -12,9 +14,25 @@ exports.getAuditLogs = async (req, res) => {
                     full_name,
                     email
                 )
-            `)
+            `);
+
+        if (user_id) {
+            query = query.eq('user_id', user_id);
+        }
+        if (entity_type) {
+            query = query.eq('entity_type', entity_type);
+        }
+        if (from) {
+            query = query.gte('created_at', from);
+        }
+        if (to) {
+            query = query.lte('created_at', to);
+        }
+
+        const maxLimit = limit ? Math.min(parseInt(limit, 10), 1000) : 250;
+        const { data: logs, error } = await query
             .order('created_at', { ascending: false })
-            .limit(250);
+            .limit(maxLimit);
 
         if (error) {
             if (error.code === '42P01') { // Message: relation "public.audit_logs" does not exist

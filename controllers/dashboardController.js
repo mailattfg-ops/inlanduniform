@@ -95,6 +95,7 @@ exports.getStats = async (req, res) => {
                 totalMembers = mCount || 0;
 
                 const firstDayOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+        const todayDateStr = new Date().toISOString().split('T')[0];
                 const { count: nmCount } = await supabase
                     .from('registry_members')
                     .select('*', { count: 'exact', head: true })
@@ -133,6 +134,7 @@ exports.getStats = async (req, res) => {
 
         // 3. Global Stats for Branch Managers & System Admins (Executed in parallel for lightning speed)
         const firstDayOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+        const todayDateStr = new Date().toISOString().split('T')[0];
 
         const [
             membersRes,

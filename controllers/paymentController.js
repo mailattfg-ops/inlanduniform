@@ -33,10 +33,13 @@ exports.getQuotationPayments = async (req, res) => {
 };
 
 // 3. Record a new payment
+// 3. Record a new payment (supports Quotation or Invoice target)
 exports.recordPayment = async (req, res) => {
     try {
         const { 
             quotation_id, 
+            invoice_id,
+            target_type,
             amount, 
             payment_method, 
             paymentMethod,
@@ -51,8 +54,8 @@ exports.recordPayment = async (req, res) => {
         const effectiveReferenceNo = reference_no || referenceNo || '';
         const effectivePaidAt = paid_at || paidAt || new Date().toISOString();
 
-        if (!quotation_id) {
-            return res.status(400).json({ error: 'Quotation ID is required.' });
+        if (!quotation_id && !invoice_id) {
+            return res.status(400).json({ error: 'Quotation ID or Invoice ID is required.' });
         }
         if (!amount || parseFloat(amount) <= 0) {
             return res.status(400).json({ error: 'Payment amount must be greater than zero.' });
@@ -61,40 +64,89 @@ exports.recordPayment = async (req, res) => {
             return res.status(400).json({ error: 'Payment method is required.' });
         }
 
-        // Fetch quotation details
-        const parsedQuoteId = parseInt(quotation_id, 10);
-        if (isNaN(parsedQuoteId)) {
+        let parsedQuoteId = quotation_id ? parseInt(quotation_id, 10) : null;
+        if (quotation_id && isNaN(parsedQuoteId)) {
             return res.status(400).json({ error: `Invalid Quotation ID format: "${quotation_id}"` });
         }
 
-        const { data: quotation, error: quoteError } = await supabase
-            .from('quotations')
-            .select('id, quotation_no, final_quote_value, paid_amount, payment_status')
-            .eq('id', parsedQuoteId)
-            .maybeSingle();
+        let targetInvoice = null;
+        let parsedOrderId = null;
 
-        if (quoteError) {
-            console.error('[paymentController:recordPayment] Database error querying quotation:', quoteError);
-            return res.status(500).json({ 
-                error: `Database error querying quotation: ${quoteError.message}. Check if 'payment_status' and 'paid_amount' columns exist in 'quotations' table.` 
-            });
+        // If invoice_id is supplied, look up invoice and resolve linked order/quotation
+        if (invoice_id) {
+            const parsedInvId = parseInt(invoice_id, 10);
+            if (!isNaN(parsedInvId)) {
+                const { data: invData, error: invErr } = await supabase
+                    .from('invoices')
+                    .select('id, invoice_number, order_id, organization_id, status, total_amount')
+                    .eq('id', parsedInvId)
+                    .maybeSingle();
+
+                if (invErr) {
+                    console.error('[paymentController:recordPayment] Error querying invoice:', invErr);
+                }
+
+                if (invData) {
+                    targetInvoice = invData;
+                    parsedOrderId = invData.order_id || null;
+                    if (!parsedQuoteId && parsedOrderId) {
+                        const { data: ordData } = await supabase
+                            .from('orders')
+                            .select('quotation_id')
+                            .eq('id', parsedOrderId)
+                            .maybeSingle();
+                        if (ordData && ordData.quotation_id) {
+                            parsedQuoteId = ordData.quotation_id;
+                        }
+                    }
+                }
+            }
         }
 
-        if (!quotation) {
-            return res.status(404).json({ error: `Quotation with ID #${parsedQuoteId} not found.` });
+        // Fetch quotation details if linked
+        let quotation = null;
+        if (parsedQuoteId) {
+            const { data: qData, error: quoteError } = await supabase
+                .from('quotations')
+                .select('id, quotation_no, final_quote_value, paid_amount, payment_status, organization_id')
+                .eq('id', parsedQuoteId)
+                .maybeSingle();
+
+            if (quoteError) {
+                console.error('[paymentController:recordPayment] Database error querying quotation:', quoteError);
+            }
+            quotation = qData;
+        }
+
+        if (!quotation && !targetInvoice) {
+            return res.status(404).json({ error: 'Selected Quotation or Invoice not found.' });
+        }
+
+        // Formulate payment notes
+        let paymentNotes = notes || '';
+        if (targetInvoice) {
+            const invRef = targetInvoice.invoice_number || targetInvoice.id;
+            if (!paymentNotes.includes(String(invRef))) {
+                paymentNotes = paymentNotes ? `${paymentNotes} (Against Invoice #${invRef})` : `Payment against Invoice #${invRef}`;
+            }
         }
 
         // Insert new payment line
+        const insertPayload = {
+            amount: parseFloat(amount),
+            payment_method: effectivePaymentMethod,
+            payment_mode: effectivePaymentMethod,
+            reference_no: effectiveReferenceNo,
+            notes: paymentNotes,
+            paid_at: effectivePaidAt,
+            status: 'Completed'
+        };
+        if (parsedQuoteId) insertPayload.quotation_id = parsedQuoteId;
+        if (parsedOrderId) insertPayload.order_id = parsedOrderId;
+
         const { data: newPayment, error: paymentError } = await supabase
             .from('payments')
-            .insert([{
-                quotation_id: parsedQuoteId,
-                amount: parseFloat(amount),
-                payment_method: effectivePaymentMethod,
-                reference_no: effectiveReferenceNo,
-                notes: notes || '',
-                paid_at: effectivePaidAt
-            }])
+            .insert([insertPayload])
             .select()
             .single();
 
@@ -105,49 +157,67 @@ exports.recordPayment = async (req, res) => {
             });
         }
 
-        // Fetch all payments for this quotation to calculate cumulative sum
-        const { data: allPayments, error: allPaymentsError } = await supabase
-            .from('payments')
-            .select('amount')
-            .eq('quotation_id', parsedQuoteId);
+        // If quotation is linked, calculate cumulative sum & update quotation
+        if (parsedQuoteId && quotation) {
+            const { data: allPayments } = await supabase
+                .from('payments')
+                .select('amount')
+                .eq('quotation_id', parsedQuoteId);
 
-        if (allPaymentsError) {
-            console.error('[paymentController:recordPayment] Database error fetching payments sum:', allPaymentsError);
-            return res.status(500).json({ error: allPaymentsError.message });
+            const totalPaid = (allPayments || []).reduce((sum, p) => sum + parseFloat(p.amount), 0);
+            const finalValue = parseFloat(quotation.final_quote_value || 0);
+
+            let newStatus = 'Pending';
+            if (totalPaid >= finalValue) {
+                newStatus = 'Paid';
+            } else if (totalPaid > 0) {
+                newStatus = 'Partially Paid';
+            }
+
+            await supabase
+                .from('quotations')
+                .update({
+                    paid_amount: totalPaid,
+                    payment_status: newStatus
+                })
+                .eq('id', parsedQuoteId);
         }
 
-        const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
-        const finalValue = parseFloat(quotation.final_quote_value || 0);
+        // If invoice was targeted, update invoice payment status
+        if (targetInvoice) {
+            let invPaid = parseFloat(amount);
+            if (parsedOrderId) {
+                const { data: ordPayments } = await supabase
+                    .from('payments')
+                    .select('amount')
+                    .eq('order_id', parsedOrderId);
+                if (ordPayments && ordPayments.length > 0) {
+                    invPaid = ordPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+                }
+            }
+            const invTotal = parseFloat(targetInvoice.total_amount || 0);
+            let invStatus = 'Partially Paid';
+            if (invPaid >= invTotal) {
+                invStatus = 'Fully Paid';
+            }
 
-        let newStatus = 'Pending';
-        if (totalPaid >= finalValue) {
-            newStatus = 'Paid';
-        } else if (totalPaid > 0) {
-            newStatus = 'Partially Paid';
-        }
-
-        // Update quotation payment status and paid amount
-        const { error: updateError } = await supabase
-            .from('quotations')
-            .update({
-                paid_amount: totalPaid,
-                payment_status: newStatus
-            })
-            .eq('id', parsedQuoteId);
-
-        if (updateError) {
-            console.error('[paymentController:recordPayment] Database error updating quotation payment status:', updateError);
-            return res.status(500).json({ error: updateError.message });
+            await supabase
+                .from('invoices')
+                .update({
+                    status: invStatus,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', targetInvoice.id);
         }
 
         // Auto-advance linked lead in Sales Pipeline to 'Deals'
-        try {
-            const { data: fullQuote } = await supabase.from('quotations').select('organization_id').eq('id', parsedQuoteId).maybeSingle();
-            if (fullQuote && fullQuote.organization_id) {
+        const orgIdToAdvance = quotation?.organization_id || targetInvoice?.organization_id;
+        if (orgIdToAdvance) {
+            try {
                 const { data: matchedLead } = await supabase
                     .from('leads')
                     .select('id, status, remarks')
-                    .eq('organization_id', fullQuote.organization_id)
+                    .eq('organization_id', orgIdToAdvance)
                     .maybeSingle();
 
                 if (matchedLead && matchedLead.status !== 'SO Converted Deals') {
@@ -156,16 +226,20 @@ exports.recordPayment = async (req, res) => {
                     const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
 
                     let curRemarks = Array.isArray(matchedLead.remarks) ? [...matchedLead.remarks] : [];
+                    const targetLabel = targetInvoice 
+                        ? `Invoice #${targetInvoice.invoice_number || targetInvoice.id}` 
+                        : `Quotation #${quotation?.quotation_no || parsedQuoteId}`;
+
                     curRemarks.push({
                         date: dateStr,
                         time: timeStr,
-                        text: `Deal Closed: Initial advance payment of ₹${parseFloat(amount)} recorded for Quotation #${quotation.quotation_no || parsedQuoteId}. Pipeline advanced to Deals.`,
-                        stage: "Deals",
-                        response_type: "positive",
+                        text: `Deal Closed: Payment of ₹${parseFloat(amount)} recorded for ${targetLabel}. Pipeline advanced to Deals.`,
+                        stage: 'Deals',
+                        response_type: 'positive',
                         author: {
-                            name: req.user?.fullName || req.user?.full_name || "Finance Staff",
-                            designation: req.user?.designation || req.user?.role || "Staff",
-                            department: "Accounts & Commercials"
+                            name: req.user?.fullName || req.user?.full_name || 'Finance Staff',
+                            designation: req.user?.designation || req.user?.role || 'Staff',
+                            department: 'Accounts & Commercials'
                         }
                     });
 
@@ -181,21 +255,21 @@ exports.recordPayment = async (req, res) => {
                     await supabase.from('lead_stage_history').insert([{
                         lead_id: matchedLead.id,
                         stage: 'Deals',
-                        transition_reason: `Initial payment of ₹${parseFloat(amount)} received for Quotation #${quotation.quotation_no || parsedQuoteId}`
+                        transition_reason: `Payment of ₹${parseFloat(amount)} received for ${targetLabel}`
                     }]).catch(() => {});
 
                     await supabase.from('lead_activities').insert([{
                         lead_id: matchedLead.id,
                         stage: 'Deals',
                         activity_type: 'initial_payment_received',
-                        performed_by_name: req.user?.fullName || req.user?.full_name || "Finance Staff",
-                        notes: `Deal Closed: Initial advance payment of ₹${parseFloat(amount)} recorded. Pipeline advanced to Deals.`,
+                        performed_by_name: req.user?.fullName || req.user?.full_name || 'Finance Staff',
+                        notes: `Deal Closed: Payment of ₹${parseFloat(amount)} recorded for ${targetLabel}. Pipeline advanced to Deals.`,
                         outcome: 'deal_won'
                     }]).catch(() => {});
                 }
+            } catch (leadDealErr) {
+                console.warn('[paymentController] Could not auto-advance lead to Deals:', leadDealErr.message);
             }
-        } catch (leadDealErr) {
-            console.warn('[paymentController] Could not auto-advance lead to Deals:', leadDealErr.message);
         }
 
         // Log action if available
@@ -203,26 +277,19 @@ exports.recordPayment = async (req, res) => {
             const { logAction } = require('../utils/logger');
             await logAction(req.user?.id, 'RECORD_PAYMENT', 'payment', newPayment.id, {
                 quotation_id: parsedQuoteId,
-                quotation_no: quotation.quotation_no,
-                amount: newPayment.amount,
-                total_paid: totalPaid,
-                payment_status: newStatus
+                invoice_id: targetInvoice?.id,
+                amount: parseFloat(amount),
+                method: effectivePaymentMethod
             });
-        } catch (logErr) {
-            console.error('Logging failed:', logErr.message);
-        }
+        } catch (logErr) {}
 
-        res.json({
+        res.status(201).json({
+            message: 'Payment recorded successfully',
             payment: newPayment,
-            quotation: {
-                id: parsedQuoteId,
-                quotation_no: quotation.quotation_no,
-                paid_amount: totalPaid,
-                payment_status: newStatus
-            }
+            target_type: targetInvoice ? 'invoice' : 'quotation'
         });
     } catch (err) {
-        console.error('[paymentController:recordPayment] Unexpected exception:', err);
+        console.error('[paymentController:recordPayment] Error:', err);
         res.status(500).json({ error: err.message });
     }
 };

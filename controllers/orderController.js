@@ -197,6 +197,26 @@ exports.getOrderDetails = async (req, res) => {
             });
         }
 
+        // Normalize product_name, art_number, design_number, group_design_number, specification across all items
+        items.forEach(it => {
+            const sb = it.size_breakdown || {};
+            if (!it.product_name) {
+                it.product_name = it.manual_item_name || sb.product_name || sb.name || it.product_types?.name || it.item_description || null;
+            }
+            if (!it.art_number) {
+                it.art_number = sb.art_number || sb.art_no || null;
+            }
+            if (!it.design_number) {
+                it.design_number = sb.design_number || sb.product_design_number || sb.clean_design_number || null;
+            }
+            if (!it.group_design_number) {
+                it.group_design_number = sb.group_design_number || sb.dng_number || sb.group_design || null;
+            }
+            if (!it.specification) {
+                it.specification = sb.specification || sb.specifications || sb.sub_details || it.specification || it.item_description || null;
+            }
+        });
+
         // Enrich items with fabric details if present
         const fabricIds = Array.from(new Set(
             items.map(it => it.fabric_id || it.size_breakdown?.fabric_id).filter(Boolean)

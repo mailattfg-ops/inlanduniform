@@ -393,28 +393,91 @@ exports.createInvoice = async (req, res) => {
 // 2. Generate Invoice directly from a Confirmed Sales Order (Bulk Order)
 exports.createInvoiceFromOrder = async (req, res) => {
     try {
-        const { order_id, credit_period_days, invoice_date, due_date, notes } = req.body;
+        const { order_id, quotation_id, credit_period_days, invoice_date, due_date, notes } = req.body;
 
-        if (!order_id) {
-            return res.status(400).json({ error: 'order_id is required' });
+        if (!order_id && !quotation_id) {
+            return res.status(400).json({ error: 'order_id or quotation_id is required' });
         }
 
-        // Fetch Order with Quotation & Organization cleanly using wildcards to avoid missing column errors
-        const { data: order, error: orderErr } = await supabase
-            .from('orders')
-            .select('*, quotations (*, organizations (*))')
-            .eq('id', order_id)
-            .single();
+        let order = null;
+        let quote = null;
 
-        if (orderErr || !order) {
-            console.error('[createInvoiceFromOrder] Error fetching order:', orderErr);
-            return res.status(404).json({ error: 'Order not found', details: orderErr?.message });
+        if (order_id) {
+            // Fetch Order with Quotation & Organization cleanly using wildcards to avoid missing column errors
+            const { data: orderData, error: orderErr } = await supabase
+                .from('orders')
+                .select('*, quotations (*, organizations (*))')
+                .eq('id', order_id)
+                .single();
+
+            if (orderErr || !orderData) {
+                console.error('[createInvoiceFromOrder] Error fetching order:', orderErr);
+                return res.status(404).json({ error: 'Order not found', details: orderErr?.message });
+            }
+            order = orderData;
+            quote = order.quotations;
+        } else if (quotation_id) {
+            // Check if there is an existing order for this quotation
+            const { data: linkedOrderData } = await supabase
+                .from('orders')
+                .select('*, quotations (*, organizations (*))')
+                .eq('quotation_id', quotation_id)
+                .maybeSingle();
+
+            if (linkedOrderData) {
+                order = linkedOrderData;
+                quote = order.quotations;
+            } else {
+                const { data: quoteData, error: quoteErr } = await supabase
+                    .from('quotations')
+                    .select('*, organizations (*)')
+                    .eq('id', quotation_id)
+                    .single();
+
+                if (quoteErr || !quoteData) {
+                    console.error('[createInvoiceFromOrder] Error fetching quotation:', quoteErr);
+                    return res.status(404).json({ error: 'Quotation not found', details: quoteErr?.message });
+                }
+                quote = quoteData;
+            }
         }
 
-        const quote = order.quotations;
         const org = quote?.organizations;
         const customerName = org?.name || 'Bulk Order Client';
-        const organizationId = org?.id || quote?.organization_id || order.organization_id;
+        const organizationId = org?.id || quote?.organization_id || order?.organization_id;
+
+        // Fetch existing advance payments and credits linked to this quotation or order
+        let existingPayments = [];
+        const payFilter = [];
+        if (order?.id) payFilter.push(`order_id.eq.${order.id}`);
+        if (quote?.id) payFilter.push(`quotation_id.eq.${quote.id}`);
+
+        if (payFilter.length > 0) {
+            const { data: pData } = await supabase
+                .from('payments')
+                .select('*')
+                .or(payFilter.join(','));
+            if (pData) existingPayments = pData;
+        }
+
+        const paymentsSum = existingPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+        const quotePaid = parseFloat(quote?.paid_amount || 0);
+        const existingCredits = Math.max(paymentsSum, quotePaid);
+
+        // Auto-link any payments linked to quote where order_id is null to this order
+        if (existingPayments.length > 0 && order?.id) {
+            const unlinkedPaymentIds = existingPayments.filter(p => !p.order_id).map(p => p.id);
+            if (unlinkedPaymentIds.length > 0) {
+                try {
+                    await supabase
+                        .from('payments')
+                        .update({ order_id: order.id })
+                        .in('id', unlinkedPaymentIds);
+                } catch (linkErr) {
+                    console.warn('[createInvoiceFromOrder] Warning linking payments to order:', linkErr.message);
+                }
+            }
+        }
 
         // Credit period resolution
         let effectiveCreditPeriod = credit_period_days 
@@ -470,25 +533,50 @@ exports.createInvoiceFromOrder = async (req, res) => {
                 };
             });
         } else {
-            const fallbackDesc = `Sales Order Execution: ${order.order_no} (${quote?.title || 'Custom Uniforms'})`;
+            const fallbackDesc = order
+                ? `Sales Order Execution: ${order.order_no} (${quote?.title || 'Custom Uniforms'})`
+                : `Quotation Billing: ${quote?.quotation_no || `QT-${quote?.id}`} (${quote?.title || 'Custom Uniforms'})`;
             invoiceItems = [{
                 item_description: fallbackDesc,
                 description: fallbackDesc,
                 design_number: null,
                 barcode: null,
                 quantity: 1,
-                unit_price: parseFloat(quote?.final_quote_value || order.total_amount || 0),
+                unit_price: parseFloat(quote?.final_quote_value || order?.total_amount || 0),
                 tax_rate: effectiveTaxRate
             }];
         }
 
-        // Delegate to createInvoice logic
+        // Calculate items subtotal and total to evaluate payment status and deductions
+        let calcSubtotal = 0;
+        let calcTax = 0;
+        invoiceItems.forEach(it => {
+            const qty = parseInt(it.quantity || 1, 10);
+            const price = parseFloat(it.unit_price || 0);
+            const rate = parseFloat(it.tax_rate || 0);
+            const lineTot = qty * price;
+            calcSubtotal += lineTot;
+            if (!isTaxInclusive) calcTax += lineTot * (rate / 100);
+        });
+        const totalInvoiceValue = isTaxInclusive ? calcSubtotal : calcSubtotal + calcTax;
+        const remainingDue = Math.max(0, totalInvoiceValue - existingCredits);
+
+        const paymentStatus = remainingDue <= 0 && totalInvoiceValue > 0
+            ? 'Fully Paid'
+            : (existingCredits > 0 ? 'Partially Paid' : 'Unpaid');
+
+        let invoiceNotesCombined = notes || (order ? `Generated against Sales Order ${order.order_no}` : `Generated against Quotation ${quote?.quotation_no || `QT-${quote?.id}`}`);
+        if (existingCredits > 0) {
+            invoiceNotesCombined += ` (Advance credits of ₹${existingCredits.toFixed(2)} applied. Remaining payment due: ₹${remainingDue.toFixed(2)})`;
+        }
+
+        // Delegate to createInvoice logic with existing credits deducted
         req.body = {
-            order_id: order.id,
-            quotation_id: quote?.id,
+            order_id: order?.id || null,
+            quotation_id: quote?.id || null,
             organization_id: organizationId,
             customer: org,
-            branch_id: order.branch_id,
+            branch_id: order?.branch_id || quote?.branch_id || null,
             customer_name: customerName,
             customer_type: 'Business',
             sale_type: 'bulk',
@@ -496,10 +584,13 @@ exports.createInvoiceFromOrder = async (req, res) => {
             invoice_date: invoice_date || new Date().toISOString().slice(0, 10),
             due_date: due_date || null,
             is_tax_inclusive: isTaxInclusive,
-            payment_status: 'Unpaid',
-            paid_amount: 0,
+            payment_status: paymentStatus,
+            paid_amount: existingCredits,
+            existing_credits: existingCredits,
+            remaining_amount: remainingDue,
+            due_amount: remainingDue,
             items: invoiceItems,
-            notes: notes || `Generated against Sales Order ${order.order_no}`
+            notes: invoiceNotesCombined
         };
 
         return exports.createInvoice(req, res);
@@ -557,13 +648,53 @@ exports.listInvoices = async (req, res) => {
         const { data, error } = await query;
         if (error) throw error;
 
-        // Enrich all invoices with dynamic due status & overdue calculations against due_date
+        // Collect order IDs and quotation IDs to fetch real recorded payments/credits
+        const invOrderIds = (data || []).map(i => i.order_id).filter(Boolean);
+        const invQuoteIds = (data || []).map(i => i.orders?.quotations?.id || i.quotation_id).filter(Boolean);
+
+        let relatedPayments = [];
+        const payOr = [];
+        if (invOrderIds.length > 0) payOr.push(`order_id.in.(${invOrderIds.join(',')})`);
+        if (invQuoteIds.length > 0) payOr.push(`quotation_id.in.(${invQuoteIds.join(',')})`);
+        if (payOr.length > 0) {
+            const { data: pData } = await supabase
+                .from('payments')
+                .select('*')
+                .or(payOr.join(','));
+            if (pData) relatedPayments = pData;
+        }
+
+        const orderPaymentsMap = new Map();
+        const quotePaymentsMap = new Map();
+        relatedPayments.forEach(p => {
+            if (p.order_id) {
+                orderPaymentsMap.set(p.order_id, (orderPaymentsMap.get(p.order_id) || 0) + parseFloat(p.amount || 0));
+            }
+            if (p.quotation_id) {
+                quotePaymentsMap.set(p.quotation_id, (quotePaymentsMap.get(p.quotation_id) || 0) + parseFloat(p.amount || 0));
+            }
+        });
+
+        // Enrich all invoices with dynamic due status & credit deductions
         const enriched = (data || []).map(inv => {
+            const orderCredit = inv.order_id ? (orderPaymentsMap.get(inv.order_id) || 0) : 0;
+            const linkedQuoteId = inv.orders?.quotations?.id || inv.quotation_id;
+            const quoteCredit = linkedQuoteId ? (quotePaymentsMap.get(linkedQuoteId) || 0) : 0;
+            const quotePaid = parseFloat(inv.orders?.quotations?.paid_amount || 0);
+            const totalCredits = Math.max(orderCredit, quoteCredit, quotePaid, parseFloat(inv.paid_amount || 0));
+
+            const totalAmt = parseFloat(inv.total_amount || 0);
+            const effectivePaid = Math.min(totalAmt, totalCredits > 0 ? totalCredits : ((inv.status === 'Fully Paid' || inv.status === 'Paid') ? totalAmt : 0));
+            const remainingDue = Math.max(0, totalAmt - effectivePaid);
+            const effectiveStatus = remainingDue <= 0 && totalAmt > 0
+                ? 'Fully Paid'
+                : (effectivePaid > 0 ? 'Partially Paid' : (inv.status || inv.payment_status || 'Unpaid'));
+
             const dueInfo = calculateDueInfo(
                 inv.invoice_date || inv.created_at,
                 inv.credit_period_days || 30,
-                inv.status || inv.payment_status || 'Unpaid',
-                inv.paid_amount || 0,
+                effectiveStatus,
+                effectivePaid,
                 inv.total_amount,
                 inv.due_date
             );
@@ -575,7 +706,11 @@ exports.listInvoices = async (req, res) => {
                 customer: customerObj,
                 organizations: customerObj,
                 customer_name: customerObj?.name || inv.customer_name || 'Bulk Order Client',
-                payment_status: inv.status || inv.payment_status || 'Unpaid',
+                payment_status: effectiveStatus,
+                paid_amount: effectivePaid,
+                existing_credits: effectivePaid,
+                due_amount: remainingDue,
+                remaining_amount: remainingDue,
                 subtotal: inv.subtotal !== undefined ? inv.subtotal : (parseFloat(inv.total_amount || 0) - parseFloat(inv.tax_amount || 0)),
                 ...dueInfo
             };
@@ -706,11 +841,38 @@ exports.getInvoiceById = async (req, res) => {
             return res.status(404).json({ error: 'Invoice not found' });
         }
 
+        // Find existing advance credits/payments
+        const linkedOrder = invoice.orders;
+        const linkedQuote = invoice.orders?.quotations;
+        const invPayFilter = [];
+        if (invoice.order_id) invPayFilter.push(`order_id.eq.${invoice.order_id}`);
+        if (linkedQuote?.id) invPayFilter.push(`quotation_id.eq.${linkedQuote.id}`);
+
+        let invPayments = [];
+        if (invPayFilter.length > 0) {
+            const { data: pData } = await supabase
+                .from('payments')
+                .select('*')
+                .or(invPayFilter.join(','));
+            if (pData) invPayments = pData;
+        }
+
+        const invPaymentsSum = invPayments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+        const quotePaid = parseFloat(linkedQuote?.paid_amount || 0);
+        const totalCredits = Math.max(invPaymentsSum, quotePaid, parseFloat(invoice.paid_amount || 0));
+
+        const totalAmt = parseFloat(invoice.total_amount || 0);
+        const effectivePaid = Math.min(totalAmt, totalCredits > 0 ? totalCredits : ((invoice.status === 'Fully Paid' || invoice.status === 'Paid') ? totalAmt : 0));
+        const remainingDue = Math.max(0, totalAmt - effectivePaid);
+        const effectiveStatus = remainingDue <= 0 && totalAmt > 0
+            ? 'Fully Paid'
+            : (effectivePaid > 0 ? 'Partially Paid' : (invoice.status || invoice.payment_status || 'Unpaid'));
+
         const dueInfo = calculateDueInfo(
             invoice.invoice_date || invoice.created_at,
             invoice.credit_period_days || 30,
-            invoice.status || invoice.payment_status || 'Unpaid',
-            invoice.paid_amount || 0,
+            effectiveStatus,
+            effectivePaid,
             invoice.total_amount,
             invoice.due_date
         );
@@ -722,7 +884,11 @@ exports.getInvoiceById = async (req, res) => {
             ...invoice,
             invoice_no: invoice.invoice_number || invoice.invoice_no,
             invoice_number: invoice.invoice_number || invoice.invoice_no,
-            payment_status: invoice.status || invoice.payment_status || 'Unpaid',
+            payment_status: effectiveStatus,
+            paid_amount: effectivePaid,
+            existing_credits: effectivePaid,
+            due_amount: remainingDue,
+            remaining_amount: remainingDue,
             order_no: orderNo,
             customer: customerProfile,
             organizations: customerProfile,

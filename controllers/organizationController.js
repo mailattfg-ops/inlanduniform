@@ -1226,17 +1226,27 @@ exports.getOrganizationLedger = async (req, res) => {
 
     const invoices = Array.from(invMap.values());
 
-    // 5. Fetch all payments for these quotations
-    let payments = [];
+    // 5. Fetch all payments for these quotations or orders
+    const payMap = new Map();
     if (quotationIds.length > 0) {
       const { data: payData } = await supabase
         .from("payments")
         .select(
-          "id, quotation_id, amount, payment_method, reference_no, notes, paid_at, created_at",
+          "id, quotation_id, order_id, amount, payment_method, reference_no, notes, paid_at, created_at",
         )
         .in("quotation_id", quotationIds);
-      payments = payData || [];
+      (payData || []).forEach(p => payMap.set(p.id, p));
     }
+    if (orderIds.length > 0) {
+      const { data: orderPayData } = await supabase
+        .from("payments")
+        .select(
+          "id, quotation_id, order_id, amount, payment_method, reference_no, notes, paid_at, created_at",
+        )
+        .in("order_id", orderIds);
+      (orderPayData || []).forEach(p => payMap.set(p.id, p));
+    }
+    const payments = Array.from(payMap.values());
 
     // 6. Build combined chronological ledger transactions
     const rawTransactions = [];
@@ -1244,13 +1254,35 @@ exports.getOrganizationLedger = async (req, res) => {
     // Map Invoices as Debits (commercial credit billings)
     invoices.forEach((inv) => {
       const amount = parseFloat(inv.total_amount || 0);
-      const paid = parseFloat(inv.paid_amount || 0);
       const linkedOrder = orders.find((o) => o.id === inv.order_id);
       const linkedQuote = (quotations || []).find(
-        (q) => q.id === inv.quotation_id,
+        (q) => q.id === inv.quotation_id || (linkedOrder && q.id === linkedOrder.quotation_id),
       );
       const orderRef =
         linkedOrder?.order_no || linkedQuote?.quotation_no || (inv.sale_type === 'retail' ? "Retail Direct" : "Direct");
+
+      // Calculate payments and credits matching this invoice or its order/quotation
+      const matchingPayments = payments.filter(p => 
+        (inv.order_id && p.order_id === inv.order_id) ||
+        (linkedQuote && p.quotation_id === linkedQuote.id) ||
+        (inv.invoice_number && p.reference_no === inv.invoice_number)
+      );
+      const paymentsSum = matchingPayments.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+      const quotePaid = parseFloat(linkedQuote?.paid_amount || 0);
+      const totalCredits = Math.max(paymentsSum, quotePaid, parseFloat(inv.paid_amount || 0));
+      const paid = Math.min(amount, totalCredits > 0 ? totalCredits : ((inv.status === 'Fully Paid' || inv.status === 'Paid') ? amount : 0));
+      const remainingDue = Math.max(0, amount - paid);
+
+      const effectiveStatus = remainingDue <= 0 && amount > 0
+        ? 'Fully Paid'
+        : (paid > 0 ? 'Partially Paid' : (inv.payment_status || inv.status || 'Unpaid'));
+
+      inv.paid_amount = paid;
+      inv.existing_credits = paid;
+      inv.due_amount = remainingDue;
+      inv.remaining_amount = remainingDue;
+      inv.payment_status = effectiveStatus;
+      inv.status = effectiveStatus;
 
       const orgCreditPeriod = org.credit_period_days || 30;
       const invCreditPeriod = inv.credit_period_days || orgCreditPeriod;
@@ -1258,8 +1290,8 @@ exports.getOrganizationLedger = async (req, res) => {
       const dueInfo = calculateLedgerDueInfo(
         invDate,
         invCreditPeriod,
-        inv.payment_status || inv.status,
-        amount - paid,
+        effectiveStatus,
+        remainingDue,
         inv.due_date
       );
 
@@ -1386,6 +1418,17 @@ exports.getOrganizationLedger = async (req, res) => {
         };
       }),
       orders: orders || [],
+      payments: payments.map(p => {
+        const linkedQuote = (quotations || []).find(q => q.id === p.quotation_id);
+        const linkedOrder = orders.find(o => o.id === p.order_id || (p.quotation_id && o.quotation_id === p.quotation_id));
+        const linkedInvoice = invoices.find(i => (p.order_id && i.order_id === p.order_id) || (linkedOrder && i.order_id === linkedOrder.id));
+        return {
+          ...p,
+          quotation_no: linkedQuote?.quotation_no,
+          order_no: linkedOrder?.order_no,
+          invoice_no: linkedInvoice?.invoice_number || linkedInvoice?.invoice_no
+        };
+      }),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -130,16 +130,25 @@ exports.fabrics = {
         finalCode = await generateNextFabricCodeLocal();
       }
 
-      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      // Standard fabric format: Garmenttype - BrandQualityShade(width)
       let finalName = name;
-      const parts = [garment_category, brand_name, quality, shade]
+      const bqs = [brand_name, quality, shade]
         .map((s) => (s || "").toString().trim())
-        .filter(Boolean);
-      let standardName = parts.join(" - ");
+        .filter(Boolean)
+        .join(" ");
+      let standardName = "";
+      const gCat = (garment_category || "").toString().trim();
+      if (gCat && bqs) {
+        standardName = `${gCat} - ${bqs}`;
+      } else if (gCat) {
+        standardName = gCat;
+      } else if (bqs) {
+        standardName = bqs;
+      }
       if (width && width.toString().trim()) {
         const w = width.toString().trim();
         const widthStr = w.endsWith('"') ? w : `${w}"`;
-        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+        standardName = standardName ? `${standardName}(${widthStr})` : `(${widthStr})`;
       }
       if (standardName) {
         finalName = standardName;
@@ -199,16 +208,25 @@ exports.fabrics = {
       garment_category,
     } = req.body;
     try {
-      // Standard fabric format: Garment type - Brand - Quality - Shade (width)
+      // Standard fabric format: Garmenttype - BrandQualityShade(width)
       let finalName = name;
-      const parts = [garment_category, brand_name, quality, shade]
+      const bqs = [brand_name, quality, shade]
         .map((s) => (s || "").toString().trim())
-        .filter(Boolean);
-      let standardName = parts.join(" - ");
+        .filter(Boolean)
+        .join(" ");
+      let standardName = "";
+      const gCat = (garment_category || "").toString().trim();
+      if (gCat && bqs) {
+        standardName = `${gCat} - ${bqs}`;
+      } else if (gCat) {
+        standardName = gCat;
+      } else if (bqs) {
+        standardName = bqs;
+      }
       if (width && width.toString().trim()) {
         const w = width.toString().trim();
         const widthStr = w.endsWith('"') ? w : `${w}"`;
-        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
+        standardName = standardName ? `${standardName}(${widthStr})` : `(${widthStr})`;
       }
       if (standardName) {
         finalName = standardName;

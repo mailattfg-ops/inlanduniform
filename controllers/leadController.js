@@ -161,6 +161,8 @@ async function resolveStaffIdentity(req) {
 function normalizeLeadStage(status, lead = {}) {
     if (!status) return STAGES.NEW_LEADS;
     const s = String(status).trim();
+    if (s === 'Open Feeds') return STAGES.FEEDS;
+    if (s === 'Contacted Leads' || s === 'Contacted Feeds') return 'Contacted Leads';
     if (s === 'New') {
         return lead.branch_id ? STAGES.NEW_LEADS : STAGES.OPEN_LEADS;
     }
@@ -886,7 +888,8 @@ module.exports = {
             if (remarks && String(remarks).trim()) {
                 await recordLeadActivity(data.id, {
                     stage: STAGES.FEEDS,
-                    activityType: 'feed_note',
+                    activityType: 'initial_feed_note',
+                    responseType: 'intake',
                     notes: String(remarks).trim(),
                     staff
                 });
@@ -1217,7 +1220,7 @@ module.exports = {
             // --- STAGE-SPECIFIC PROGRESSION RULES ---
 
             // A. FEEDS STAGE
-            if (targetStage === STAGES.FEEDS) {
+            if (targetStage === STAGES.FEEDS || targetStage === 'Contacted Leads' || targetStage === 'Open Feeds') {
                 if (normResponse === 'positive') {
                     // Branch feed -> New Leads; HQ feed -> Open Leads
                     if (lead.branch_id || lead.origin === 'BRANCH') {
@@ -1228,8 +1231,8 @@ module.exports = {
                         transitionReason = 'Positive field feed response (HQ-created) -> Open Leads';
                     }
                 } else {
-                    nextStatus = STAGES.FEEDS;
-                    transitionReason = 'Negative field feed response (remains in Feeds)';
+                    nextStatus = 'Contacted Leads';
+                    transitionReason = 'Feed follow-up response recorded -> Contacted Leads';
                 }
             }
 
@@ -1380,6 +1383,8 @@ module.exports = {
             if (stage && stage !== 'ALL') {
                 if (stage === 'Follow-ups' || stage === 'Cold Leads') {
                     query = query.or('stage.eq.Follow-ups,response_type.ilike.%cold%,outcome.ilike.%cold%');
+                } else if (stage === 'Feeds' || stage === 'Open Feeds' || stage === 'Contacted Leads') {
+                    query = query.or('stage.eq.Feeds,stage.eq.Open Feeds,stage.eq.Contacted Leads');
                 } else {
                     query = query.eq('stage', stage);
                 }

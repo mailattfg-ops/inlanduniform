@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
 
 // Safe helper to convert any date-like input (YYYY-MM-DD string, Date object, ISO string)
 // to a local midnight Date object without timezone shifting bugs.
@@ -182,10 +183,17 @@ exports.createInvoice = async (req, res) => {
             dueDateStr = formatDateOnly(dueDateObj);
         }
 
-        // Generate Invoice Number: YY/MM/INV-XXXX
-        const dateStr = new Date().toISOString().slice(2, 7).replace('-', '/');
-        const randNum = Math.floor(1000 + Math.random() * 9000);
-        const invoice_no = `${dateStr}/INV-${randNum}`;
+        // Generate Invoice Number: INV-IU[Branch NO]-[FY]/[MM][seq]
+        const targetBranch = branch_id || req.user?.branchId || 1;
+        const invoice_no = req.body.invoice_number && String(req.body.invoice_number).trim()
+            ? String(req.body.invoice_number).trim()
+            : await generateNextDocumentNumber(supabase, {
+                prefix: 'INV',
+                table: 'invoices',
+                column: 'invoice_number',
+                branch: targetBranch,
+                date: invDateStr
+            });
 
         let subtotal = 0;
         let totalTax = 0;

@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
 
 // Helper to check if logged in user is global admin
 const isGlobalAdmin = (user) => {
@@ -68,10 +69,14 @@ exports.createDeliveryChallan = async (req, res) => {
             });
         }
 
-        // Generate DC Number: YY/MM/DC-XXXX
-        const dateStr = new Date().toISOString().slice(2, 7).replace('-', '/');
-        const randNum = Math.floor(1000 + Math.random() * 9000);
-        const dc_no = `${dateStr}/DC-${randNum}`;
+        // Generate DC Number: DC-IU[Branch NO]-[FY]/[MM][seq]
+        const dc_no = await generateNextDocumentNumber(supabase, {
+            prefix: 'DC',
+            table: 'delivery_challans',
+            column: 'dc_no',
+            branch: targetBranchId || req.user?.branchId || 1,
+            date: dispatch_date || new Date()
+        });
 
         const rawUserId = req.user?.id;
         const createdBy = rawUserId && /^\d+$/.test(String(rawUserId)) ? parseInt(rawUserId, 10) : null;

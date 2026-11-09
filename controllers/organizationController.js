@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
 const crypto = require("crypto");
 const { logAction } = require("../utils/logger");
 
@@ -1515,7 +1516,13 @@ exports.createOrganizationJournal = async (req, res) => {
 
     const finalJournalNo = journal_no && journal_no.trim()
       ? journal_no.trim()
-      : `JN-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      : await generateNextDocumentNumber(supabase, {
+          prefix: 'JV',
+          table: 'journal_entries',
+          column: 'journal_no',
+          branch: req.user?.branchId || 1,
+          date: date || new Date()
+        });
 
     const { data: journal, error: jError } = await supabase
       .from('journal_entries')

@@ -1,5 +1,6 @@
 const supabase = require("../config/supabase");
 const { toSafeInt } = require("../utils/sanitize");
+const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
 
 // Local helper to generate the next design number
 async function generateNextDesignNumberLocal() {
@@ -1308,11 +1309,17 @@ exports.createQuotation = async (req, res) => {
       metrics_summary,
     );
 
-    // Generate a unique quotation number if not provided
+    // Generate a unique quotation number if not provided: QT-IU[Branch NO]-[FY]/[MM][seq]
     const finalQuotationNo =
       quotation_no && quotation_no.trim()
         ? quotation_no.trim()
-        : `QT-${Date.now().toString().slice(-6)}`;
+        : await generateNextDocumentNumber(supabase, {
+            prefix: 'QT',
+            table: 'quotations',
+            column: 'quotation_no',
+            branch: branch_id || req.user?.branchId || 1,
+            date: quotation_date || new Date()
+          });
 
     // Calculate or resolve final_quote_value
     let resolvedFinalQuoteValue = Number(final_quote_value) || 0;

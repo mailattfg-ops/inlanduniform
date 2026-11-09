@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
 
 // 1. List all payments
 exports.listPayments = async (req, res) => {
@@ -131,12 +132,22 @@ exports.recordPayment = async (req, res) => {
             }
         }
 
+        // Generate Customer Payment voucher number: CP-IU[Branch NO]-[FY]/[MM][seq]
+        const branchForPayment = targetInvoice?.branch_id || quotation?.branch_id || req.user?.branchId || 1;
+        const voucher_no = await generateNextDocumentNumber(supabase, {
+            prefix: 'CP',
+            table: 'payments',
+            column: 'voucher_no',
+            branch: branchForPayment,
+            date: effectivePaidAt
+        });
+
         // Insert new payment line
         const insertPayload = {
             amount: parseFloat(amount),
             payment_method: effectivePaymentMethod,
             payment_mode: effectivePaymentMethod,
-            reference_no: effectiveReferenceNo,
+            reference_no: effectiveReferenceNo || voucher_no,
             notes: paymentNotes,
             paid_at: effectivePaidAt,
             status: 'Completed'
@@ -144,17 +155,39 @@ exports.recordPayment = async (req, res) => {
         if (parsedQuoteId) insertPayload.quotation_id = parsedQuoteId;
         if (parsedOrderId) insertPayload.order_id = parsedOrderId;
 
-        const { data: newPayment, error: paymentError } = await supabase
+        let newPayment = null;
+        let paymentError = null;
+
+        // Try inserting with voucher_no column
+        const primaryInsert = await supabase
             .from('payments')
-            .insert([insertPayload])
+            .insert([{ ...insertPayload, voucher_no }])
             .select()
             .single();
 
-        if (paymentError) {
+        if (primaryInsert.error) {
+            // Fallback if voucher_no column does not exist in schema cache
+            const fallbackInsert = await supabase
+                .from('payments')
+                .insert([insertPayload])
+                .select()
+                .single();
+            newPayment = fallbackInsert.data;
+            paymentError = fallbackInsert.error;
+        } else {
+            newPayment = primaryInsert.data;
+        }
+
+        if (paymentError || !newPayment) {
             console.error('[paymentController:recordPayment] Database error inserting payment:', paymentError);
             return res.status(500).json({
-                error: `Database error inserting payment: ${paymentError.message}. Ensure the 'payments' table exists in database.`
+                error: `Database error inserting payment: ${paymentError?.message || 'Insert failed'}. Ensure the 'payments' table exists in database.`
             });
+        }
+
+        // Attach voucher_no to response object
+        if (!newPayment.voucher_no) {
+            newPayment.voucher_no = voucher_no;
         }
 
         // If quotation is linked, calculate cumulative sum & update quotation

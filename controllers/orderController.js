@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
 const { toSafeInt } = require('../utils/sanitize');
 
 // Helper to check if user is admin
@@ -303,12 +304,17 @@ exports.createOrder = async (req, res) => {
         const initialStatus = status && VALID_ORDER_STATUSES.includes(status) ? status : 'Held at Branch';
 
         // Generate unique order number and barcode sequence
-        const cleanQuoteNo = quotation.quotation_no.replace(/[^A-Za-z0-9]/g, '');
-        const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
-        const order_no = `ORD-${cleanQuoteNo}-${randomSuffix}`;
-        const barcode = `BRC-${cleanQuoteNo}-${randomSuffix}`;
+
 
         const branch_id = req.user?.branchId || quotation.branch_id || null;
+        const order_no = await generateNextDocumentNumber(supabase, {
+            prefix: 'SO',
+            table: 'orders',
+            column: 'order_no',
+            branch: branch_id || 1,
+            date: new Date()
+        });
+        const barcode = `BRC-${order_no}`;
 
         const baseOrderPayload = {
             quotation_id,

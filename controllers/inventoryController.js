@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
 
 const createInventoryHandler = (tableName) => {
   return {
@@ -1508,7 +1509,13 @@ exports.purchaseOrders = {
     const { supplier_name, notes, items } = req.body;
     try {
       const isUUID = (str) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str.trim());
-      const poNumber = `PO-MAN-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const poNumber = await generateNextDocumentNumber(supabase, {
+        prefix: 'PO',
+        table: 'purchase_orders',
+        column: 'po_number',
+        branch: req.user?.branchId || 1,
+        date: new Date()
+      });
 
       // Insert PO Header
       const { data: po, error: poErr } = await supabase

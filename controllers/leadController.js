@@ -1385,6 +1385,10 @@ module.exports = {
                     query = query.or('stage.eq.Follow-ups,response_type.ilike.%cold%,outcome.ilike.%cold%');
                 } else if (stage === 'Feeds' || stage === 'Open Feeds' || stage === 'Contacted Leads') {
                     query = query.or('stage.eq.Feeds,stage.eq.Open Feeds,stage.eq.Contacted Leads');
+                } else if (stage === 'Leads') {
+                    query = query.in('stage', ['Leads', 'Open Leads', 'New Leads', 'Sales Leads', 'Follow-ups', 'Meetings', 'Hot Leads']);
+                } else if (stage === 'SO Converted' || stage === 'SO Converted Deals') {
+                    query = query.or('stage.eq.SO Converted Deals,stage.eq.SO Converted');
                 } else {
                     query = query.eq('stage', stage);
                 }
@@ -1427,6 +1431,13 @@ module.exports = {
                         String(r.outcome || '').toLowerCase().includes('cold') ||
                         String(r.stage || '').toLowerCase().includes('cold')
                     );
+                } else if (stage === 'Feeds' || stage === 'Open Feeds' || stage === 'Contacted Leads') {
+                    remarks = remarks.filter(r => ['Feeds', 'Open Feeds', 'Contacted Leads'].includes(r.stage));
+                } else if (stage === 'Leads') {
+                    const leadStages = ['Leads', 'Open Leads', 'New Leads', 'Sales Leads', 'Follow-ups', 'Meetings', 'Hot Leads'];
+                    remarks = remarks.filter(r => leadStages.includes(r.stage) || (!r.stage && !['Feeds', 'Open Feeds', 'Contacted Leads', 'Quotations', 'Deals', 'SO Converted Deals'].includes(r.stage)));
+                } else if (stage === 'SO Converted' || stage === 'SO Converted Deals') {
+                    remarks = remarks.filter(r => ['SO Converted Deals', 'SO Converted'].includes(r.stage));
                 } else {
                     remarks = remarks.filter(r => r.stage === stage);
                 }

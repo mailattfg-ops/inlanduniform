@@ -56,7 +56,9 @@ exports.getOrganizations = async (req, res) => {
       userRole === "Super Admin" ||
       userRole === "SuperAdmin" ||
       userRole === "System Administrator" ||
-      userRole === "System Admin";
+      userRole === "System Admin" ||
+      (userRole || "").toLowerCase() === "corporate" ||
+      (req.user?.permissions || []).includes("all");
 
     let query = supabase
       .from("organizations")

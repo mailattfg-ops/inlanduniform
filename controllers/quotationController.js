@@ -3980,3 +3980,375 @@ exports.logQuotationFollowUp = async (req, res) => {
   }
 };
 
+// -------------------------------------------------------------
+// SALES ORDER DEALS LIFECYCLE WORKFLOW
+// -------------------------------------------------------------
+
+// 1. Save branch remarks against each quotation item
+exports.saveDealItemRemarks = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { item_remarks } = req.body;
+
+    if (!item_remarks || typeof item_remarks !== 'object') {
+      return res.status(400).json({ error: 'item_remarks object is required' });
+    }
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const existingMetrics = quotation.metrics_summary || {};
+    const currentStage = existingMetrics.so_deal_stage || 'NEW_DEALS';
+
+    // If already submitted to BM or later, editing is locked!
+    if (['PENDING_BM_APPROVAL', 'SO_APPROVED', 'PENDING_CORP_APPROVAL', 'CORP_APPROVED'].includes(currentStage)) {
+      return res.status(400).json({
+        error: 'Deal has been submitted to Branch Manager and cannot be edited.'
+      });
+    }
+
+    const mergedItemRemarks = {
+      ...(existingMetrics.item_remarks || {}),
+      ...item_remarks
+    };
+
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Branch User';
+    const now = new Date().toISOString();
+
+    const updatedMeta = {
+      ...(existingMetrics.so_deal_meta || {}),
+      remarks_saved_at: now,
+      remarks_saved_by: req.user?.id || null,
+      remarks_saved_by_name: authorName
+    };
+
+    const updatedMetrics = {
+      ...existingMetrics,
+      item_remarks: mergedItemRemarks,
+      so_deal_stage: 'SO_DRAFT', // Transitions to SO Draft upon saving remarks
+      so_deal_meta: updatedMeta
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics, updated_at: now })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to update quotation with item remarks' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Item remarks saved successfully. Deal is now in SO Draft stage.',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.saveDealItemRemarks] Error:', err);
+    return res.status(500).json({ error: 'Internal server error saving item remarks' });
+  }
+};
+
+// 2. Branch submits SO Draft to Branch Manager for approval
+exports.submitSoToBm = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const existingMetrics = quotation.metrics_summary || {};
+    const currentStage = existingMetrics.so_deal_stage || 'NEW_DEALS';
+
+    if (['PENDING_BM_APPROVAL', 'SO_APPROVED', 'PENDING_CORP_APPROVAL', 'CORP_APPROVED'].includes(currentStage)) {
+      return res.status(400).json({
+        error: 'Deal has already been submitted to Branch Manager and is locked.'
+      });
+    }
+
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Branch User';
+    const now = new Date().toISOString();
+
+    const updatedMeta = {
+      ...(existingMetrics.so_deal_meta || {}),
+      submitted_to_bm_at: now,
+      submitted_to_bm_by: req.user?.id || null,
+      submitted_to_bm_by_name: authorName
+    };
+
+    const updatedMetrics = {
+      ...existingMetrics,
+      so_deal_stage: 'PENDING_BM_APPROVAL',
+      so_deal_meta: updatedMeta
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics, updated_at: now })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to submit deal to Branch Manager' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Deal submitted to Branch Manager for approval. It is now locked from branch editing.',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.submitSoToBm] Error:', err);
+    return res.status(500).json({ error: 'Internal server error submitting to Branch Manager' });
+  }
+};
+
+// 3. Branch Manager approves SO Draft -> SO Approved Deals
+exports.bmApproveSo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { bm_notes } = req.body;
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const existingMetrics = quotation.metrics_summary || {};
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Branch Manager';
+    const now = new Date().toISOString();
+
+    const updatedMeta = {
+      ...(existingMetrics.so_deal_meta || {}),
+      bm_approved_at: now,
+      bm_approved_by: req.user?.id || null,
+      bm_approved_by_name: authorName,
+      bm_notes: bm_notes || null
+    };
+
+    const updatedMetrics = {
+      ...existingMetrics,
+      so_deal_stage: 'SO_APPROVED',
+      so_deal_meta: updatedMeta
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics, updated_at: now })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to approve deal by Branch Manager' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Deal approved by Branch Manager. Status is now SO Approved Deals.',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.bmApproveSo] Error:', err);
+    return res.status(500).json({ error: 'Internal server error during Branch Manager approval' });
+  }
+};
+
+// 4. Branch Manager submits SO Approved Deal to Corporate
+exports.submitSoToCorporate = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const existingMetrics = quotation.metrics_summary || {};
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Branch Manager';
+    const now = new Date().toISOString();
+
+    const updatedMeta = {
+      ...(existingMetrics.so_deal_meta || {}),
+      submitted_to_corp_at: now,
+      submitted_to_corp_by: req.user?.id || null,
+      submitted_to_corp_by_name: authorName
+    };
+
+    const updatedMetrics = {
+      ...existingMetrics,
+      so_deal_stage: 'PENDING_CORP_APPROVAL',
+      so_deal_meta: updatedMeta
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics, updated_at: now })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to submit deal to Corporate' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Deal submitted to Corporate for final approval.',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.submitSoToCorporate] Error:', err);
+    return res.status(500).json({ error: 'Internal server error submitting to Corporate' });
+  }
+};
+
+// 5. Corporate approves Deal -> Converted to Production Order & disappears from Deals table
+exports.corporateApproveSo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approval_notes } = req.body;
+
+    const { data: quotation, error: fetchErr } = await supabase
+      .from('quotations')
+      .select('id, quotation_no, status, metrics_summary, organization_id, branch_id, lead_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !quotation) {
+      return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    const existingMetrics = quotation.metrics_summary || {};
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Corporate Approver';
+    const now = new Date().toISOString();
+
+    const updatedMeta = {
+      ...(existingMetrics.so_deal_meta || {}),
+      corp_approved_at: now,
+      corp_approved_by: req.user?.id || null,
+      corp_approved_by_name: authorName,
+      corp_approval_notes: approval_notes || null
+    };
+
+    const updatedMetrics = {
+      ...existingMetrics,
+      so_deal_stage: 'CORP_APPROVED',
+      so_deal_meta: updatedMeta
+    };
+
+    const { data: updatedQuote, error: updateErr } = await supabase
+      .from('quotations')
+      .update({ metrics_summary: updatedMetrics, updated_at: now })
+      .eq('id', id)
+      .select('id, quotation_no, status, metrics_summary')
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Failed to record Corporate approval on quotation' });
+    }
+
+    // Ensure order exists in orders table with status 'Corporate Accepted'
+    try {
+      const { data: existingOrder } = await supabase
+        .from('orders')
+        .select('id')
+        .eq('quotation_id', quotation.id)
+        .maybeSingle();
+
+      if (existingOrder) {
+        await supabase
+          .from('orders')
+          .update({
+            status: 'Corporate Accepted',
+            corporate_action: 'Accepted',
+            corporate_action_at: now,
+            corporate_action_by: req.user?.id || null,
+            corporate_action_reason: approval_notes || null,
+            updated_at: now
+          })
+          .eq('id', existingOrder.id);
+      } else {
+        const branch_id = quotation.branch_id || req.user?.branchId || 1;
+        const order_no = await generateNextDocumentNumber(supabase, {
+          prefix: 'SO',
+          table: 'orders',
+          column: 'order_no',
+          branch: branch_id || 1,
+          date: new Date()
+        });
+
+        await supabase
+          .from('orders')
+          .insert([{
+            quotation_id: quotation.id,
+            branch_id: branch_id,
+            order_no: order_no,
+            barcode: `BRC-${order_no}`,
+            status: 'Corporate Accepted',
+            corporate_action: 'Accepted',
+            corporate_action_at: now,
+            corporate_action_by: req.user?.id || null,
+            corporate_action_reason: approval_notes || null,
+            order_notes: approval_notes || '',
+            created_at: now,
+            updated_at: now
+          }]);
+      }
+    } catch (orderErr) {
+      console.warn('[corporateApproveSo] Warning creating order record:', orderErr.message);
+    }
+
+    // Update associated lead to 'SO Converted Deals'
+    if (quotation.organization_id || quotation.lead_id) {
+      try {
+        let leadQuery = supabase.from('leads').update({ status: 'SO Converted Deals', updated_at: now });
+        if (quotation.lead_id) {
+          await leadQuery.eq('id', quotation.lead_id);
+        } else {
+          await leadQuery.eq('organization_id', quotation.organization_id);
+        }
+      } catch (lErr) {
+        console.warn('[corporateApproveSo] Warning updating lead status:', lErr.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Deal approved by Corporate and converted to active Production Sales Order.',
+      data: updatedQuote
+    });
+  } catch (err) {
+    console.error('[quotationController.corporateApproveSo] Error:', err);
+    return res.status(500).json({ error: 'Internal server error during Corporate approval' });
+  }
+};
+
+

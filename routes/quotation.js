@@ -49,6 +49,13 @@ router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['submit_quotat
 // Log follow-up activity on quotation
 router.post('/:id/follow-up', authMiddleware, quotationController.logQuotationFollowUp);
 
+// Sales Order Deal Lifecycle endpoints
+router.put('/:id/deal-item-remarks', authMiddleware, quotationController.saveDealItemRemarks);
+router.put('/:id/submit-so-draft', authMiddleware, quotationController.submitSoToBm);
+router.put('/:id/bm-approve-so', authMiddleware, quotationController.bmApproveSo);
+router.put('/:id/submit-so-corporate', authMiddleware, quotationController.submitSoToCorporate);
+router.put('/:id/corporate-approve-so', authMiddleware, quotationController.corporateApproveSo);
+
 // Delete quotation (Restricted strictly to managers/admins)
 router.delete('/:id', authMiddleware, checkPermission(['manage_quotations']), quotationController.deleteQuotation);
 

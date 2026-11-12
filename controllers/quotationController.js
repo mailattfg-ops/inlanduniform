@@ -772,6 +772,7 @@ exports.listQuotations = async (req, res) => {
       req.user?.role === "Admin" ||
       req.user?.role === "Super Admin" ||
       req.user?.role === "SuperAdmin" ||
+      (req.user?.role || "").toLowerCase() === "corporate" ||
       (req.user?.permissions || []).includes("all");
     const userBranchId = req.user?.branchId;
     const userOrgId = req.user?.organizationId;
@@ -798,7 +799,8 @@ exports.listQuotations = async (req, res) => {
       // Strictly scope to this organization's quotations
       query = query.eq("organization_id", userOrgId);
     } else if (!isAdmin && userBranchId) {
-      query = query.or(`branch_id.eq.${userBranchId},branch_id.is.null`);
+      // Strictly scope to this branch's quotations only
+      query = query.eq("branch_id", userBranchId);
     }
 
     const { data, error } = await query;

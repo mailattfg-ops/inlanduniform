@@ -4,10 +4,19 @@ const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator
 // 1. List all payments
 exports.listPayments = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'Super Admin' || req.user?.role === 'SuperAdmin' || (req.user?.role || '').toLowerCase() === 'corporate' || (req.user?.permissions || []).includes('all');
+        const userBranchId = req.user?.branchId;
+
+        let query = supabase
             .from('payments')
-            .select('*, quotations(quotation_no, title, final_quote_value)')
+            .select('*, quotations(quotation_no, title, final_quote_value, branch_id)')
             .order('created_at', { ascending: false });
+
+        if (!isAdmin && userBranchId) {
+            query = query.eq('quotations.branch_id', userBranchId);
+        }
+
+        const { data, error } = await query;
 
         if (error) throw error;
         res.json(data);

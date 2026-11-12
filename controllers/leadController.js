@@ -452,43 +452,16 @@ module.exports = {
                 .from('leads')
                 .select(selectFieldsWithZone);
 
-            // 2. Global / Unrestricted Visibility:
-            // Users with 'view_all_leads' (Telecalling / HQ / Corporate), Global Admin, or HQ staff (!userBranchId) see ALL leads across all branches
-            const canViewAll = isGlobalAdmin(user) || hasPermission(user, ['view_all_leads', 'manage_leads', 'manage_lead_stage_feeds']) || !userBranchId;
+            // 2. Branch Isolation:
+            // Only Global Admins or HQ users without branchId can view all leads across branches.
+            // Branch Staff / Managers strictly see only leads, feeds, and deals belonging to their assigned branch.
+            const isAdmin = isGlobalAdmin(user);
+            const canViewAll = isAdmin || (!userBranchId && hasPermission(user, 'view_all_leads'));
 
-            if (!canViewAll) {
-                // Determine whether user is a Branch Manager vs Salesperson vs General Branch Staff
-                const isBranchManager = Boolean(
-                    userBranchId && (
-                        userRole.includes('branch manager') ||
-                        staffDesig.includes('branch manager') ||
-                        (staffDesig.includes('manager') && !staffDesig.includes('sales')) ||
-                        userRole.includes('manager') ||
-                        hasPermission(user, ['manage_lead_stage_assign_staff', 'corporate_approver'])
-                    )
-                );
-
-                const isSalesperson = !isBranchManager && Boolean(
-                    staff?.id && (
-                        staffDesig.includes('sales') ||
-                        userRole.includes('sales') ||
-                        staffDept.includes('sales') ||
-                        hasPermission(user, 'manage_lead_stage_sales_contact')
-                    )
-                );
-
-                if (isBranchManager) {
-                    // Branch manager sees branch leads and unassigned feeds
-                    query = query.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
-                } else if (isSalesperson) {
-                    // Sales person sees their assigned leads and unassigned feeds
-                    query = query.or(`assigned_staff_id.eq.${staff.id},and(status.eq.Feeds,branch_id.is.null)`);
-                } else if (userBranchId) {
-                    // General branch staff sees leads of their branch and unassigned feeds
-                    query = query.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
-                } else if (staff?.id) {
-                    query = query.or(`assigned_staff_id.eq.${staff.id},branch_id.is.null,origin.eq.HQ`);
-                }
+            if (!canViewAll && userBranchId) {
+                query = query.eq('branch_id', userBranchId);
+            } else if (!canViewAll && staff?.id) {
+                query = query.eq('assigned_staff_id', staff.id);
             }
 
             let { data, error } = await query.order('created_at', { ascending: false });
@@ -498,16 +471,10 @@ module.exports = {
                     .from('leads')
                     .select(selectFieldsFallback);
 
-                if (!canViewAll) {
-                    if (isBranchManager) {
-                        fallbackQuery = fallbackQuery.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
-                    } else if (isSalesperson) {
-                        fallbackQuery = fallbackQuery.or(`assigned_staff_id.eq.${staff.id},and(status.eq.Feeds,branch_id.is.null)`);
-                    } else if (userBranchId) {
-                        fallbackQuery = fallbackQuery.or(`branch_id.eq.${userBranchId},and(status.eq.Feeds,branch_id.is.null)`);
-                    } else if (staff?.id) {
-                        fallbackQuery = fallbackQuery.or(`assigned_staff_id.eq.${staff.id},branch_id.is.null,origin.eq.HQ`);
-                    }
+                if (!canViewAll && userBranchId) {
+                    fallbackQuery = fallbackQuery.eq('branch_id', userBranchId);
+                } else if (!canViewAll && staff?.id) {
+                    fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
                 }
 
                 const fallbackRes = await fallbackQuery.order('created_at', { ascending: false });

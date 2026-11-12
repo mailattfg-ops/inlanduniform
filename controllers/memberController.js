@@ -144,11 +144,19 @@ exports.listStudents = async (req, res) => {
       });
     }
 
-    const enriched = members.map((m) => ({
-      ...m,
-      departments: m.departments || { name: "Main", section: "Main" },
-      measurement_status: statusMap[String(m.id)] || "Missing",
-    }));
+    const enriched = members.map((m) => {
+      let extractedSection = '';
+      if (m.notes && typeof m.notes === 'string') {
+        const secMatch = m.notes.match(/Section:\s*([^\n,;]+)/i);
+        if (secMatch && secMatch[1]) extractedSection = secMatch[1].trim();
+      }
+      return {
+        ...m,
+        section: extractedSection || m.section || m.departments?.section || m.departments?.division || '',
+        departments: m.departments || { name: "Main", section: "Main" },
+        measurement_status: statusMap[String(m.id)] || "Missing",
+      };
+    });
 
     res.json(enriched);
   } catch (err) {
@@ -317,6 +325,7 @@ exports.createStudent = async (req, res) => {
           gender,
           status: req.body.status || "Active",
           user_id: userData.id,
+          notes: req.body.section ? `Section: ${req.body.section}` : (req.body.notes || null),
         },
       ])
       .select()
@@ -434,6 +443,7 @@ exports.updateStudent = async (req, res) => {
         contact_mobile,
         status,
         gender,
+        ...(req.body.section ? { notes: `Section: ${req.body.section}` } : (req.body.notes !== undefined ? { notes: req.body.notes } : {})),
       })
       .eq("id", id)
       .select()
@@ -545,6 +555,7 @@ exports.bulkCreateStudents = async (req, res) => {
         contact_mobile,
         contact_number,
         gender,
+        section,
       } = s;
       const contact = contact_mobile || contact_number || "";
 
@@ -743,6 +754,7 @@ exports.bulkCreateStudents = async (req, res) => {
         gender: gender || "Male",
         user_id: userData.id,
         status: "Active",
+        notes: section ? `Section: ${section}` : null,
       };
 
       const { error: studentError } = await supabase

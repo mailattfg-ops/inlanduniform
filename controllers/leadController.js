@@ -1230,16 +1230,21 @@ module.exports = {
                         nextStatus = STAGES.OPEN_LEADS;
                         transitionReason = 'Positive field feed response (HQ-created) -> Open Leads';
                     }
+                } else if (['negative', 'cold', 'rejected', 'drop', 'dropped'].includes(normResponse)) {
+                    nextStatus = 'Contacted Leads';
+                    nextIsCold = true;
+                    transitionReason = 'Feed follow-up negative response recorded -> Contacted Leads (Cold)';
                 } else {
                     nextStatus = 'Contacted Leads';
-                    transitionReason = 'Feed follow-up response recorded -> Contacted Leads';
+                    nextIsCold = false;
+                    transitionReason = 'Feed follow-up response recorded -> Contacted Leads (Hold / Pending)';
                 }
             }
 
             // B. FOLLOW-UPS STAGE
             else if (targetStage === STAGES.FOLLOW_UPS) {
-                const isColdChoice = ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped'].includes(normResponse) ||
-                                     ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped'].includes(String(outcome || '').toLowerCase());
+                const isColdChoice = ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped', 'negative'].includes(normResponse) ||
+                                     ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped', 'negative'].includes(String(outcome || '').toLowerCase());
 
                 if (normResponse === 'positive') {
                     nextStatus = STAGES.MEETINGS;
@@ -1253,7 +1258,7 @@ module.exports = {
                 } else {
                     nextStatus = STAGES.FOLLOW_UPS;
                     nextIsCold = lead.is_cold || false;
-                    transitionReason = 'Follow-up on hold/negative (remains in Follow-ups)';
+                    transitionReason = 'Follow-up on hold/pending (remains in Follow-ups)';
                 }
             }
 
@@ -1428,7 +1433,9 @@ module.exports = {
                         r.stage === STAGES.FOLLOW_UPS || 
                         !r.stage ||
                         String(r.response_type || '').toLowerCase().includes('cold') || 
+                        String(r.response_type || '').toLowerCase().includes('negative') || 
                         String(r.outcome || '').toLowerCase().includes('cold') ||
+                        String(r.outcome || '').toLowerCase().includes('negative') ||
                         String(r.stage || '').toLowerCase().includes('cold')
                     );
                 } else if (stage === 'Feeds' || stage === 'Open Feeds' || stage === 'Contacted Leads') {

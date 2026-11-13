@@ -58,6 +58,22 @@ router.post('/:id/journals', (req, res, next) => {
   return checkPermission(['manage_schools', 'branch_sales'])(req, res, next);
 }, organizationController.createOrganizationJournal);
 
+// Organization Commercial / Job Expenses (Manual Entry)
+router.get('/:id/expenses', (req, res, next) => {
+  const role = (req.user?.role || '').toLowerCase();
+  if (req.user?.memberId || ['entity', 'student', 'member'].includes(role)) {
+    return res.status(403).json({ error: 'Access Denied: Individual members cannot view expenses.' });
+  }
+  if (req.user?.organizationId && String(req.user.organizationId) === String(req.params.id)) {
+    return next();
+  }
+  return checkPermission(['manage_schools', 'view_schools', 'branch_sales'])(req, res, next);
+}, organizationController.getOrganizationExpenses);
+
+router.post('/:id/expenses', (req, res, next) => {
+  return checkPermission(['manage_schools', 'branch_sales'])(req, res, next);
+}, organizationController.createOrganizationExpense);
+
 router.post('/', checkPermission(['manage_schools']), organizationController.createOrganization);
 router.put('/:id', checkPermission(['manage_schools']), organizationController.updateOrganization);
 router.delete('/:id', checkPermission(['manage_schools']), organizationController.deleteOrganization);

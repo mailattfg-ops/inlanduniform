@@ -1586,3 +1586,119 @@ exports.createOrganizationJournal = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// Organization Commercial / Job Expenses (Manual Entry)
+exports.getOrganizationExpenses = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('record_activity_logs')
+      .select('*')
+      .eq('entity_type', 'OrganizationExpense')
+      .eq('entity_id', id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.warn('Could not query expenses from record_activity_logs:', error.message);
+      return res.json({ success: true, expenses: [] });
+    }
+
+    const expenses = (data || []).map(row => ({
+      id: `EXP-MAN-${row.id}`,
+      db_id: row.id,
+      voucher_no: row.details?.voucher_no || `EXP-M-${row.id}`,
+      expense_ref: row.details?.voucher_no || `EXP-M-${row.id}`,
+      date: row.details?.date || row.created_at,
+      category: row.details?.category || 'General Direct Expense',
+      so_no: row.details?.so_no || '—',
+      order_no: row.details?.so_no || '—',
+      linked_ref: row.details?.so_no || '—',
+      customer_name: row.details?.customer_name || '—',
+      sales_person: row.details?.sales_person || 'Unassigned',
+      payment_mode: row.details?.payment_mode || 'Cash',
+      description: row.details?.description || 'Manual Expense Entry',
+      amount: parseFloat(row.details?.amount || 0),
+      status: row.details?.status || 'Paid',
+      created_at: row.created_at
+    }));
+
+    res.json({ success: true, expenses });
+  } catch (err) {
+    console.error('getOrganizationExpenses error:', err);
+    res.json({ success: true, expenses: [] });
+  }
+};
+
+exports.createOrganizationExpense = async (req, res) => {
+  const { id } = req.params;
+  const {
+    voucher_no,
+    date,
+    category,
+    so_no,
+    customer_name,
+    sales_person,
+    payment_mode,
+    description,
+    amount,
+    status
+  } = req.body;
+
+  try {
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({ error: 'Valid expense amount is required' });
+    }
+    if (!description || !description.trim()) {
+      return res.status(400).json({ error: 'Expense description is required' });
+    }
+
+    const expVoucher = voucher_no && voucher_no.trim()
+      ? voucher_no.trim()
+      : `EXP-M-${Date.now().toString().slice(-6)}`;
+
+    const details = {
+      voucher_no: expVoucher,
+      date: date || new Date().toISOString(),
+      category: (category && category.trim()) || 'General Direct Expense',
+      so_no: (so_no && so_no.trim()) || null,
+      customer_name: (customer_name && customer_name.trim()) || null,
+      sales_person: (sales_person && sales_person.trim()) || null,
+      payment_mode: payment_mode || 'Bank Transfer',
+      description: description.trim(),
+      amount: parsedAmount,
+      status: status || 'Paid'
+    };
+
+    const { data, error } = await supabase
+      .from('record_activity_logs')
+      .insert([{
+        entity_type: 'OrganizationExpense',
+        entity_id: parseInt(id, 10),
+        action: 'EXPENSE_RECORDED',
+        performed_by: String(req.user?.id || 1),
+        details,
+        attachments: []
+      }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('createOrganizationExpense error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.status(201).json({
+      success: true,
+      expense: {
+        id: `EXP-MAN-${data.id}`,
+        db_id: data.id,
+        ...details,
+        created_at: data.created_at
+      }
+    });
+  } catch (err) {
+    console.error('createOrganizationExpense error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};

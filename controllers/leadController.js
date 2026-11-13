@@ -127,7 +127,7 @@ async function resolveStaffIdentity(req) {
     const email = req.user?.email;
 
     try {
-        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department, branch_id');
+        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department, branch_id, branches(id, name)');
         if (empRecordId) query = query.eq('id', empRecordId);
         else if (empCode) query = query.eq('employee_id', empCode);
         else if (email) query = query.eq('email', email);
@@ -141,7 +141,8 @@ async function resolveStaffIdentity(req) {
                 full_name: employee.full_name,
                 designation: employee.designation || 'Staff',
                 department: employee.department || 'Operations',
-                branch_id: employee.branch_id || req.user?.branchId || null
+                branch_id: employee.branch_id || req.user?.branchId || null,
+                branch_name: employee.branches?.name || req.user?.branchName || req.user?.branch || null
             };
         }
     } catch (err) {
@@ -153,7 +154,9 @@ async function resolveStaffIdentity(req) {
         employee_id: req.user?.employeeId || 'STAFF',
         full_name: req.user?.fullName || req.user?.username || 'Staff Member',
         designation: req.user?.role || 'Staff',
-        department: req.user?.department || 'Operations'
+        department: req.user?.department || 'Operations',
+        branch_id: req.user?.branchId || null,
+        branch_name: req.user?.branchName || req.user?.branch || null
     };
 }
 
@@ -203,7 +206,13 @@ async function recordLeadActivity(leadId, {
         employee_id: 'STAFF',
         full_name: 'Staff Member',
         designation: 'Staff',
-        department: 'Operations'
+        department: 'Operations',
+        branch_name: null
+    };
+
+    const finalMetadata = {
+        ...(metadata || {}),
+        branch_name: safeStaff.branch_name || safeStaff.branch || (metadata && metadata.branch_name) || null
     };
 
     // 1. Relational Table Insertion
@@ -221,7 +230,7 @@ async function recordLeadActivity(leadId, {
             notes: finalNotes,
             response_type: finalResponseType,
             outcome: outcome || finalResponseType,
-            metadata: metadata || {}
+            metadata: finalMetadata
         }]);
 
         if (actErr) {
@@ -239,7 +248,7 @@ async function recordLeadActivity(leadId, {
                     notes: finalNotes,
                     response_type: finalResponseType,
                     outcome: outcome || finalResponseType,
-                    metadata: metadata || {}
+                    metadata: finalMetadata
                 }]);
             }
         }
@@ -264,9 +273,10 @@ async function recordLeadActivity(leadId, {
             name: safeStaff.full_name,
             employee_id: safeStaff.employee_id,
             designation: safeStaff.designation,
-            department: safeStaff.department
+            department: safeStaff.department,
+            branch: safeStaff.branch_name || safeStaff.branch || (finalMetadata && finalMetadata.branch_name) || null
         },
-        metadata: metadata || {}
+        metadata: finalMetadata
     };
 
     let updatedRemarks = Array.isArray(currentRemarks) ? [...currentRemarks] : [];
@@ -1385,6 +1395,7 @@ module.exports = {
                     staff_employee_id: act.performed_by_emp_id || 'STAFF',
                     staff_designation: act.performed_by_designation || 'Staff',
                     staff_department: act.performed_by_dept || 'Operations',
+                    staff_branch: act.metadata?.branch_name || act.metadata?.branch || null,
                     created_at: act.created_at
                 }));
                 return res.json({ success: true, activities: formatted });
@@ -1432,6 +1443,7 @@ module.exports = {
                 staff_employee_id: r.author?.employee_id || 'STAFF',
                 staff_designation: r.author?.designation || 'Staff',
                 staff_department: r.author?.department || 'Operations',
+                staff_branch: r.author?.branch || r.author?.branch_name || r.metadata?.branch_name || null,
                 created_at: r.date ? `${r.date} ${r.time || ''}` : new Date().toISOString()
             })).reverse();
 

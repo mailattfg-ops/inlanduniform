@@ -310,14 +310,15 @@ exports.createOrganization = async (req, res) => {
   } = req.body;
 
   try {
-    // 1. Validate credentials & phone
-    if (!username || !password) {
-      return res.status(400).json({
-        error:
-          "Username and password are required for organization registration.",
-      });
+    // 1. Resolve Customer ID (customer_code e.g. CN001) which also serves as portal login ID
+    let finalCustomerCode = customer_code;
+    if (!finalCustomerCode || finalCustomerCode.trim() === "") {
+      finalCustomerCode = await generateNextCustomerCodeLocal();
     }
+    let portalLoginId = (finalCustomerCode || username || "").trim().toUpperCase();
+    const resolvedPassword = password && String(password).trim() !== "" ? String(password).trim() : generatePassword();
 
+    // 2. Validate phone
     if (!phone || String(phone).trim() === "") {
       return res.status(400).json({
         error: "Phone number is required for customer registration.",
@@ -333,20 +334,28 @@ exports.createOrganization = async (req, res) => {
     let userCollisionQuery = supabase.from("user_profiles").select("id");
     if (cleanEmail) {
       userCollisionQuery = userCollisionQuery.or(
-        `email.eq.${cleanEmail},username.eq.${username}`,
+        `email.eq.${cleanEmail},username.eq.${portalLoginId}`,
       );
     } else {
-      userCollisionQuery = userCollisionQuery.eq("username", username);
+      userCollisionQuery = userCollisionQuery.eq("username", portalLoginId);
     }
     const { data: existingUser } = await userCollisionQuery.maybeSingle();
 
     if (existingUser) {
-      return res.status(400).json({
-        error: `Username "${username}" or email is already in use. Please choose a different username.`,
-      });
+      // If customer_code collision in user_profiles, make portal login ID unique
+      let counter = 1;
+      while (true) {
+        const testCode = `${portalLoginId}_${counter}`;
+        const { data: collision } = await supabase.from("user_profiles").select("id").eq("username", testCode).maybeSingle();
+        if (!collision) {
+          portalLoginId = testCode;
+          break;
+        }
+        counter++;
+      }
     }
 
-    // 2. Create User Profile first - dynamically resolve valid user_type_id from user_types table
+    // 3. Create User Profile first - dynamically resolve valid user_type_id from user_types table
     let orgRoleId = null;
     const { data: roleRecords } = await supabase
       .from("user_types")
@@ -388,9 +397,9 @@ exports.createOrganization = async (req, res) => {
       .insert([
         {
           full_name: name,
-          username: username,
+          username: portalLoginId,
           email: cleanEmail,
-          password: password,
+          password: resolvedPassword,
           user_type_id: orgRoleId,
         },
       ])
@@ -398,12 +407,6 @@ exports.createOrganization = async (req, res) => {
       .single();
 
     if (userError) throw userError;
-
-    // Generate next customer code if not provided
-    let finalCustomerCode = customer_code;
-    if (!finalCustomerCode || finalCustomerCode.trim() === "") {
-      finalCustomerCode = await generateNextCustomerCodeLocal();
-    }
 
     // 3. Create Organization and link to user
     const resolvedPincode = pincode ? String(pincode).trim() : null;
@@ -555,7 +558,15 @@ exports.createOrganization = async (req, res) => {
       name: data.name,
     });
 
-    res.json({ success: true, data });
+    res.json({
+      success: true,
+      data,
+      credentials: {
+        username: portalLoginId,
+        password: resolvedPassword,
+        customer_code: finalCustomerCode,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

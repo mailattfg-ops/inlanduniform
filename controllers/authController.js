@@ -15,7 +15,7 @@ exports.login = async (req, res) => {
 
   try {
     // 1. First check user_profiles
-    const { data: profile, error: pError } = await supabase
+    let { data: profile, error: pError } = await supabase
       .from('user_profiles')
       .select(`
         *,
@@ -24,9 +24,36 @@ exports.login = async (req, res) => {
           permissions
         )
       `)
-      .or(`email.eq.${cleanEmail},username.eq.${cleanEmail}`)
+      .or(`email.eq.${cleanEmail},username.eq.${cleanEmail},username.ilike.${cleanEmail}`)
       .eq('password', cleanPass)
       .maybeSingle();
+
+    if (!profile) {
+      // Also allow logging in with Customer ID (customer_code e.g. CN001)
+      const { data: orgMatch } = await supabase
+        .from('organizations')
+        .select('user_id')
+        .ilike('customer_code', cleanEmail)
+        .maybeSingle();
+
+      if (orgMatch && orgMatch.user_id) {
+        const { data: orgProfile } = await supabase
+          .from('user_profiles')
+          .select(`
+            *,
+            user_types (
+              name,
+              permissions
+            )
+          `)
+          .eq('id', orgMatch.user_id)
+          .eq('password', cleanPass)
+          .maybeSingle();
+        if (orgProfile) {
+          profile = orgProfile;
+        }
+      }
+    }
 
     if (pError) {
       console.error('[AUTH] Supabase error in user_profiles query:', pError.message, pError.details || '');

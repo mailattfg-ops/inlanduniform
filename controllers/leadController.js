@@ -329,9 +329,7 @@ async function ensureOrganizationForLead(lead, req, { createPortalCredentials = 
     let credentials = null;
 
     if (createPortalCredentials) {
-        const cleanLeadCode = (lead.lead_code || `id${lead.id}`).toLowerCase().replace(/[^a-z0-9]/g, '');
-        const baseUsername = `cust_${cleanLeadCode || Math.random().toString(36).substring(7)}`;
-        let username = baseUsername;
+        let username = customerCode.toUpperCase();
         let email = (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : null;
         const password = crypto.randomBytes(4).toString('hex').toUpperCase();
 

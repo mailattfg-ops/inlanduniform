@@ -592,10 +592,19 @@ module.exports = {
         } = req.body;
 
         if (!name || name.trim() === '') {
-            return res.status(400).json({ error: 'Lead name is required' });
+            return res.status(400).json({ error: 'Customer name is required' });
+        }
+        if (!industry_id) {
+            return res.status(400).json({ error: 'Industry sector is required' });
         }
         if (!phone || String(phone).trim() === '') {
             return res.status(400).json({ error: 'Phone number is required' });
+        }
+        if (!city || String(city).trim() === '') {
+            return res.status(400).json({ error: 'City is required' });
+        }
+        if (!state || String(state).trim() === '') {
+            return res.status(400).json({ error: 'State is required' });
         }
 
         try {
@@ -776,8 +785,14 @@ module.exports = {
         if (!name || !name.trim()) {
             return res.status(400).json({ error: 'Customer name is required' });
         }
-        if (!clientPhone || !String(clientPhone).trim()) {
-            return res.status(400).json({ error: 'Contact number is required' });
+        if (!industry_id) {
+            return res.status(400).json({ error: 'Industry sector is required' });
+        }
+        if (!city || !String(city).trim()) {
+            return res.status(400).json({ error: 'City is required' });
+        }
+        if (!state || !String(state).trim()) {
+            return res.status(400).json({ error: 'State is required' });
         }
 
         try {
@@ -791,7 +806,7 @@ module.exports = {
 
             const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || userBranchId || null);
             const targetOrigin = (!isAdmin && userBranchId) ? 'BRANCH' : (origin || (targetBranchId ? 'BRANCH' : 'HQ'));
-            const cleanPhone = String(clientPhone).trim();
+            const cleanPhone = clientPhone && String(clientPhone).trim() ? String(clientPhone).trim() : null;
             const resolvedPincode = pincode ? String(pincode).trim() : null;
             const lead_code = await generateNextLeadCodeLocal();
 
@@ -911,7 +926,19 @@ module.exports = {
         } = req.body;
 
         if (!name || name.trim() === '') {
-            return res.status(400).json({ error: 'Lead name is required' });
+            return res.status(400).json({ error: 'Customer name is required' });
+        }
+        if (industry_id !== undefined && !industry_id && !req.body.industry_id) {
+            return res.status(400).json({ error: 'Industry sector is required' });
+        }
+        if (city !== undefined && (!city || String(city).trim() === '')) {
+            return res.status(400).json({ error: 'City is required' });
+        }
+        if (state !== undefined && (!state || String(state).trim() === '')) {
+            return res.status(400).json({ error: 'State is required' });
+        }
+        if (phone !== undefined && req.body.status !== 'Feeds' && (!phone || String(phone).trim() === '')) {
+            return res.status(400).json({ error: 'Phone number is required' });
         }
 
         try {

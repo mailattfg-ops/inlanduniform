@@ -448,12 +448,14 @@ module.exports = {
                 *,
                 industries ( id, name ),
                 employees ( id, full_name, employee_id, branch_id ),
-                zones ( id, name, code, branch_id )
+                zones ( id, name, code, branch_id ),
+                organizations ( id, name, is_risk, is_special, client_tag )
             `;
             let selectFieldsFallback = `
                 *,
                 industries ( id, name ),
-                employees ( id, full_name, employee_id, branch_id )
+                employees ( id, full_name, employee_id, branch_id ),
+                organizations ( id, name, is_risk, is_special, client_tag )
             `;
 
             let query = supabase

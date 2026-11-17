@@ -973,7 +973,15 @@ module.exports = {
             if (contact_person !== undefined) updateFields.contact_person = contact_person ? String(contact_person).trim() : null;
             if (contact_designation !== undefined) updateFields.contact_designation = contact_designation ? String(contact_designation).trim() : null;
             if (source !== undefined) updateFields.source = source ? String(source).trim() : null;
-            if (requirements !== undefined) updateFields.requirements = requirements ? String(requirements).trim() : null;
+            // Once a requirement is saved, it shouldn't be editable.
+            if (requirements !== undefined) {
+                const { data: currentLead } = await supabase.from('leads').select('requirements').eq('id', id).maybeSingle();
+                if (currentLead && currentLead.requirements && currentLead.requirements.trim()) {
+                    // Already saved; cannot be overwritten or edited
+                } else {
+                    updateFields.requirements = requirements ? String(requirements).trim() : null;
+                }
+            }
             if (area !== undefined) updateFields.area = area ? String(area).trim() : null;
             if (google_maps_link !== undefined) updateFields.google_maps_link = google_maps_link ? String(google_maps_link).trim() : null;
             if (is_cold !== undefined) updateFields.is_cold = Boolean(is_cold);

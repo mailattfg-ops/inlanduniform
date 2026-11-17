@@ -4169,7 +4169,7 @@ exports.bmApproveSo = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Deal approved by Branch Manager. Status is now SO Approved Deals.',
+      message: 'Deal approved by Branch Manager. Returned to marketing staff to submit to Corporate for final approval.',
       data: updatedQuote
     });
   } catch (err) {
@@ -4178,7 +4178,7 @@ exports.bmApproveSo = async (req, res) => {
   }
 };
 
-// 4. Branch Manager submits SO Approved Deal to Corporate
+// 4. Marketing staff submits BM Approved SO Deal to Corporate
 exports.submitSoToCorporate = async (req, res) => {
   try {
     const { id } = req.params;
@@ -4194,7 +4194,7 @@ exports.submitSoToCorporate = async (req, res) => {
     }
 
     const existingMetrics = quotation.metrics_summary || {};
-    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Branch Manager';
+    const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Marketing Staff';
     const now = new Date().toISOString();
 
     const updatedMeta = {

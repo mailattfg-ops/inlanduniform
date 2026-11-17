@@ -448,12 +448,14 @@ module.exports = {
                 *,
                 industries ( id, name ),
                 employees ( id, full_name, employee_id, branch_id ),
-                zones ( id, name, code, branch_id )
+                zones ( id, name, code, branch_id ),
+                organizations ( id, name, is_risk, is_special, client_tag )
             `;
             let selectFieldsFallback = `
                 *,
                 industries ( id, name ),
-                employees ( id, full_name, employee_id, branch_id )
+                employees ( id, full_name, employee_id, branch_id ),
+                organizations ( id, name, is_risk, is_special, client_tag )
             `;
 
             let query = supabase
@@ -971,7 +973,15 @@ module.exports = {
             if (contact_person !== undefined) updateFields.contact_person = contact_person ? String(contact_person).trim() : null;
             if (contact_designation !== undefined) updateFields.contact_designation = contact_designation ? String(contact_designation).trim() : null;
             if (source !== undefined) updateFields.source = source ? String(source).trim() : null;
-            if (requirements !== undefined) updateFields.requirements = requirements ? String(requirements).trim() : null;
+            // Once a requirement is saved, it shouldn't be editable.
+            if (requirements !== undefined) {
+                const { data: currentLead } = await supabase.from('leads').select('requirements').eq('id', id).maybeSingle();
+                if (currentLead && currentLead.requirements && currentLead.requirements.trim()) {
+                    // Already saved; cannot be overwritten or edited
+                } else {
+                    updateFields.requirements = requirements ? String(requirements).trim() : null;
+                }
+            }
             if (area !== undefined) updateFields.area = area ? String(area).trim() : null;
             if (google_maps_link !== undefined) updateFields.google_maps_link = google_maps_link ? String(google_maps_link).trim() : null;
             if (is_cold !== undefined) updateFields.is_cold = Boolean(is_cold);
@@ -1024,6 +1034,38 @@ module.exports = {
             }
 
             if (updateError) throw updateError;
+
+            // Synchronize linked organization if this lead is converted/linked to one
+            try {
+                const { data: leadRow } = await supabase.from('leads').select('organization_id').eq('id', id).maybeSingle();
+                if (leadRow?.organization_id) {
+                    const orgSync = {};
+                    if (name !== undefined) orgSync.name = name.trim();
+                    if (contact_title !== undefined) orgSync.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
+                    if (contact_person !== undefined) orgSync.contact_person = contact_person ? String(contact_person).trim() : null;
+                    if (contact_designation !== undefined) orgSync.contact_designation = contact_designation ? String(contact_designation).trim() : null;
+                    if (cleanPhone !== undefined) {
+                        orgSync.contact_number = cleanPhone;
+                        orgSync.phone = cleanPhone;
+                    }
+                    if (email !== undefined) orgSync.contact_email = email && email.trim() ? email.trim() : null;
+                    if (address !== undefined) orgSync.address = address ? String(address).trim() : null;
+                    if (city !== undefined) orgSync.city = city ? String(city).trim() : null;
+                    if (state !== undefined) orgSync.state = state ? String(state).trim() : null;
+                    if (resolvedPincode !== undefined) orgSync.pincode = resolvedPincode;
+                    if (country !== undefined) orgSync.country = country ? String(country).trim() : 'India';
+                    if (industry_id !== undefined) orgSync.industry_id = req.body.industry_id !== undefined ? (req.body.industry_id ? parseInt(req.body.industry_id, 10) : null) : (industry_id ? parseInt(industry_id, 10) : null);
+                    if (branch_id !== undefined) orgSync.branch_id = branch_id;
+                    if (req.body.zone_id !== undefined) orgSync.zone_id = req.body.zone_id ? parseInt(req.body.zone_id, 10) : null;
+
+                    if (Object.keys(orgSync).length > 0) {
+                        await supabase.from('organizations').update(orgSync).eq('id', leadRow.organization_id);
+                    }
+                }
+            } catch (orgSyncErr) {
+                console.warn('[leadController.update] Org sync notice:', orgSyncErr.message);
+            }
+
             res.json(updateResult);
         } catch (err) {
             console.error('[leadController.update] Exception:', err);

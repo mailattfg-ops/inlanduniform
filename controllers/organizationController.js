@@ -774,7 +774,39 @@ exports.updateOrganization = async (req, res) => {
       data.contact_phone = savedNum;
     }
 
-    // 2. Log the action
+    // 2. Synchronize linked lead record if exists
+    try {
+      const leadSync = {};
+      if (name !== undefined) leadSync.name = name;
+      if (contact_title !== undefined) leadSync.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
+      if (contact_person !== undefined) leadSync.contact_person = contact_person ? String(contact_person).trim() : null;
+      if (contact_designation !== undefined) leadSync.contact_designation = contact_designation ? String(contact_designation).trim() : null;
+      if (rawPhone !== undefined) {
+        const cleanP = rawPhone ? String(rawPhone).trim() : null;
+        leadSync.phone = cleanP;
+        leadSync.contact_number = cleanP;
+      }
+      if (contact_email !== undefined || email !== undefined) {
+        const em = contact_email || email;
+        leadSync.email = em ? String(em).trim().toLowerCase() : null;
+      }
+      if (address !== undefined) leadSync.address = address ? String(address).trim() : null;
+      if (city !== undefined) leadSync.city = city ? String(city).trim() : null;
+      if (state !== undefined) leadSync.state = state ? String(state).trim() : null;
+      if (pincode !== undefined) leadSync.pincode = pincode ? String(pincode).trim() : null;
+      if (country !== undefined) leadSync.country = country ? String(country).trim() : 'India';
+      if (industry_id !== undefined) leadSync.industry_id = industry_id;
+      if (req.body.branch_id !== undefined) leadSync.branch_id = req.body.branch_id ? parseInt(req.body.branch_id, 10) : null;
+      if (req.body.zone_id !== undefined) leadSync.zone_id = req.body.zone_id ? parseInt(req.body.zone_id, 10) : null;
+
+      if (Object.keys(leadSync).length > 0) {
+        await supabase.from('leads').update(leadSync).eq('organization_id', id);
+      }
+    } catch (leadSyncErr) {
+      console.warn('[updateOrganization] Lead sync notice:', leadSyncErr.message);
+    }
+
+    // 3. Log the action
     if (req.user?.id) {
       await logAction(req.user.id, "UPDATE", "organization", id, {
         updated_fields: Object.keys(updatePayload),

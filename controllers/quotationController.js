@@ -3904,7 +3904,20 @@ exports.logQuotationFollowUp = async (req, res) => {
       return res.status(404).json({ error: 'Quotation not found' });
     }
 
-    const followUpOutcome = response_type || responseType || outcome || 'hold';
+    const followUpOutcome = response_type || responseType || outcome || 'held';
+    let targetStatus = quotation.status;
+    const outcomeLower = String(followUpOutcome).toLowerCase();
+    if (outcomeLower === 'rejected' || outcomeLower === 'negative') {
+      targetStatus = 'Rejected';
+    } else if (outcomeLower === 'held' || outcomeLower === 'hold') {
+      targetStatus = 'Held';
+    } else if (outcomeLower === 'approved' || outcomeLower === 'positive') {
+      targetStatus = 'Approved';
+    }
+    if (req.body.status) {
+      targetStatus = req.body.status;
+    }
+
     const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Sales Representative';
     const now = new Date();
     const newFollowUp = {
@@ -3930,18 +3943,88 @@ exports.logQuotationFollowUp = async (req, res) => {
       ...(quotation.metrics_summary || {}),
       followups: [newFollowUp, ...curFollowups],
       last_followup: newFollowUp,
-      last_followup_at: now.toISOString()
+      last_followup_at: now.toISOString(),
+      customer_status: targetStatus
     };
 
     const { data: updatedQuote, error: updateErr } = await supabase
       .from('quotations')
-      .update({ metrics_summary: updatedMetrics })
+      .update({ 
+        metrics_summary: updatedMetrics,
+        status: targetStatus,
+        updated_at: now.toISOString()
+      })
       .eq('id', id)
       .select('id, quotation_no, status, metrics_summary, organization_id')
       .single();
 
     if (updateErr) {
       return res.status(500).json({ error: 'Failed to update quotation with follow-up' });
+    }
+
+    // Auto-advance linked lead to Deals (SO Draft) upon customer approval
+    if (targetStatus === 'Approved' && quotation.organization_id) {
+      try {
+        let { data: matchedLeads } = await supabase
+          .from("leads")
+          .select("id, status, remarks")
+          .eq("organization_id", quotation.organization_id);
+
+        if (!matchedLeads || matchedLeads.length === 0) {
+          const { data: org } = await supabase
+            .from("organizations")
+            .select("name")
+            .eq("id", quotation.organization_id)
+            .maybeSingle();
+
+          if (org && org.name) {
+            const { data: leadsByName } = await supabase
+              .from("leads")
+              .select("id, status, remarks")
+              .ilike("name", org.name.trim());
+            matchedLeads = leadsByName;
+          }
+        }
+
+        if (matchedLeads && matchedLeads.length > 0) {
+          const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+          const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+          for (const ml of matchedLeads) {
+            if (ml.status !== "SO Converted Deals" && ml.status !== "Deals") {
+              let curRemarks = Array.isArray(ml.remarks) ? [...ml.remarks] : [];
+              curRemarks.push({
+                date: dateStr,
+                time: timeStr,
+                text: `Quotation #${quotation.quotation_no || id} approved by customer. Advanced to Deals as SO Draft.`,
+                stage: "Deals",
+                response_type: "positive",
+                author: {
+                  name: authorName,
+                  role: "Commercial"
+                }
+              });
+
+              await supabase
+                .from("leads")
+                .update({
+                  status: "Deals",
+                  remarks: curRemarks,
+                  updated_at: new Date()
+                })
+                .eq("id", ml.id);
+
+              await supabase.from("lead_stage_history").insert([{
+                lead_id: ml.id,
+                stage: "Deals",
+                transition_reason: `Quotation #${quotation.quotation_no || id} approved by customer (SO Draft)`
+              }]).catch(() => {});
+            }
+          }
+        }
+      } catch (leadAdvErr) {
+        console.warn("Could not auto-advance lead to Deals upon Customer approval:", leadAdvErr.message);
+      }
     }
 
     // Also mirror to active lead if organization_id matches

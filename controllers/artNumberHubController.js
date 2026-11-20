@@ -1,101 +1,176 @@
 const supabase = require('../config/supabase');
+const specsStore = require('../utils/specificationsStore');
 
 function isMissingTableError(error) {
     if (!error) return false;
     const msg = (error.message || '').toLowerCase();
-    return error.code === 'PGRST205' || msg.includes('schema cache') || msg.includes('does not exist');
+    return (
+        error.code === 'PGRST205' ||
+        error.code === 'PGRST200' ||
+        error.code === '42P01' ||
+        error.code === '42703' ||
+        msg.includes('schema cache') ||
+        msg.includes('does not exist') ||
+        msg.includes('relationship') ||
+        msg.includes('could not find a relationship')
+    );
 }
 
 // ==========================================
-// 1. DRESS PREFIXES CRUD
+// 1. ITEMS (MASTER GARMENT ITEMS) CRUD
 // ==========================================
-exports.listDresses = async (req, res) => {
+exports.listItems = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('art_dresses')
-            .select('*')
+        let { data, error } = await supabase
+            .from('art_items')
+            .select('*, art_item_specifications(id, code, name, description, display_order), product_types(id, name)')
             .order('code', { ascending: true });
 
-        if (error) throw error;
+        if (error && isMissingTableError(error)) {
+            // Try simple art_items select without relationships
+            const simpleRes = await supabase.from('art_items').select('*').order('code', { ascending: true });
+            if (!simpleRes.error) {
+                data = (simpleRes.data || []).map(d => ({ ...d, art_item_specifications: specsStore.list(d.id) }));
+            } else {
+                // Fallback to art_dresses if art_items is not yet created
+                const dressRes = await supabase.from('art_dresses').select('*').order('code', { ascending: true });
+                if (!dressRes.error) {
+                    data = (dressRes.data || []).map(d => ({ ...d, art_item_specifications: specsStore.list(d.id) }));
+                } else {
+                    data = [];
+                }
+            }
+        } else if (error) {
+            throw error;
+        }
+
+        // Ensure each item has art_item_specifications populated
+        data = (data || []).map(d => {
+            const currentSpecs = d.art_item_specifications;
+            if (!currentSpecs || currentSpecs.length === 0) {
+                return { ...d, art_item_specifications: specsStore.list(d.id) };
+            }
+            return d;
+        });
+
         res.json(data || []);
     } catch (err) {
-        console.error('[ArtNumberHub] listDresses error:', err.message);
+        console.error('[ArtNumberHub] listItems error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };
 
-exports.createDress = async (req, res) => {
+exports.createItem = async (req, res) => {
     try {
-        const { code, name, description } = req.body;
+        const { code, name, description, product_type_id } = req.body;
         if (!code || !name) {
-            return res.status(400).json({ error: 'Code and name are required' });
+            return res.status(400).json({ error: 'Item code and name are required' });
         }
 
-        const { data, error } = await supabase
-            .from('art_dresses')
-            .insert([{ code: code.trim().toUpperCase(), name: name.trim(), description: description ? description.trim() : null }])
-            .select()
+        const cleanCode = code.trim().toUpperCase();
+        const cleanName = name.trim();
+        const payload = {
+            code: cleanCode,
+            name: cleanName,
+            description: description ? description.trim() : null,
+            product_type_id: product_type_id ? Number(product_type_id) : null
+        };
+
+        let { data, error } = await supabase
+            .from('art_items')
+            .insert([payload])
+            .select('*, art_item_specifications(*), product_types(id, name)')
             .single();
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_dresses' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
-            }
+        if (error && isMissingTableError(error)) {
+            // Fallback insert into art_dresses
+            const dressRes = await supabase
+                .from('art_dresses')
+                .insert([{ code: cleanCode, name: cleanName, description: payload.description }])
+                .select()
+                .single();
+            if (dressRes.error) throw dressRes.error;
+            data = { ...dressRes.data, art_item_specifications: [] };
+        } else if (error) {
             if (error.code === '23505') {
-                return res.status(400).json({ error: 'A dress prefix with this code already exists' });
+                return res.status(400).json({ error: `An item with code '${cleanCode}' already exists` });
             }
             throw error;
         }
+
+        // Also sync into art_dresses if table exists for backward compatibility
+        try {
+            await supabase.from('art_dresses').upsert([{ code: cleanCode, name: cleanName, description: payload.description }], { onConflict: 'code' });
+        } catch (_) {}
+
         res.json({ success: true, data });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-exports.updateDress = async (req, res) => {
+exports.updateItem = async (req, res) => {
     try {
         const { id } = req.params;
-        const { code, name, description } = req.body;
+        const { code, name, description, product_type_id } = req.body;
         if (!code || !name) {
-            return res.status(400).json({ error: 'Code and name are required' });
+            return res.status(400).json({ error: 'Item code and name are required' });
         }
 
-        const { data, error } = await supabase
-            .from('art_dresses')
-            .update({ code: code.trim().toUpperCase(), name: name.trim(), description: description ? description.trim() : null, updated_at: new Date() })
+        const cleanCode = code.trim().toUpperCase();
+        const cleanName = name.trim();
+        const payload = {
+            code: cleanCode,
+            name: cleanName,
+            description: description ? description.trim() : null,
+            product_type_id: product_type_id ? Number(product_type_id) : null,
+            updated_at: new Date()
+        };
+
+        let { data, error } = await supabase
+            .from('art_items')
+            .update(payload)
             .eq('id', id)
-            .select()
+            .select('*, art_item_specifications(*), product_types(id, name)')
             .single();
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_dresses' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
-            }
+        if (error && isMissingTableError(error)) {
+            const dressRes = await supabase
+                .from('art_dresses')
+                .update({ code: cleanCode, name: cleanName, description: payload.description, updated_at: new Date() })
+                .eq('id', id)
+                .select()
+                .single();
+            if (dressRes.error) throw dressRes.error;
+            data = { ...dressRes.data, art_item_specifications: [] };
+        } else if (error) {
             if (error.code === '23505') {
-                return res.status(400).json({ error: 'A dress prefix with this code already exists' });
+                return res.status(400).json({ error: `An item with code '${cleanCode}' already exists` });
             }
             throw error;
         }
+
         res.json({ success: true, data });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-exports.deleteDress = async (req, res) => {
+exports.deleteItem = async (req, res) => {
     try {
         const { id } = req.params;
-        const { error } = await supabase
-            .from('art_dresses')
+        let { error } = await supabase
+            .from('art_items')
             .delete()
             .eq('id', id);
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.json({ success: true });
-            }
+        if (error && isMissingTableError(error)) {
+            const dressRes = await supabase.from('art_dresses').delete().eq('id', id);
+            if (dressRes.error) throw dressRes.error;
+        } else if (error) {
             throw error;
         }
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -103,7 +178,185 @@ exports.deleteDress = async (req, res) => {
 };
 
 // ==========================================
-// 2. GENDER CODES CRUD
+// 2. ITEM SPECIFICATIONS CRUD
+// ==========================================
+exports.listSpecifications = async (req, res) => {
+    try {
+        const itemId = req.params.itemId || req.query.item_id;
+        let query = supabase
+            .from('art_item_specifications')
+            .select('*, art_items(id, code, name)')
+            .order('display_order', { ascending: true })
+            .order('code', { ascending: true });
+
+        if (itemId) {
+            query = query.eq('item_id', itemId);
+        }
+
+        const { data, error } = await query;
+        if (error) {
+            if (isMissingTableError(error)) {
+                return res.json(specsStore.list(itemId));
+            }
+            throw error;
+        }
+
+        if ((!data || data.length === 0) && specsStore.list(itemId).length > 0) {
+            return res.json(specsStore.list(itemId));
+        }
+
+        res.json(data || []);
+    } catch (err) {
+        console.error('[ArtNumberHub] listSpecifications error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.createSpecification = async (req, res) => {
+    try {
+        const itemId = req.params.itemId || req.body.item_id;
+        const { code, name, description, display_order } = req.body;
+
+        if (!itemId) {
+            return res.status(400).json({ error: 'item_id is required for a specification' });
+        }
+        if (!code || !name) {
+            return res.status(400).json({ error: 'Specification code (e.g. A, B) and name (e.g. Half Sleeve) are required' });
+        }
+
+        const cleanCode = code.trim().toUpperCase();
+        const cleanName = name.trim();
+
+        const { data, error } = await supabase
+            .from('art_item_specifications')
+            .insert([{
+                item_id: Number(itemId),
+                code: cleanCode,
+                name: cleanName,
+                description: description ? description.trim() : null,
+                display_order: display_order !== undefined ? Number(display_order) : 0
+            }])
+            .select('*, art_items(id, code, name)')
+            .single();
+
+        if (error) {
+            if (isMissingTableError(error)) {
+                try {
+                    const fallbackData = specsStore.create({
+                        itemId,
+                        code: cleanCode,
+                        name: cleanName,
+                        description,
+                        display_order
+                    });
+                    return res.json({ success: true, data: fallbackData });
+                } catch (storeErr) {
+                    return res.status(400).json({ error: storeErr.message });
+                }
+            }
+            if (error.code === '23505') {
+                return res.status(400).json({ error: `Specification code '${cleanCode}' already exists for this item` });
+            }
+            throw error;
+        }
+
+        try {
+            specsStore.create({ itemId, code: cleanCode, name: cleanName, description, display_order });
+        } catch (_) {}
+
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.updateSpecification = async (req, res) => {
+    try {
+        const id = req.params.specId || req.params.id;
+        const { code, name, description, display_order } = req.body;
+
+        if (!code || !name) {
+            return res.status(400).json({ error: 'Specification code and name are required' });
+        }
+
+        const cleanCode = code.trim().toUpperCase();
+        const cleanName = name.trim();
+
+        const { data, error } = await supabase
+            .from('art_item_specifications')
+            .update({
+                code: cleanCode,
+                name: cleanName,
+                description: description !== undefined ? (description ? description.trim() : null) : undefined,
+                display_order: display_order !== undefined ? Number(display_order) : undefined,
+                updated_at: new Date()
+            })
+            .eq('id', id)
+            .select('*, art_items(id, code, name)')
+            .single();
+
+        if (error) {
+            if (isMissingTableError(error)) {
+                try {
+                    const fallbackData = specsStore.update(id, {
+                        code: cleanCode,
+                        name: cleanName,
+                        description,
+                        display_order
+                    });
+                    return res.json({ success: true, data: fallbackData });
+                } catch (storeErr) {
+                    return res.status(400).json({ error: storeErr.message });
+                }
+            }
+            if (error.code === '23505') {
+                return res.status(400).json({ error: `Specification code '${cleanCode}' already exists for this item` });
+            }
+            throw error;
+        }
+
+        try {
+            specsStore.update(id, { code: cleanCode, name: cleanName, description, display_order });
+        } catch (_) {}
+
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+exports.deleteSpecification = async (req, res) => {
+    try {
+        const id = req.params.specId || req.params.id;
+        const { error } = await supabase
+            .from('art_item_specifications')
+            .delete()
+            .eq('id', id);
+
+        if (error && isMissingTableError(error)) {
+            specsStore.delete(id);
+            return res.json({ success: true });
+        } else if (error) {
+            throw error;
+        }
+
+        specsStore.delete(id);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// ==========================================
+// 3. DRESS PREFIXES CRUD (Backwards Compatibility)
+// ==========================================
+exports.listDresses = exports.listItems;
+exports.createDress = exports.createItem;
+exports.updateDress = exports.updateItem;
+exports.deleteDress = exports.deleteItem;
+
+// ==========================================
+// 4. GENDER CODES CRUD
 // ==========================================
 exports.listGenders = async (req, res) => {
     try {
@@ -135,7 +388,7 @@ exports.createGender = async (req, res) => {
 
         if (error) {
             if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_genders' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
+                return res.status(400).json({ error: "Table 'public.art_genders' does not exist yet. Please run migration script." });
             }
             if (error.code === '23505') {
                 return res.status(400).json({ error: 'A gender code with this prefix already exists' });
@@ -164,9 +417,6 @@ exports.updateGender = async (req, res) => {
             .single();
 
         if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_genders' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
-            }
             if (error.code === '23505') {
                 return res.status(400).json({ error: 'A gender code with this prefix already exists' });
             }
@@ -186,12 +436,7 @@ exports.deleteGender = async (req, res) => {
             .delete()
             .eq('id', id);
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.json({ success: true });
-            }
-            throw error;
-        }
+        if (error) throw error;
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -199,7 +444,7 @@ exports.deleteGender = async (req, res) => {
 };
 
 // ==========================================
-// 3. PATTERN CODES CRUD
+// 5. PATTERN CODES CRUD
 // ==========================================
 exports.getNextPatternCode = async (req, res) => {
     try {
@@ -259,9 +504,6 @@ exports.createPattern = async (req, res) => {
             .single();
 
         if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_patterns' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
-            }
             if (error.code === '23505') {
                 return res.status(400).json({ error: 'A pattern code with this prefix already exists' });
             }
@@ -289,9 +531,6 @@ exports.updatePattern = async (req, res) => {
             .single();
 
         if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_patterns' does not exist yet. Please run inlanduniform/migrations/create_art_number_hub_tables.sql in Supabase SQL editor." });
-            }
             if (error.code === '23505') {
                 return res.status(400).json({ error: 'A pattern code with this prefix already exists' });
             }
@@ -311,12 +550,7 @@ exports.deletePattern = async (req, res) => {
             .delete()
             .eq('id', id);
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.json({ success: true });
-            }
-            throw error;
-        }
+        if (error) throw error;
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -324,7 +558,7 @@ exports.deletePattern = async (req, res) => {
 };
 
 // ==========================================
-// 4. FITS MASTER CRUD
+// 6. FITS MASTER CRUD
 // ==========================================
 exports.listFits = async (req, res) => {
     try {
@@ -359,9 +593,6 @@ exports.createFit = async (req, res) => {
             .single();
 
         if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_fits' does not exist yet. Please run migration script." });
-            }
             if (error.code === '23505') {
                 return res.status(400).json({ error: 'A fit with this code already exists' });
             }
@@ -421,19 +652,51 @@ exports.deleteFit = async (req, res) => {
 };
 
 // ==========================================
-// 5. COMBINED MASTER DATA (SINGLE CALL)
+// 7. COMBINED MASTER DATA (SINGLE CALL)
 // ==========================================
 exports.getMasterData = async (req, res) => {
     try {
-        const [dressesRes, gendersRes, patternsRes, fitsRes] = await Promise.all([
-            supabase.from('art_dresses').select('*').order('code', { ascending: true }),
+        let itemsPromise = supabase.from('art_items').select('*, art_item_specifications(*), product_types(id, name)').order('code', { ascending: true });
+        const [itemsRes, gendersRes, patternsRes, fitsRes, specsRes] = await Promise.all([
+            itemsPromise,
             supabase.from('art_genders').select('*').order('code', { ascending: true }),
             supabase.from('art_patterns').select('*').order('code', { ascending: true }),
-            supabase.from('art_fits').select('*').order('code', { ascending: true })
+            supabase.from('art_fits').select('*').order('code', { ascending: true }),
+            supabase.from('art_item_specifications').select('*').order('display_order', { ascending: true }).order('code', { ascending: true })
         ]);
 
+        let itemsData = itemsRes.data;
+        if (itemsRes.error && isMissingTableError(itemsRes.error)) {
+            const simpleItemRes = await supabase.from('art_items').select('*').order('code', { ascending: true });
+            if (!simpleItemRes.error) {
+                itemsData = simpleItemRes.data || [];
+            } else {
+                const dressRes = await supabase.from('art_dresses').select('*').order('code', { ascending: true });
+                itemsData = dressRes.data || [];
+            }
+        }
+
+        // Ensure specifications are attached to items
+        let allSpecs = specsRes.data || [];
+        if (specsRes.error || !allSpecs || allSpecs.length === 0) {
+            allSpecs = specsStore.list();
+        }
+
+        itemsData = (itemsData || []).map(item => {
+            let itemSpecs = item.art_item_specifications;
+            if (!itemSpecs || itemSpecs.length === 0) {
+                itemSpecs = specsStore.list(item.id);
+            }
+            return {
+                ...item,
+                art_item_specifications: itemSpecs || []
+            };
+        });
+
         res.json({
-            dresses: dressesRes.data || [],
+            items: itemsData || [],
+            specifications: allSpecs,
+            dresses: itemsData || [], // backward compatibility
             genders: gendersRes.data || [],
             patterns: patternsRes.data || [],
             fits: fitsRes.data || []
@@ -445,17 +708,75 @@ exports.getMasterData = async (req, res) => {
 };
 
 // ==========================================
-// 6. COMBINED ART NUMBERS CRUD
+// 8. COMBINED ART NUMBERS CRUD
 // ==========================================
 exports.listArtNumbers = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        // Step 1: Try full joined select with art_items and art_item_specifications
+        let result = await supabase
             .from('art_numbers')
-            .select('*, art_dresses(code, name), art_genders(code, name), art_patterns(code, name), art_fits(code, name)')
+            .select('*, art_items(id, code, name), art_item_specifications(id, code, name), art_dresses(code, name), art_genders(code, name), art_patterns(code, name), art_fits(code, name)')
             .order('created_at', { ascending: false });
 
-        if (error) throw error;
-        res.json(data || []);
+        // Step 2: If relationship to art_items or art_item_specifications fails in schema cache
+        if (result.error && isMissingTableError(result.error)) {
+            result = await supabase
+                .from('art_numbers')
+                .select('*, art_dresses(code, name), art_genders(code, name), art_patterns(code, name), art_fits(code, name)')
+                .order('created_at', { ascending: false });
+        }
+
+        // Step 3: If art_fits join also fails
+        if (result.error && isMissingTableError(result.error)) {
+            result = await supabase
+                .from('art_numbers')
+                .select('*, art_dresses(code, name), art_genders(code, name), art_patterns(code, name)')
+                .order('created_at', { ascending: false });
+        }
+
+        // Step 4: Fallback to plain art_numbers
+        if (result.error && isMissingTableError(result.error)) {
+            result = await supabase
+                .from('art_numbers')
+                .select('*')
+                .order('created_at', { ascending: false });
+        }
+
+        if (result.error) throw result.error;
+
+        // Enrich missing art_items and art_item_specifications from art_dresses or parse from code
+        const enriched = (result.data || []).map(an => {
+            let artItems = an.art_items;
+            let artItemSpecs = an.art_item_specifications;
+
+            if (!artItems && an.art_dresses) {
+                artItems = an.art_dresses;
+            }
+
+            if (!artItems && an.code) {
+                const parts = an.code.split('-');
+                if (parts.length >= 2) {
+                    const raw = parts[0];
+                    const match = raw.match(/^([0-9a-zA-Z]+?)([A-Za-z])$/);
+                    if (match) {
+                        artItems = { code: match[1], name: `Item ${match[1]}` };
+                        if (!artItemSpecs) {
+                            artItemSpecs = { code: match[2].toUpperCase(), name: `Spec ${match[2].toUpperCase()}` };
+                        }
+                    } else {
+                        artItems = { code: raw, name: `Item ${raw}` };
+                    }
+                }
+            }
+
+            return {
+                ...an,
+                art_items: artItems,
+                art_item_specifications: artItemSpecs
+            };
+        });
+
+        res.json(enriched);
     } catch (err) {
         console.error('[ArtNumberHub] listArtNumbers error:', err.message);
         res.status(500).json({ error: err.message });
@@ -464,47 +785,67 @@ exports.listArtNumbers = async (req, res) => {
 
 exports.createArtNumber = async (req, res) => {
     try {
-        const { dress_id, gender_id, pattern_id, fit_id, base_size, fit } = req.body;
-        if (!dress_id || !gender_id || !pattern_id) {
-            return res.status(400).json({ error: 'Dress, Gender, and Pattern links are required' });
+        const { item_id, dress_id, specification_id, gender_id, pattern_id, fit_id, allowance, base_size, fit } = req.body;
+        const effectiveItemId = item_id || dress_id;
+
+        if (!effectiveItemId || !gender_id || !pattern_id) {
+            return res.status(400).json({ error: 'Item, Gender, and Pattern links are required' });
         }
 
-        // Fetch codes to build combined code
+        // Fetch codes to build combined code: [Item][Specification]-[Gender][Pattern]-[Fit][Allowance]
+        // Example: 1A-3053-R2
         const queries = [
-            supabase.from('art_dresses').select('code').eq('id', dress_id).single(),
+            // Try fetching from art_items first
+            supabase.from('art_items').select('id, code, name').eq('id', effectiveItemId).single(),
             supabase.from('art_genders').select('code').eq('id', gender_id).single(),
             supabase.from('art_patterns').select('code').eq('id', pattern_id).single()
         ];
+        if (specification_id) {
+            queries.push(supabase.from('art_item_specifications').select('id, code, name').eq('id', specification_id).single());
+        }
         if (fit_id) {
             queries.push(supabase.from('art_fits').select('id, code, name').eq('id', fit_id).single());
         }
 
         const results = await Promise.all(queries);
-        const dressRes = results[0];
+        let itemRes = results[0];
         const genderRes = results[1];
         const patternRes = results[2];
-        const fitRes = fit_id ? results[3] : { data: null };
+        let specRes = specification_id ? results[3] : { data: null };
+        let fitRes = fit_id ? (specification_id ? results[4] : results[3]) : { data: null };
 
-        if (dressRes.error || !dressRes.data) {
-            if (isMissingTableError(dressRes.error)) {
-                return res.status(400).json({ error: "Table 'public.art_dresses' does not exist yet. Please run migration script." });
+        // Fallback to specsStore if specification lookup failed or table missing
+        if (specification_id && (!specRes.data || specRes.error)) {
+            const fallbackSpec = specsStore.getById(specification_id);
+            if (fallbackSpec) {
+                specRes = { data: fallbackSpec };
             }
-            return res.status(400).json({ error: 'Selected Dress Prefix not found' });
         }
+
+        // Fallback to art_dresses if art_items query failed
+        if (itemRes.error || !itemRes.data) {
+            const fallbackDress = await supabase.from('art_dresses').select('id, code, name').eq('id', effectiveItemId).maybeSingle();
+            if (fallbackDress.data) {
+                itemRes = fallbackDress;
+            } else {
+                return res.status(400).json({ error: 'Selected Item not found' });
+            }
+        }
+
         if (genderRes.error || !genderRes.data) return res.status(400).json({ error: 'Selected Gender Code not found' });
         if (patternRes.error || !patternRes.data) return res.status(400).json({ error: 'Selected Pattern Code not found' });
 
-        const dressCode = dressRes.data.code;
+        const itemCode = itemRes.data.code;
+        const specCode = specRes.data ? specRes.data.code : '';
         const genderCode = genderRes.data.code;
-        const patternCode = patternRes.data.code;
-        
+        const patternCode = String(patternRes.data.code).padStart(3, '0');
+
         // Resolve Fit Code & Name
         let fitCode = fitRes.data?.code;
         let fitName = fitRes.data?.name;
         let resolvedFitId = fitRes.data?.id || null;
 
         if (!fitCode && fit) {
-            // Find by name or code if passed as text
             const { data: matchedFit } = await supabase
                 .from('art_fits')
                 .select('id, code, name')
@@ -526,36 +867,66 @@ exports.createArtNumber = async (req, res) => {
             fitName = fitName || 'Regular Fit';
         }
 
-        // Auto-generate code Option 1: [DressPrefix]-[GenderCode][PatternCode]-[FitCode] (e.g. 4J-1012-R)
-        const combinedCode = `${dressCode}-${genderCode}${patternCode}-${fitCode}`;
+        const cleanAllowance = allowance && String(allowance).trim() ? String(allowance).trim() : '';
 
-        const { data, error } = await supabase
+        // Auto-generate code: [item][specification]-[gender][pattern-code]-[fit][allowance]
+        // Example: 1A-3053-R2
+        const firstSegment = `${itemCode}${specCode}`;
+        const secondSegment = `${genderCode}${patternCode}`;
+        const thirdSegment = `${fitCode}${cleanAllowance}`;
+        const combinedCode = `${firstSegment}-${secondSegment}-${thirdSegment}`;
+
+        const basePayload = {
+            dress_id: itemRes.data.id, // for legacy foreign key constraints
+            gender_id,
+            pattern_id,
+            fit_id: resolvedFitId,
+            allowance: cleanAllowance || null,
+            code: combinedCode,
+            art_number: combinedCode,
+            base_size: base_size || null,
+            fit: fitName || null
+        };
+
+        let { data, error } = await supabase
             .from('art_numbers')
-            .insert([{ 
-                dress_id, 
-                gender_id, 
-                pattern_id,
-                fit_id: resolvedFitId,
-                code: combinedCode,
-                art_number: combinedCode,
-                base_size: base_size || null,
-                fit: fitName || null
+            .insert([{
+                ...basePayload,
+                item_id: itemRes.data.id,
+                specification_id: specRes.data?.id || null
             }])
-            .select('*, art_dresses(code, name), art_genders(code, name), art_patterns(code, name), art_fits(code, name)')
+            .select()
             .single();
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.status(400).json({ error: "Table 'public.art_numbers' does not exist yet. Please run migration script." });
-            }
+        // If item_id / specification_id column does not exist on art_numbers yet
+        if (error && isMissingTableError(error)) {
+            const retryRes = await supabase
+                .from('art_numbers')
+                .insert([basePayload])
+                .select()
+                .single();
+            if (retryRes.error) throw retryRes.error;
+            data = retryRes.data;
+        } else if (error) {
             if (error.code === '23505') {
-                return res.status(400).json({ error: `The combined Art Number code '${combinedCode}' is already registered` });
+                return res.status(400).json({ error: `The Art Number code '${combinedCode}' is already registered` });
             }
             throw error;
         }
 
-        res.json({ success: true, data });
+        const enriched = {
+            ...data,
+            art_items: itemRes.data,
+            art_item_specifications: specRes.data || null,
+            art_dresses: itemRes.data,
+            art_genders: genderRes.data,
+            art_patterns: patternRes.data,
+            art_fits: fitRes.data
+        };
+
+        res.json({ success: true, data: enriched });
     } catch (err) {
+        console.error('[ArtNumberHub] createArtNumber error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };
@@ -568,12 +939,7 @@ exports.deleteArtNumber = async (req, res) => {
             .delete()
             .eq('id', id);
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.json({ success: true });
-            }
-            throw error;
-        }
+        if (error) throw error;
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });

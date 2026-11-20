@@ -91,41 +91,40 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
     if (art_number.startsWith('ACC-') || art_number.startsWith('TRIM-') || art_number.startsWith('FAB-')) return;
     try {
         const parts = art_number.split('-');
-        let dressCode = null;
+        let rawItemCode = null;
         let genderCode = null;
         let patternCode = null;
         let fitCode = null;
         let artAllowance = allowance || null;
 
-        // 5-part: [DressPrefix]-[Gender]-[Pattern]-[Fit]-[Allowance] (e.g. 4J-1-012-R-2)
+        // 5-part: [ItemPrefix]-[Gender]-[Pattern]-[Fit]-[Allowance] (e.g. 1A-1-012-R-2)
         if (parts.length === 5) {
-            dressCode = parts[0];
+            rawItemCode = parts[0];
             genderCode = parts[1];
             patternCode = parts[2];
             fitCode = parts[3].toUpperCase();
             artAllowance = parts[4];
         } else if (parts.length === 4) {
-            // A) Option 1 with allowance: [DressPrefix]-[GenderPattern]-[Fit]-[Allowance] (e.g. 4J-1012-R-2)
-            // B) Legacy 4-part: [DressPrefix]-[Gender]-[Pattern]-[Fit] (e.g. 4J-1-012-R)
+            // [ItemPrefix]-[GenderPattern]-[Fit]-[Allowance] (e.g. 1A-3053-R-2) or legacy 4-part
             if (parts[2].length <= 2 && isNaN(Number(parts[2]))) {
-                dressCode = parts[0];
+                rawItemCode = parts[0];
                 const middle = parts[1];
                 genderCode = middle.slice(0, 1);
                 patternCode = middle.slice(1);
                 fitCode = parts[2].toUpperCase();
                 artAllowance = parts[3];
             } else {
-                dressCode = parts[0];
+                rawItemCode = parts[0];
                 genderCode = parts[1];
                 patternCode = parts[2];
                 fitCode = parts[3].toUpperCase();
             }
         } else if (parts.length === 3) {
-            dressCode = parts[0];
+            // Option 1 / New format: [item][spec]-[gender][pattern]-[fit][allowance] (e.g. 1A-3053-R2)
+            rawItemCode = parts[0];
             const middle = parts[1];
             const lastPart = parts[2];
 
-            // If lastPart starts with fit letters (S, R, L, etc.) followed optionally by allowance (e.g. R2, R1.5, R)
             const fitMatch = lastPart.match(/^([A-Za-z]+)(.*)$/);
             if (fitMatch && isNaN(Number(lastPart))) {
                 fitCode = fitMatch[1].toUpperCase();
@@ -135,7 +134,7 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
                 genderCode = middle.slice(0, 1);
                 patternCode = middle.slice(1);
             } else {
-                // Legacy: [DressPrefix]-[Gender]-[Pattern] (e.g. 4J-1-012)
+                // Legacy: [Prefix]-[Gender]-[Pattern] (e.g. 4J-1-012)
                 genderCode = parts[1];
                 patternCode = parts[2];
                 if (fit) {
@@ -143,33 +142,15 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
                 }
             }
         } else if (parts.length === 2) {
-            // Check if parts[0] is Dress Prefix (e.g. 4J-1012)
-            const { data: dMatch } = await supabase.from('art_dresses').select('id, code').eq('code', parts[0]).maybeSingle();
-            if (dMatch) {
-                dressCode = dMatch.code;
-                const rest = parts[1];
-                const { data: genders } = await supabase.from('art_genders').select('id, code');
-                if (genders) {
-                    for (const g of genders) {
-                        if (rest.startsWith(g.code)) {
-                            genderCode = g.code;
-                            patternCode = rest.slice(g.code.length);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // Legacy: [GenderCode]-[DressPrefix][PatternCode] (e.g. 1-4J012)
-                genderCode = parts[0];
-                const rest = parts[1];
-                const { data: dresses } = await supabase.from('art_dresses').select('id, code');
-                if (dresses) {
-                    for (const d of dresses) {
-                        if (rest.startsWith(d.code)) {
-                            dressCode = d.code;
-                            patternCode = rest.slice(d.code.length);
-                            break;
-                        }
+            rawItemCode = parts[0];
+            const rest = parts[1];
+            const { data: genders } = await supabase.from('art_genders').select('id, code');
+            if (genders) {
+                for (const g of genders) {
+                    if (rest.startsWith(g.code)) {
+                        genderCode = g.code;
+                        patternCode = rest.slice(g.code.length);
+                        break;
                     }
                 }
             }
@@ -178,29 +159,48 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
             }
         }
 
-        if (!dressCode || !genderCode || !patternCode) return;
+        if (!rawItemCode || !genderCode || !patternCode) return;
 
-        // 1. Fetch dress
-        const { data: foundDress } = await supabase
-            .from('art_dresses')
-            .select('id')
-            .eq('code', dressCode)
-            .maybeSingle();
+        // Resolve Item and Specification from rawItemCode (e.g. '1A' -> Item '1' and Spec 'A')
+        let foundItem = null;
+        let foundSpec = null;
 
-        // 2. Fetch gender
-        const { data: foundGender } = await supabase
-            .from('art_genders')
-            .select('id')
-            .eq('code', genderCode)
-            .maybeSingle();
+        // 1. Try exact match in art_items
+        const { data: exactItem } = await supabase.from('art_items').select('id, code, name').eq('code', rawItemCode).maybeSingle();
+        if (exactItem) {
+            foundItem = exactItem;
+        } else {
+            // 2. Check if rawItemCode ends with a letter (e.g. '1A' -> base '1' and spec 'A')
+            const itemMatch = rawItemCode.match(/^([0-9a-zA-Z]+?)([A-Za-z])$/);
+            if (itemMatch) {
+                const baseItemCode = itemMatch[1];
+                const specChar = itemMatch[2].toUpperCase();
+                const { data: bItem } = await supabase.from('art_items').select('id, code, name').eq('code', baseItemCode).maybeSingle();
+                if (bItem) {
+                    foundItem = bItem;
+                    const { data: bSpec } = await supabase.from('art_item_specifications')
+                        .select('id, code, name')
+                        .eq('item_id', bItem.id)
+                        .eq('code', specChar)
+                        .maybeSingle();
+                    foundSpec = bSpec;
+                }
+            }
+        }
 
-        // 3. Fetch pattern
-        let { data: foundPattern } = await supabase
-            .from('art_patterns')
-            .select('id')
-            .eq('code', patternCode)
-            .maybeSingle();
+        // 3. Fallback to art_dresses if art_items table doesn't have it
+        if (!foundItem) {
+            const { data: foundDress } = await supabase.from('art_dresses').select('id, code, name').eq('code', rawItemCode).maybeSingle();
+            if (foundDress) foundItem = foundDress;
+        }
 
+        if (!foundItem) return;
+
+        // Fetch gender
+        const { data: foundGender } = await supabase.from('art_genders').select('id').eq('code', genderCode).maybeSingle();
+
+        // Fetch / create pattern
+        let { data: foundPattern } = await supabase.from('art_patterns').select('id').eq('code', patternCode).maybeSingle();
         if (!foundPattern && patternCode && /^\d{1,3}$/.test(String(patternCode).trim())) {
             const cleanPat = String(patternCode).trim().padStart(3, '0');
             const { data: newPat } = await supabase
@@ -211,15 +211,10 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
             foundPattern = newPat;
         }
 
-        // 4. Fetch / resolve fit
+        // Fetch / resolve fit
         let foundFitId = null;
         if (fitCode) {
-            let { data: foundFit } = await supabase
-                .from('art_fits')
-                .select('id, name')
-                .eq('code', fitCode)
-                .maybeSingle();
-
+            let { data: foundFit } = await supabase.from('art_fits').select('id, name').eq('code', fitCode).maybeSingle();
             if (!foundFit && fitCode) {
                 const fitName = fitCode === 'S' ? 'Slim Fit' : (fitCode === 'L' ? 'Loose Fit' : 'Regular Fit');
                 const { data: newFit } = await supabase
@@ -235,9 +230,11 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
             }
         }
 
-        if (foundDress && foundGender && foundPattern) {
+        if (foundItem && foundGender && foundPattern) {
             const artInsertData = {
-                dress_id: foundDress.id,
+                item_id: foundItem.id,
+                specification_id: foundSpec?.id || null,
+                dress_id: foundItem.id,
                 gender_id: foundGender.id,
                 pattern_id: foundPattern.id,
                 fit_id: foundFitId,
@@ -252,7 +249,9 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
                 .insert([artInsertData]);
 
             if (insertError && insertError.code !== '23505') {
-                if (insertError.message?.includes('allowance')) {
+                if (insertError.message?.includes('item_id') || insertError.message?.includes('specification_id') || insertError.message?.includes('allowance')) {
+                    delete artInsertData.item_id;
+                    delete artInsertData.specification_id;
                     delete artInsertData.allowance;
                     await supabase.from('art_numbers').insert([artInsertData]);
                 } else {
@@ -263,6 +262,136 @@ async function registerArtNumberInHub(art_number, base_size, fit, allowance) {
     } catch (err) {
         console.error('Failed to register art number in hub:', err.message);
     }
+}
+
+function formatArtNumberDisplayName(p) {
+    if (!p) return '';
+    const rawArt = (p.art_number || '').toUpperCase();
+    const accPrefixes = ['TIE-', 'BLT-', 'SCK-', 'BDG-', 'CAP-', 'SCF-', 'EPL-', 'LNY-', 'BOW-', 'PKS-', 'CRST-', 'ACC-'];
+    if (
+        accPrefixes.some(pref => rawArt.startsWith(pref)) ||
+        p.category === 'accessories' ||
+        p.category === 'trade_readymade' ||
+        p.category === 'readymade_trade'
+    ) {
+        return p.name || '';
+    }
+    if (p.art_number && p.art_number.includes('-')) {
+        const parts = p.art_number.split('-');
+        if (parts.length >= 2) {
+            const rawItem = parts[0];
+            const middle = parts[1];
+
+            let itemCode = rawItem;
+            let specCode = '';
+            const match = rawItem.match(/^([0-9a-zA-Z]+?)([A-Za-z])$/);
+            if (match) {
+                itemCode = match[1];
+                specCode = match[2].toUpperCase();
+            }
+
+            let itemName = '';
+            if (itemCode === '1') itemName = 'Shirt';
+            else if (itemCode === '2') itemName = 'Trouser';
+            else if (itemCode === '3') itemName = 'Blazer';
+            else if (itemCode === '4') itemName = 'T-Shirt';
+            else if (itemCode === '5') itemName = 'Skirt';
+
+            let specName = '';
+            if (specCode === 'A') {
+                if (itemCode === '1') specName = 'Half Sleeve';
+                else if (itemCode === '2') specName = 'Full Length Pleated';
+                else if (itemCode === '3') specName = 'Single Breasted';
+            } else if (specCode === 'B') {
+                if (itemCode === '1') specName = 'Full Sleeve';
+                else if (itemCode === '2') specName = 'Flat Front';
+                else if (itemCode === '3') specName = 'Double Breasted';
+            } else if (specCode === 'C') {
+                if (itemCode === '1') specName = 'Sleeveless';
+                else if (itemCode === '2') specName = 'Shorts';
+            }
+
+            const genderCode = middle.length >= 1 ? middle.slice(0, 1) : '';
+            let genderName = p.gender || '';
+            if (!genderName) {
+                if (genderCode === '1') genderName = 'Male';
+                else if (genderCode === '2') genderName = 'Female';
+                else if (genderCode === '3') genderName = 'Boys';
+                else if (genderCode === '4') genderName = 'Girls';
+            } else {
+                genderName = genderName.charAt(0).toUpperCase() + genderName.slice(1).toLowerCase();
+            }
+
+            if (itemName) {
+                return [itemName, specName, genderName].filter(Boolean).join(' ');
+            }
+        }
+    }
+    return p.name || '';
+}
+
+function parseProductMetadata(p) {
+    if (!p) return p;
+    let brand_name = p.brand_name || '';
+    let specification = p.specification || '';
+    let color = p.color || '';
+    let shade_no = p.shade_no || '';
+    let size = p.base_size || '';
+    let size_uom = p.size_uom || '';
+    let desc = p.description || '';
+
+    // Parse from remarks or materials
+    const remarksText = Array.isArray(p.remarks)
+        ? p.remarks.map(r => (typeof r === 'object' ? r.text : r)).join(' ')
+        : (typeof p.remarks === 'string' ? p.remarks : '');
+    const allText = `${p.materials || ''} ${remarksText} ${desc}`;
+
+    const jsonMatch = allText.match(/<!--PROD_META:(\{.*?\})-->/);
+    if (jsonMatch) {
+        try {
+            const meta = JSON.parse(jsonMatch[1]);
+            if (!brand_name && meta.brand_name) brand_name = meta.brand_name;
+            if (!specification && meta.specification) specification = meta.specification;
+            if (!color && meta.color) color = meta.color;
+            if (!shade_no && meta.shade_no) shade_no = meta.shade_no;
+            if (!size && meta.size) size = meta.size;
+            if (!size_uom && meta.size_uom) size_uom = meta.size_uom;
+        } catch (e) {}
+    }
+
+    if (!brand_name) {
+        const trMatch = allText.match(/\[(?:Trader|Brand):\s*([^\]]+)\]/i) || allText.match(/Trader:\s*([^|;\n\]]+)/i);
+        if (trMatch) brand_name = trMatch[1].trim();
+    }
+    if (!color) {
+        const colMatch = allText.match(/\[Color:\s*([^\]]+)\]/i) || allText.match(/Color:\s*([^|;\n\]]+)/i);
+        if (colMatch) color = colMatch[1].trim();
+    }
+    if (!specification) {
+        const specMatch = allText.match(/\[(?:Spec|Specification):\s*([^\]]+)\]/i);
+        if (specMatch) specification = specMatch[1].trim();
+    }
+    if (!shade_no) {
+        const shMatch = allText.match(/\[Shade(?:\s*No)?:\s*([^\]]+)\]/i);
+        if (shMatch) shade_no = shMatch[1].trim();
+    }
+    if (!size_uom && size) {
+        const parts = size.trim().split(/\s+/);
+        if (parts.length > 1 && isNaN(Number(parts[parts.length - 1]))) {
+            size_uom = parts.slice(1).join(' ');
+            size = parts[0];
+        }
+    }
+
+    return {
+        ...p,
+        brand_name: brand_name || '',
+        specification: specification || '',
+        color: color || '',
+        shade_no: shade_no || '',
+        size: size || p.base_size || '',
+        size_uom: size_uom || ''
+    };
 }
 
 exports.listProducts = async (req, res) => {
@@ -304,8 +433,13 @@ exports.listProducts = async (req, res) => {
                     ? Number(p.class_fabric_consumption._base_main_fabric)
                     : (meta.main_fabric_meters !== null ? Number(meta.main_fabric_meters) : (p.class_fabric_consumption?.Corporate?.main_fabric ? Number(p.class_fabric_consumption.Corporate.main_fabric) : null)));
 
+            const formattedName = formatArtNumberDisplayName(p);
+            const parsedMeta = parseProductMetadata(p);
+
             return {
                 ...p,
+                ...parsedMeta,
+                name: formattedName || p.name,
                 description: p.description || meta.description || null,
                 main_fabric: resolvedMainFabric,
                 main_fabric_meters: resolvedMainFabric,
@@ -450,6 +584,112 @@ async function safeUpdateProduct(id, payload) {
     return { data: null, error: new Error('Max retry attempts reached updating product') };
 }
 
+async function resolveArtNumberProductTitle(artNumber, itemId, specificationId, gender, category, productType, materials) {
+    if (!artNumber && !itemId) return null;
+
+    // Only in-house manufactured readymades use the [Item] [Specification] [Gender] format
+    const rawArt = (artNumber || '').toUpperCase();
+    const accPrefixes = ['TIE-', 'BLT-', 'SCK-', 'BDG-', 'CAP-', 'SCF-', 'EPL-', 'LNY-', 'BOW-', 'PKS-', 'CRST-', 'ACC-'];
+    const cat = (category || '').toLowerCase();
+    const pType = (productType || '').toLowerCase();
+    const mat = (materials || '').toLowerCase();
+
+    if (
+        accPrefixes.some(pref => rawArt.startsWith(pref)) ||
+        cat === 'accessories' || cat === 'accessory' || cat === 'trade_readymade' || cat === 'readymade_trade' ||
+        pType === 'accessories' || pType === 'accessory' || pType === 'trade_readymade' || pType === 'readymade_trade' ||
+        mat.includes('[producttype: accessories]') || mat.includes('[producttype: trade_readymade]') || mat.includes('[producttype: readymade_trade]')
+    ) {
+        return null;
+    }
+
+    let itemName = '';
+    let specName = '';
+    let resolvedGender = gender || '';
+
+    // 1. Try itemId
+    if (itemId) {
+        const { data: itemData } = await supabase.from('art_items').select('code, name').eq('id', itemId).maybeSingle();
+        if (itemData) itemName = itemData.name;
+        if (!itemName) {
+            const { data: dressData } = await supabase.from('art_dresses').select('code, name').eq('id', itemId).maybeSingle();
+            if (dressData) itemName = dressData.name;
+        }
+    }
+
+    // 2. Try specificationId
+    if (specificationId) {
+        const { data: specData } = await supabase.from('art_item_specifications').select('code, name').eq('id', specificationId).maybeSingle();
+        if (specData) specName = specData.name;
+    }
+
+    // 3. If artNumber is present, parse it: [item][spec]-[gender][pattern]-[fit][allowance]
+    if (artNumber && artNumber.includes('-')) {
+        const parts = artNumber.split('-');
+        const rawItem = parts[0];
+        const middle = parts[1];
+
+        let itemCode = rawItem;
+        let specCode = '';
+        const match = rawItem.match(/^([0-9a-zA-Z]+?)([A-Za-z])$/);
+        if (match) {
+            itemCode = match[1];
+            specCode = match[2].toUpperCase();
+        }
+
+        if (!itemName) {
+            const { data: itemData } = await supabase.from('art_items').select('name').eq('code', itemCode).maybeSingle();
+            if (itemData) itemName = itemData.name;
+            if (!itemName) {
+                const { data: dressData } = await supabase.from('art_dresses').select('name').eq('code', itemCode).maybeSingle();
+                if (dressData) itemName = dressData.name;
+            }
+            if (!itemName) {
+                if (itemCode === '1') itemName = 'Shirt';
+                else if (itemCode === '2') itemName = 'Trouser';
+                else if (itemCode === '3') itemName = 'Blazer';
+                else if (itemCode === '4') itemName = 'T-Shirt';
+                else if (itemCode === '5') itemName = 'Skirt';
+            }
+        }
+
+        if (!specName && specCode) {
+            const { data: specData } = await supabase.from('art_item_specifications').select('name').eq('code', specCode).maybeSingle();
+            if (specData) specName = specData.name;
+            if (!specName) {
+                if (specCode === 'A' && itemName.toLowerCase().includes('shirt')) specName = 'Half Sleeve';
+                else if (specCode === 'B' && itemName.toLowerCase().includes('shirt')) specName = 'Full Sleeve';
+                else if (specCode === 'A' && itemName.toLowerCase().includes('trouser')) specName = 'Full Length Pleated';
+                else if (specCode === 'B' && itemName.toLowerCase().includes('trouser')) specName = 'Flat Front';
+                else if (specCode === 'A' && itemName.toLowerCase().includes('blazer')) specName = 'Single Breasted';
+                else if (specCode === 'B' && itemName.toLowerCase().includes('blazer')) specName = 'Double Breasted';
+            }
+        }
+
+        if (!resolvedGender && middle && middle.length >= 1) {
+            const gCode = middle.slice(0, 1);
+            const { data: gData } = await supabase.from('art_genders').select('name').eq('code', gCode).maybeSingle();
+            if (gData) resolvedGender = gData.name;
+            if (!resolvedGender) {
+                if (gCode === '1') resolvedGender = 'Male';
+                else if (gCode === '2') resolvedGender = 'Female';
+                else if (gCode === '3') resolvedGender = 'Boys';
+                else if (gCode === '4') resolvedGender = 'Girls';
+            }
+        }
+    }
+
+    const cleanItem = itemName ? (itemName.charAt(0).toUpperCase() + itemName.slice(1).toLowerCase()) : '';
+    const cleanSpec = specName ? specName.trim() : '';
+    const cleanGender = resolvedGender ? (resolvedGender.charAt(0).toUpperCase() + resolvedGender.slice(1).toLowerCase()) : '';
+
+    const partsTitle = [cleanItem, cleanSpec, cleanGender].filter(Boolean);
+    if (partsTitle.length > 0) {
+        return partsTitle.join(' ');
+    }
+    return null;
+}
+
 exports.createProduct = async (req, res) => {
     try {
         let { 
@@ -457,8 +697,15 @@ exports.createProduct = async (req, res) => {
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
             other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
-            trims, attachment_fabrics, allowance
+            trims, attachment_fabrics, allowance,
+            brand_name, specification, color, shade_no, size_uom
         } = req.body;
+        
+        // Auto-derive product name for Art Numbers: Format is [Item] [Specification] [Gender] (Readymades in-house only)
+        const derivedTitle = await resolveArtNumberProductTitle(art_number, req.body.item_id, req.body.specification_id, gender, category, req.body.product_type || product_type_id, materials);
+        if (derivedTitle) {
+            name = derivedTitle;
+        }
         
         let designNumberId = null;
         if (design_number && design_number.trim() !== '') {
@@ -516,6 +763,25 @@ exports.createProduct = async (req, res) => {
             description
         );
         
+        let enrichedRemarks = remarks;
+        if (brand_name || specification || color || shade_no || size_uom) {
+            const metaTag = `<!--PROD_META:${JSON.stringify({
+                brand_name: brand_name ? String(brand_name).trim() : '',
+                specification: specification ? String(specification).trim() : '',
+                color: color ? String(color).trim() : '',
+                shade_no: shade_no ? String(shade_no).trim() : '',
+                size: base_size ? String(base_size).trim() : '',
+                size_uom: size_uom ? String(size_uom).trim() : ''
+            })}-->`;
+            if (Array.isArray(enrichedRemarks)) {
+                enrichedRemarks = [...enrichedRemarks, { text: metaTag, images: [] }];
+            } else if (typeof enrichedRemarks === 'string') {
+                enrichedRemarks = `${enrichedRemarks}\n${metaTag}`.trim();
+            } else {
+                enrichedRemarks = [{ text: metaTag, images: [] }];
+            }
+        }
+        
         const insertPayload = { 
             name, 
             art_number, 
@@ -527,6 +793,8 @@ exports.createProduct = async (req, res) => {
             size_chart_id, 
             category, 
             product_type_id, 
+            ...(req.body.item_id ? { item_id: req.body.item_id } : {}),
+            ...(req.body.specification_id ? { specification_id: req.body.specification_id } : {}),
             sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
             retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
             base_price: base_price !== '' && base_price !== null && base_price !== undefined ? parseFloat(base_price) : 0,
@@ -546,7 +814,12 @@ exports.createProduct = async (req, res) => {
             other_fits: other_fits || null,
             measurement_type: measurement_type || null,
             class_fabric_consumption: enrichedClassConsumption,
-            remarks: remarks || null
+            remarks: enrichedRemarks || null,
+            brand_name: brand_name ? String(brand_name).trim() : null,
+            specification: specification ? String(specification).trim() : null,
+            color: color ? String(color).trim() : null,
+            shade_no: shade_no ? String(shade_no).trim() : null,
+            size_uom: size_uom ? String(size_uom).trim() : null
         };
 
         const { data, error } = await safeInsertProduct(insertPayload);
@@ -568,7 +841,14 @@ exports.createProduct = async (req, res) => {
                 const artParts = art_number.split('-');
                 let patternCode = null;
                 if (artParts.length === 3) {
-                    patternCode = artParts[2];
+                    const middle = artParts[1];
+                    const lastPart = artParts[2];
+                    // If last part is fit e.g. R, R2, S
+                    if (/^[A-Za-z]/.test(lastPart)) {
+                        patternCode = middle.slice(1);
+                    } else {
+                        patternCode = artParts[2];
+                    }
                 } else if (artParts.length === 2) {
                     const { data: allDresses } = await supabase.from('art_dresses').select('code');
                     const isFirstDress = allDresses?.some(d => d.code === artParts[0]);
@@ -616,7 +896,7 @@ exports.createProduct = async (req, res) => {
         // Register in Art Number Hub
         await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
 
-        res.json(data);
+        res.json(parseProductMetadata(data));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -630,10 +910,36 @@ exports.updateProduct = async (req, res) => {
             main_fabric, attachment_fabric1, attachment_fabric2, button_count, thread_count, base_size, fit, images, design_number,
             main_fabric_id, attachment_fabric1_id, attachment_fabric2_id, button_id, thread_id,
             other_sizes, other_fits, measurement_type, class_fabric_consumption, remarks,
-            trims, attachment_fabrics, allowance
+            trims, attachment_fabrics, allowance,
+            brand_name, specification, color, shade_no, size_uom
         } = req.body;
         
+        // Auto-derive product name for Art Numbers: Format is [Item] [Specification] [Gender] (Readymades in-house only)
+        const derivedTitle = await resolveArtNumberProductTitle(art_number, req.body.item_id, req.body.specification_id, gender, category, req.body.product_type || product_type_id, materials);
+        if (derivedTitle) {
+            name = derivedTitle;
+        }
+        
         const designNumberId = design_number ? await findOrCreateProductDesignNumber(design_number) : null;
+
+        let enrichedRemarks = remarks;
+        if (brand_name || specification || color || shade_no || size_uom) {
+            const metaTag = `<!--PROD_META:${JSON.stringify({
+                brand_name: brand_name ? String(brand_name).trim() : '',
+                specification: specification ? String(specification).trim() : '',
+                color: color ? String(color).trim() : '',
+                shade_no: shade_no ? String(shade_no).trim() : '',
+                size: base_size ? String(base_size).trim() : '',
+                size_uom: size_uom ? String(size_uom).trim() : ''
+            })}-->`;
+            if (Array.isArray(enrichedRemarks)) {
+                enrichedRemarks = [...enrichedRemarks, { text: metaTag, images: [] }];
+            } else if (typeof enrichedRemarks === 'string') {
+                enrichedRemarks = `${enrichedRemarks}\n${metaTag}`.trim();
+            } else {
+                enrichedRemarks = [{ text: metaTag, images: [] }];
+            }
+        }
 
         // Map dynamic trims counts and preserve valid button_id/thread_id
         if (Array.isArray(trims) && trims.length > 0) {
@@ -772,7 +1078,12 @@ exports.updateProduct = async (req, res) => {
                 other_fits: other_fits || null,
                 measurement_type: measurement_type || null,
                 class_fabric_consumption: enrichedClassConsumption,
-                remarks: remarks || null,
+                remarks: enrichedRemarks || null,
+                brand_name: brand_name !== undefined ? (brand_name ? String(brand_name).trim() : null) : undefined,
+                specification: specification !== undefined ? (specification ? String(specification).trim() : null) : undefined,
+                color: color !== undefined ? (color ? String(color).trim() : null) : undefined,
+                shade_no: shade_no !== undefined ? (shade_no ? String(shade_no).trim() : null) : undefined,
+                size_uom: size_uom !== undefined ? (size_uom ? String(size_uom).trim() : null) : undefined,
                 updated_at: new Date() 
             };
 
@@ -788,7 +1099,7 @@ exports.updateProduct = async (req, res) => {
             const { logAction } = require('../utils/logger');
             await logAction(req.user.id, 'UPDATE', 'product', id, { name: data.name });
             await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
-            return res.json({ ...data, variant_created: true });
+            return res.json({ ...parseProductMetadata(data), variant_created: true });
         }
         
         // No button/thread change – regular update
@@ -803,6 +1114,8 @@ exports.updateProduct = async (req, res) => {
             size_chart_id, 
             category, 
             product_type_id, 
+            ...(req.body.item_id ? { item_id: req.body.item_id } : {}),
+            ...(req.body.specification_id ? { specification_id: req.body.specification_id } : {}),
             sam_value: sam_value !== '' && sam_value !== null && sam_value !== undefined ? parseFloat(sam_value) : null,
             retail_sam_value: retail_sam_value !== '' && retail_sam_value !== null && retail_sam_value !== undefined ? parseFloat(retail_sam_value) : null,
             base_price: base_price !== '' && base_price !== null && base_price !== undefined ? parseFloat(base_price) : 0,
@@ -822,7 +1135,12 @@ exports.updateProduct = async (req, res) => {
             other_fits: other_fits || null,
             measurement_type: measurement_type || null,
             class_fabric_consumption: enrichedClassConsumption,
-            remarks: remarks || null,
+            remarks: enrichedRemarks || null,
+            brand_name: brand_name !== undefined ? (brand_name ? String(brand_name).trim() : null) : undefined,
+            specification: specification !== undefined ? (specification ? String(specification).trim() : null) : undefined,
+            color: color !== undefined ? (color ? String(color).trim() : null) : undefined,
+            shade_no: shade_no !== undefined ? (shade_no ? String(shade_no).trim() : null) : undefined,
+            size_uom: size_uom !== undefined ? (size_uom ? String(size_uom).trim() : null) : undefined,
             updated_at: new Date() 
         };
 
@@ -842,7 +1160,7 @@ exports.updateProduct = async (req, res) => {
         // Register in Art Number Hub (handles new edit updates)
         await registerArtNumberInHub(data.art_number, data.base_size, data.fit, allowance);
 
-        res.json(data);
+        res.json(parseProductMetadata(data));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

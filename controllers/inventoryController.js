@@ -939,6 +939,75 @@ exports.accessoryCategories = {
   }
 };
 
+function parseTrimMetadata(item) {
+  if (!item) return item;
+  let brand_name = item.brand_name || '';
+  let specification = item.specification || '';
+  let color = item.color || '';
+  let shade_no = item.shade_no || '';
+  let size = item.size || '';
+  let size_uom = item.size_uom || '';
+  let desc = item.description || '';
+
+  if (desc) {
+    const jsonMatch = desc.match(/<!--TRIM_META:(\{.*?\})-->/);
+    if (jsonMatch) {
+      try {
+        const meta = JSON.parse(jsonMatch[1]);
+        if (!brand_name && meta.brand_name) brand_name = meta.brand_name;
+        if (!specification && meta.specification) specification = meta.specification;
+        if (!color && meta.color) color = meta.color;
+        if (!shade_no && meta.shade_no) shade_no = meta.shade_no;
+        if (!size && meta.size) size = meta.size;
+        if (!size_uom && meta.size_uom) size_uom = meta.size_uom;
+        desc = desc.replace(/<!--TRIM_META:\{.*?\}-->/, '').trim();
+      } catch (e) {}
+    } else {
+      const bMatch = desc.match(/\[Brand:\s*([^\]]+)\]/i);
+      if (bMatch && !brand_name) brand_name = bMatch[1].trim();
+      const sMatch = desc.match(/\[(?:Spec|Specification):\s*([^\]]+)\]/i);
+      if (sMatch && !specification) specification = sMatch[1].trim();
+      const cMatch = desc.match(/\[(?:Color|Colour):\s*([^\]]+)\]/i);
+      if (cMatch && !color) color = cMatch[1].trim();
+      const shMatch = desc.match(/\[Shade(?:\s*No)?:\s*([^\]]+)\]/i);
+      if (shMatch && !shade_no) shade_no = shMatch[1].trim();
+      const szMatch = desc.match(/\[Size:\s*([^\]]+)\]/i);
+      if (szMatch && !size) {
+        const szVal = szMatch[1].trim();
+        const parts = szVal.split(/\s+/);
+        if (parts.length > 1 && isNaN(Number(parts[parts.length - 1]))) {
+          size_uom = parts[parts.length - 1];
+          size = parts.slice(0, -1).join(' ');
+        } else {
+          size = szVal;
+        }
+      }
+      desc = desc
+        .replace(/\[Brand:\s*[^\]]+\]/gi, '')
+        .replace(/\[(?:Spec|Specification):\s*[^\]]+\]/gi, '')
+        .replace(/\[(?:Color|Colour):\s*[^\]]+\]/gi, '')
+        .replace(/\[Shade(?:\s*No)?:\s*[^\]]+\]/gi, '')
+        .replace(/\[Size:\s*[^\]]+\]/gi, '')
+        .trim();
+    }
+  }
+
+  if (!color && item.type && !item.type.toLowerCase().includes('button') && !item.type.toLowerCase().includes('thread')) {
+    color = item.type;
+  }
+
+  return {
+    ...item,
+    brand_name: brand_name || '',
+    specification: specification || '',
+    color: color || '',
+    shade_no: shade_no || '',
+    size: size || '',
+    size_uom: size_uom || '',
+    description: desc || ''
+  };
+}
+
 exports.trims = {
   list: async (req, res) => {
     try {
@@ -967,14 +1036,15 @@ exports.trims = {
         }
         return res.status(500).json({ error: error.message, code: error.code });
       }
-      // Live data directly from database! Enrich thread UOM with 'Cones' if not specified
+      // Live data directly from database! Enrich thread UOM with 'Cones' if not specified and parse structured metadata
       const enriched = (data || []).map(t => {
         const catName = (t.category?.name || t.trim_categories?.name || '').toLowerCase();
         const isThread = catName.includes('thread') || (t.name || '').toLowerCase().includes('thread') || (t.code || '').toUpperCase().startsWith('THR-');
         const defaultUom = t.category?.default_uom || (isThread ? 'Cones' : 'Pcs');
+        const parsed = parseTrimMetadata(t);
         return {
-          ...t,
-          uom: (isThread && (!t.uom || t.uom.toLowerCase() === 'pcs')) ? defaultUom : (t.uom || defaultUom)
+          ...parsed,
+          uom: (isThread && (!parsed.uom || parsed.uom.toLowerCase() === 'pcs')) ? defaultUom : (parsed.uom || defaultUom)
         };
       });
       res.json(enriched);
@@ -996,6 +1066,12 @@ exports.trims = {
       low_stock_threshold,
       images,
       vendors,
+      brand_name,
+      specification,
+      color,
+      shade_no,
+      size,
+      size_uom,
     } = req.body;
     try {
       if (!category_id) {
@@ -1018,35 +1094,57 @@ exports.trims = {
       }
 
       const finalUom = uom || category?.default_uom || "Pcs";
+      const cleanDesc = description ? description.trim() : "";
+      const metaBlock = `<!--TRIM_META:${JSON.stringify({
+        brand_name: brand_name ? String(brand_name).trim() : '',
+        specification: specification ? String(specification).trim() : '',
+        color: color ? String(color).trim() : '',
+        shade_no: shade_no ? String(shade_no).trim() : '',
+        size: size ? String(size).trim() : '',
+        size_uom: size_uom ? String(size_uom).trim() : ''
+      })}-->`;
+      const combinedDescription = cleanDesc ? `${metaBlock}\n${cleanDesc}` : metaBlock;
 
-      const { data, error } = await supabase
+      const basePayload = {
+        category_id,
+        code: finalCode.trim(),
+        name: name.trim(),
+        type: type ? type.trim() : null,
+        uom: finalUom,
+        unit_price:
+          unit_price !== undefined &&
+          unit_price !== "" &&
+          unit_price !== null
+            ? parseFloat(unit_price)
+            : 0,
+        quantity:
+          quantity !== undefined && quantity !== "" && quantity !== null
+            ? parseFloat(quantity)
+            : 0,
+        low_stock_threshold:
+          low_stock_threshold !== undefined &&
+          low_stock_threshold !== "" &&
+          low_stock_threshold !== null
+            ? parseFloat(low_stock_threshold)
+            : 10,
+        images: images || [],
+        vendors: vendors || [],
+      };
+
+      // Try inserting with native columns first
+      let result = null;
+      const { data: colData, error: colError } = await supabase
         .from("trims")
         .insert([
           {
-            category_id,
-            code: finalCode.trim(),
-            name: name.trim(),
-            type: type ? type.trim() : null,
-            uom: finalUom,
-            description: description ? description.trim() : null,
-            unit_price:
-              unit_price !== undefined &&
-              unit_price !== "" &&
-              unit_price !== null
-                ? parseFloat(unit_price)
-                : 0,
-            quantity:
-              quantity !== undefined && quantity !== "" && quantity !== null
-                ? parseFloat(quantity)
-                : 0,
-            low_stock_threshold:
-              low_stock_threshold !== undefined &&
-              low_stock_threshold !== "" &&
-              low_stock_threshold !== null
-                ? parseFloat(low_stock_threshold)
-                : 10,
-            images: images || [],
-            vendors: vendors || [],
+            ...basePayload,
+            description: cleanDesc || null,
+            brand_name: brand_name ? String(brand_name).trim() : null,
+            specification: specification ? String(specification).trim() : null,
+            color: color ? String(color).trim() : null,
+            shade_no: shade_no ? String(shade_no).trim() : null,
+            size: size ? String(size).trim() : null,
+            size_uom: size_uom ? String(size_uom).trim() : null,
           },
         ])
         .select(
@@ -1054,8 +1152,31 @@ exports.trims = {
         )
         .single();
 
-      if (error) throw error;
-      res.json(data);
+      if (colError) {
+        // Fallback to storing structured meta in description if columns do not exist
+        if (colError.code === "42703") {
+          const { data: fbData, error: fbError } = await supabase
+            .from("trims")
+            .insert([
+              {
+                ...basePayload,
+                description: combinedDescription,
+              },
+            ])
+            .select(
+              "*, category:trim_categories(id, name, code_prefix, default_uom)",
+            )
+            .single();
+          if (fbError) throw fbError;
+          result = fbData;
+        } else {
+          throw colError;
+        }
+      } else {
+        result = colData;
+      }
+
+      res.json(parseTrimMetadata(result));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1074,42 +1195,90 @@ exports.trims = {
       low_stock_threshold,
       images,
       vendors,
+      brand_name,
+      specification,
+      color,
+      shade_no,
+      size,
+      size_uom,
     } = req.body;
     try {
-      const updates = {
+      const cleanDesc = description !== undefined ? (description ? description.trim() : "") : undefined;
+      const metaBlock = `<!--TRIM_META:${JSON.stringify({
+        brand_name: brand_name ? String(brand_name).trim() : '',
+        specification: specification ? String(specification).trim() : '',
+        color: color ? String(color).trim() : '',
+        shade_no: shade_no ? String(shade_no).trim() : '',
+        size: size ? String(size).trim() : '',
+        size_uom: size_uom ? String(size_uom).trim() : ''
+      })}-->`;
+      const combinedDescription = cleanDesc !== undefined
+        ? (cleanDesc ? `${metaBlock}\n${cleanDesc}` : metaBlock)
+        : undefined;
+
+      const baseUpdates = {
         updated_at: new Date(),
       };
-      if (category_id !== undefined) updates.category_id = category_id;
-      if (code !== undefined) updates.code = code.trim();
-      if (name !== undefined) updates.name = name.trim();
-      if (type !== undefined) updates.type = type ? type.trim() : null;
-      if (uom !== undefined) updates.uom = uom;
-      if (description !== undefined)
-        updates.description = description ? description.trim() : null;
+      if (category_id !== undefined) baseUpdates.category_id = category_id;
+      if (code !== undefined) baseUpdates.code = code.trim();
+      if (name !== undefined) baseUpdates.name = name.trim();
+      if (type !== undefined) baseUpdates.type = type ? type.trim() : null;
+      if (uom !== undefined) baseUpdates.uom = uom;
       if (unit_price !== undefined && unit_price !== "" && unit_price !== null)
-        updates.unit_price = parseFloat(unit_price);
+        baseUpdates.unit_price = parseFloat(unit_price);
       if (quantity !== undefined && quantity !== "" && quantity !== null)
-        updates.quantity = parseFloat(quantity);
+        baseUpdates.quantity = parseFloat(quantity);
       if (
         low_stock_threshold !== undefined &&
         low_stock_threshold !== "" &&
         low_stock_threshold !== null
       )
-        updates.low_stock_threshold = parseFloat(low_stock_threshold);
-      if (images !== undefined) updates.images = images || [];
-      if (vendors !== undefined) updates.vendors = vendors || [];
+        baseUpdates.low_stock_threshold = parseFloat(low_stock_threshold);
+      if (images !== undefined) baseUpdates.images = images || [];
+      if (vendors !== undefined) baseUpdates.vendors = vendors || [];
 
-      const { data, error } = await supabase
+      // Attempt update with direct columns
+      let result = null;
+      const colUpdates = { ...baseUpdates };
+      if (cleanDesc !== undefined) colUpdates.description = cleanDesc || null;
+      if (brand_name !== undefined) colUpdates.brand_name = brand_name ? String(brand_name).trim() : null;
+      if (specification !== undefined) colUpdates.specification = specification ? String(specification).trim() : null;
+      if (color !== undefined) colUpdates.color = color ? String(color).trim() : null;
+      if (shade_no !== undefined) colUpdates.shade_no = shade_no ? String(shade_no).trim() : null;
+      if (size !== undefined) colUpdates.size = size ? String(size).trim() : null;
+      if (size_uom !== undefined) colUpdates.size_uom = size_uom ? String(size_uom).trim() : null;
+
+      const { data: colData, error: colError } = await supabase
         .from("trims")
-        .update(updates)
+        .update(colUpdates)
         .eq("id", id)
         .select(
           "*, category:trim_categories(id, name, code_prefix, default_uom)",
         )
         .single();
 
-      if (error) throw error;
-      res.json(data);
+      if (colError) {
+        if (colError.code === "42703") {
+          const fbUpdates = { ...baseUpdates };
+          if (combinedDescription !== undefined) fbUpdates.description = combinedDescription;
+          const { data: fbData, error: fbError } = await supabase
+            .from("trims")
+            .update(fbUpdates)
+            .eq("id", id)
+            .select(
+              "*, category:trim_categories(id, name, code_prefix, default_uom)",
+            )
+            .single();
+          if (fbError) throw fbError;
+          result = fbData;
+        } else {
+          throw colError;
+        }
+      } else {
+        result = colData;
+      }
+
+      res.json(parseTrimMetadata(result));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

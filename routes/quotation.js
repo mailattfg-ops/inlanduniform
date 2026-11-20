@@ -35,13 +35,13 @@ router.post('/', authMiddleware, checkPermission(['manage_quotations', 'branch_s
 router.put('/:id', authMiddleware, checkPermission(['manage_quotations', 'branch_sales']), quotationController.updateQuotation);
 
 // Submit quotation to Branch Manager for approval (Marketing & Sales staff)
-router.put('/:id/submit-to-bm', authMiddleware, checkPermission(['submit_quotations_bm', 'manage_quotations']), quotationController.submitToBranchManager);
+router.put('/:id/submit-to-bm', authMiddleware, checkPermission(['submit_quotations_bm', 'manage_quotations', 'branch_sales']), quotationController.submitToBranchManager);
 
-// Branch Manager approves quotation and submits to Operations
-router.put('/:id/bm-approve', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmApproveAndSubmitToOps);
+// Branch Manager approves quotation
+router.put('/:id/bm-approve', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver', 'manage_quotations']), quotationController.bmApproveAndSubmitToOps);
 
 // Branch Manager rejects quotation back to Draft for revisions
-router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmRejectQuotation);
+router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver', 'manage_quotations']), quotationController.bmRejectQuotation);
 
 // Submit quotation directly to operations team (Branch Managers with Ops Submission authority)
 router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.submitToOps);

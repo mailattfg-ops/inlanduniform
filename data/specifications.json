@@ -1,0 +1,98 @@
+[
+  {
+    "id": 1,
+    "item_id": 5,
+    "code": "A",
+    "name": "Half Sleeve",
+    "description": "Standard half sleeve shirt",
+    "display_order": 1
+  },
+  {
+    "id": 2,
+    "item_id": 5,
+    "code": "B",
+    "name": "Full Sleeve",
+    "description": "Standard full sleeve shirt",
+    "display_order": 2
+  },
+  {
+    "id": 3,
+    "item_id": 5,
+    "code": "C",
+    "name": "Sleeveless",
+    "description": "Sleeveless shirt",
+    "display_order": 3
+  },
+  {
+    "id": 4,
+    "item_id": 6,
+    "code": "A",
+    "name": "Half Sleeve",
+    "description": "Cotton half sleeve",
+    "display_order": 1
+  },
+  {
+    "id": 5,
+    "item_id": 6,
+    "code": "B",
+    "name": "Full Sleeve",
+    "description": "Cotton full sleeve",
+    "display_order": 2
+  },
+  {
+    "id": 6,
+    "item_id": 7,
+    "code": "A",
+    "name": "Full Length Pleated",
+    "description": "Pleated formal trousers",
+    "display_order": 1
+  },
+  {
+    "id": 7,
+    "item_id": 7,
+    "code": "B",
+    "name": "Flat Front",
+    "description": "Flat front trousers",
+    "display_order": 2
+  },
+  {
+    "id": 8,
+    "item_id": 7,
+    "code": "C",
+    "name": "Shorts",
+    "description": "Bermuda / school shorts",
+    "display_order": 3
+  },
+  {
+    "id": 9,
+    "item_id": 8,
+    "code": "A",
+    "name": "Single Breasted",
+    "description": "Single breasted blazer",
+    "display_order": 1
+  },
+  {
+    "id": 10,
+    "item_id": 8,
+    "code": "B",
+    "name": "Double Breasted",
+    "description": "Double breasted blazer",
+    "display_order": 2
+  },
+  {
+    "id": 11,
+    "item_id": 9,
+    "code": "A",
+    "name": "Pleated",
+    "description": "Pleated skirt",
+    "display_order": 1
+  },
+  {
+    "id": 12,
+    "item_id": 9,
+    "code": "B",
+    "name": "Straight Fit",
+    "description": "Straight skirt",
+    "display_order": 2
+  }
+]

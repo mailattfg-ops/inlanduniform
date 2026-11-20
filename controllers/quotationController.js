@@ -1319,8 +1319,8 @@ exports.createQuotation = async (req, res) => {
             prefix: 'QT',
             table: 'quotations',
             column: 'quotation_no',
-            branch: branch_id || req.user?.branchId || 1,
-            date: quotation_date || new Date()
+            branch: req.user?.branchId || 1,
+            date: new Date()
           });
 
     // Calculate or resolve final_quote_value
@@ -1346,11 +1346,11 @@ exports.createQuotation = async (req, res) => {
       expected_delivery_date: expected_delivery_date || null,
       profit_margin_percent: profit_margin_percent || 0,
       final_quote_value: resolvedFinalQuoteValue,
-      status: "Pending Branch Approval",
+      status: "Draft",
       metrics_summary: {
         ...(metrics_summary || {}),
-        submitted_to_bm: true,
-        submitted_to_bm_at: new Date().toISOString(),
+        submitted_to_bm: false,
+        submitted_to_bm_at: null,
         needs_revision: false,
         bm_approved: false,
         submitted_to_ops: false,
@@ -2308,12 +2308,12 @@ exports.submitToBranchManager = async (req, res) => {
         });
     }
 
-    if (quotation.status === "Pending") {
+    if (quotation.status === "BM Approved" || quotation.status === "Pending") {
       return res
         .status(400)
         .json({
           error:
-            "Quotation has already been approved by Branch Manager and submitted to Operations.",
+            "Quotation has already been approved by Branch Manager.",
         });
     }
 
@@ -2393,15 +2393,17 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
       userPermissions.includes("all");
     const hasOpsAuthority =
       isAdmin ||
+      userRole === "branch manager" ||
       userPermissions.includes("submit_quotations_ops") ||
-      userPermissions.includes("corporate_approver");
+      userPermissions.includes("corporate_approver") ||
+      userPermissions.includes("manage_quotations");
 
     if (!hasOpsAuthority) {
       return res
         .status(403)
         .json({
           error:
-            "Quotation approval is strictly restricted to Branch Managers and Administrators with Ops Submission authority.",
+            "Quotation approval is strictly restricted to Branch Managers and Administrators.",
         });
     }
 
@@ -2462,7 +2464,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
     const { data: updatedQuote, error: updateError } = await supabase
       .from("quotations")
       .update({
-        status: "Pending",
+        status: "BM Approved",
         metrics_summary: updatedMetrics,
         updated_at: approvedAt,
       })
@@ -2485,7 +2487,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
           performed_by_name: req.user?.fullName || req.user?.email || null,
           details: {
             quotation_no: quotation.quotation_no,
-            status: "Pending",
+            status: "BM Approved",
             approved_at: approvedAt,
             notes: notes || null,
           },
@@ -2501,7 +2503,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Quotation ${quotation.quotation_no} approved by Branch Manager and forwarded to Operations Team.`,
+      message: `Quotation ${quotation.quotation_no} approved by Branch Manager. Ready for customer proposal.`,
       quotation: updatedQuote,
     });
   } catch (err) {
@@ -2524,15 +2526,17 @@ exports.bmRejectQuotation = async (req, res) => {
       userPermissions.includes("all");
     const hasOpsAuthority =
       isAdmin ||
+      userRole === "branch manager" ||
       userPermissions.includes("submit_quotations_ops") ||
-      userPermissions.includes("corporate_approver");
+      userPermissions.includes("corporate_approver") ||
+      userPermissions.includes("manage_quotations");
 
     if (!hasOpsAuthority) {
       return res
         .status(403)
         .json({
           error:
-            "Quotation revision requests are strictly restricted to Branch Managers and Administrators with Ops Submission authority.",
+            "Quotation revision requests are strictly restricted to Branch Managers and Administrators.",
         });
     }
 

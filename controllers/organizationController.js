@@ -288,6 +288,11 @@ exports.createOrganization = async (req, res) => {
     contact_title,
     contact_person,
     contact_designation,
+    alt_contact_title,
+    alt_contact_person,
+    alt_contact_designation,
+    alt_contact_number,
+    alt_phone,
     branch_id,
     origin,
     username,
@@ -412,6 +417,8 @@ exports.createOrganization = async (req, res) => {
     const resolvedPincode = pincode ? String(pincode).trim() : null;
     const rawPhone = phone !== undefined ? phone : (req.body.contact_number !== undefined ? req.body.contact_number : req.body.contact_phone);
     const cleanPhone = rawPhone ? String(rawPhone).trim() : null;
+    const rawAltPhone = alt_contact_number !== undefined ? alt_contact_number : (alt_phone !== undefined ? alt_phone : (req.body.alt_contact_number || req.body.alt_phone));
+    const cleanAltPhone = rawAltPhone ? String(rawAltPhone).trim() : null;
     const resolvedContactEmail = contact_email || email || cleanEmail || null;
 
     // Automatically resolve relationship manager (sales person) from logged-in user
@@ -449,6 +456,11 @@ exports.createOrganization = async (req, res) => {
       contact_title: contact_title ? String(contact_title).trim() : 'Mr.',
       contact_person: contact_person ? String(contact_person).trim() : null,
       contact_designation: contact_designation ? String(contact_designation).trim() : null,
+      alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : (alt_contact_person ? 'Mr.' : null),
+      alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+      alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+      alt_contact_number: cleanAltPhone,
+      alt_phone: cleanAltPhone,
       contact_email: resolvedContactEmail ? String(resolvedContactEmail).trim().toLowerCase() : null,
       address: address ? String(address).trim() : null,
       city: city ? String(city).trim() : null,
@@ -475,6 +487,9 @@ exports.createOrganization = async (req, res) => {
       delivery_country: delivery_country ? String(delivery_country).trim() : 'India',
       is_b2b: Boolean(gst_number && String(gst_number).trim() !== '') || Boolean(is_b2b),
       credit_period_days: credit_period_days !== undefined && credit_period_days !== null && !isNaN(parseInt(credit_period_days, 10)) ? parseInt(credit_period_days, 10) : 30,
+      is_special: client_tag === 'special' || Boolean(is_special),
+      is_risk: client_tag === 'risk' || Boolean(is_risk),
+      client_tag: client_tag || (is_special ? 'special' : is_risk ? 'risk' : 'standard'),
     };
 
     let currentInsert = { ...orgPayload };
@@ -587,6 +602,11 @@ exports.updateOrganization = async (req, res) => {
     contact_title,
     contact_person,
     contact_designation,
+    alt_contact_title,
+    alt_contact_person,
+    alt_contact_designation,
+    alt_contact_number,
+    alt_phone,
     industry_id,
     relationship_manager_id,
     customer_code,
@@ -614,6 +634,15 @@ exports.updateOrganization = async (req, res) => {
     if (contact_title !== undefined) updatePayload.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
     if (contact_person !== undefined) updatePayload.contact_person = contact_person ? String(contact_person).trim() : null;
     if (contact_designation !== undefined) updatePayload.contact_designation = contact_designation ? String(contact_designation).trim() : null;
+    if (alt_contact_title !== undefined) updatePayload.alt_contact_title = alt_contact_title ? String(alt_contact_title).trim() : 'Mr.';
+    if (alt_contact_person !== undefined) updatePayload.alt_contact_person = alt_contact_person ? String(alt_contact_person).trim() : null;
+    if (alt_contact_designation !== undefined) updatePayload.alt_contact_designation = alt_contact_designation ? String(alt_contact_designation).trim() : null;
+    const rawAltPhone = alt_contact_number !== undefined ? alt_contact_number : (alt_phone !== undefined ? alt_phone : (req.body.alt_contact_number || req.body.alt_phone));
+    if (rawAltPhone !== undefined) {
+      const cleanAltPhone = rawAltPhone ? String(rawAltPhone).trim() : null;
+      updatePayload.alt_contact_number = cleanAltPhone;
+      updatePayload.alt_phone = cleanAltPhone;
+    }
     if (contact_email !== undefined || email !== undefined) {
       const em = contact_email || email;
       updatePayload.contact_email = em ? String(em).trim().toLowerCase() : null;
@@ -651,15 +680,18 @@ exports.updateOrganization = async (req, res) => {
       if (client_tag === "special" || is_special === true) {
         updatePayload.is_special = true;
         updatePayload.is_risk = false;
+        updatePayload.client_tag = "special";
       } else if (client_tag === "risk" || is_risk === true) {
         updatePayload.is_special = false;
         updatePayload.is_risk = true;
+        updatePayload.client_tag = "risk";
       } else if (
         client_tag === "standard" ||
         (is_special === false && is_risk === false)
       ) {
         updatePayload.is_special = false;
         updatePayload.is_risk = false;
+        updatePayload.client_tag = "standard";
       }
     }
 
@@ -745,10 +777,11 @@ exports.updateOrganization = async (req, res) => {
         pruned = true;
       }
 
-      // Handle special / risk
-      if ((errLower.includes("is_special") || errLower.includes("is_risk")) && (currentUpdate.is_special !== undefined || currentUpdate.is_risk !== undefined)) {
+      // Handle special / risk / client_tag
+      if ((errLower.includes("is_special") || errLower.includes("is_risk") || errLower.includes("client_tag")) && (currentUpdate.is_special !== undefined || currentUpdate.is_risk !== undefined || currentUpdate.client_tag !== undefined)) {
         delete currentUpdate.is_special;
         delete currentUpdate.is_risk;
+        delete currentUpdate.client_tag;
         pruned = true;
       }
 

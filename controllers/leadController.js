@@ -370,6 +370,11 @@ async function ensureOrganizationForLead(lead, req, { createPortalCredentials = 
         contact_designation: lead.contact_designation || null,
         contact_email: (lead.email && lead.email.trim()) ? lead.email.trim().toLowerCase() : null,
         contact_number: leadPhone,
+        alt_contact_title: lead.alt_contact_title || 'Mr.',
+        alt_contact_person: lead.alt_contact_person || null,
+        alt_contact_designation: lead.alt_contact_designation || null,
+        alt_contact_number: lead.alt_contact_number || lead.alt_phone || null,
+        alt_phone: lead.alt_contact_number || lead.alt_phone || null,
         address: lead.address || null,
         city: lead.city || null,
         state: lead.state || null,
@@ -396,7 +401,7 @@ async function ensureOrganizationForLead(lead, req, { createPortalCredentials = 
             delete orgPayload.contact_number;
             orgPayload.contact_phone = leadPhone;
         }
-        ['contact_title', 'contact_designation', 'contact_person', 'contact_email', 'relationship_manager_id', 'branch_id', 'origin', 'city', 'state', 'pincode', 'country'].forEach(col => {
+        ['contact_title', 'contact_designation', 'contact_person', 'contact_email', 'relationship_manager_id', 'branch_id', 'origin', 'city', 'state', 'pincode', 'country', 'alt_contact_title', 'alt_contact_person', 'alt_contact_designation', 'alt_contact_number', 'alt_phone'].forEach(col => {
             if (errLower.includes(col)) {
                 delete orgPayload[col];
             }
@@ -497,13 +502,46 @@ module.exports = {
                 return res.status(500).json({ error: error.message, code: error.code });
             }
 
+            // Fallback match organizations by name if organization_id is null
+            const unlinkedLeads = (data || []).filter(l => !l.organizations && l.name);
+            let orgsByName = {};
+            if (unlinkedLeads.length > 0) {
+                try {
+                    const names = unlinkedLeads.map(l => l.name.trim()).filter(Boolean);
+                    if (names.length > 0) {
+                        const { data: matchedOrgs } = await supabase
+                            .from('organizations')
+                            .select('id, name, is_risk, is_special, client_tag')
+                            .in('name', names);
+                        if (matchedOrgs) {
+                            matchedOrgs.forEach(o => {
+                                orgsByName[o.name.toLowerCase().trim()] = o;
+                            });
+                        }
+                    }
+                } catch (_) {}
+            }
+
             const mapped = (data || []).map(l => {
                 const normalizedStatus = normalizeLeadStage(l.status, l);
+                const matchedOrg = l.organizations || (l.name ? orgsByName[l.name.toLowerCase().trim()] : null);
+                const altRemark = Array.isArray(l.remarks) ? l.remarks.find(r => r && r.type === 'alt_contact_profile') : null;
+                const altPhone = l.alt_contact_number || l.alt_phone || altRemark?.alt_contact_number || altRemark?.alt_phone || null;
                 return {
                     ...l,
+                    organization_id: l.organization_id || matchedOrg?.id || null,
+                    organizations: matchedOrg || null,
+                    is_risk: Boolean(matchedOrg?.is_risk),
+                    is_special: Boolean(matchedOrg?.is_special),
+                    client_tag: matchedOrg?.client_tag || (matchedOrg?.is_special ? 'special' : matchedOrg?.is_risk ? 'risk' : 'standard'),
                     status: normalizedStatus,
                     phone: l.contact_number || l.phone || null,
                     contact_number: l.contact_number || l.phone || null,
+                    alt_contact_title: l.alt_contact_title || altRemark?.alt_contact_title || (l.alt_contact_person || altRemark?.alt_contact_person ? 'Mr.' : null),
+                    alt_contact_person: l.alt_contact_person || altRemark?.alt_contact_person || null,
+                    alt_contact_designation: l.alt_contact_designation || altRemark?.alt_contact_designation || null,
+                    alt_contact_number: altPhone,
+                    alt_phone: altPhone,
                     is_cold: Boolean(l.is_cold || l.status === 'Lost' || l.status === 'Cold Leads'),
                     area: l.area || null,
                     google_maps_link: l.google_maps_link || null,
@@ -553,8 +591,15 @@ module.exports = {
             }
 
             if (data) {
+                const altRemark = Array.isArray(data.remarks) ? data.remarks.find(r => r && r.type === 'alt_contact_profile') : null;
+                const altPhone = data.alt_contact_number || data.alt_phone || altRemark?.alt_contact_number || altRemark?.alt_phone || null;
                 data.phone = data.contact_number || data.phone || null;
                 data.contact_number = data.contact_number || data.phone || null;
+                data.alt_contact_title = data.alt_contact_title || altRemark?.alt_contact_title || (data.alt_contact_person || altRemark?.alt_contact_person ? 'Mr.' : null);
+                data.alt_contact_person = data.alt_contact_person || altRemark?.alt_contact_person || null;
+                data.alt_contact_designation = data.alt_contact_designation || altRemark?.alt_contact_designation || null;
+                data.alt_contact_number = altPhone;
+                data.alt_phone = altPhone;
                 data.status = normalizeLeadStage(data.status, data);
                 data.is_cold = Boolean(data.is_cold || data.status === 'Lost' || data.status === 'Cold Leads');
             }
@@ -584,6 +629,11 @@ module.exports = {
             contact_title,
             contact_person,
             contact_designation,
+            alt_contact_title,
+            alt_contact_person,
+            alt_contact_designation,
+            alt_contact_number,
+            alt_phone,
             source,
             requirements,
             area,
@@ -658,8 +708,21 @@ module.exports = {
             }
 
             const cleanPhone = phone ? String(phone).trim() : null;
+            const cleanAltPhone = (alt_contact_number || alt_phone) ? String(alt_contact_number || alt_phone).trim() : null;
             const resolvedPincode = pincode ? String(pincode).trim() : null;
             const lead_code = await generateNextLeadCodeLocal();
+
+            const initialRemarks = [];
+            if (alt_contact_person || cleanAltPhone) {
+                initialRemarks.push({
+                    type: 'alt_contact_profile',
+                    alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : 'Mr.',
+                    alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+                    alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+                    alt_contact_number: cleanAltPhone,
+                    alt_phone: cleanAltPhone
+                });
+            }
 
             const insertPayload = {
                 lead_code,
@@ -667,6 +730,11 @@ module.exports = {
                 contact_title: contact_title ? String(contact_title).trim() : 'Mr.',
                 contact_person: contact_person ? String(contact_person).trim() : null,
                 contact_designation: contact_designation ? String(contact_designation).trim() : null,
+                alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : (alt_contact_person ? 'Mr.' : null),
+                alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+                alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+                alt_contact_number: cleanAltPhone,
+                alt_phone: cleanAltPhone,
                 source: source ? String(source).trim() : null,
                 requirements: requirements ? String(requirements).trim() : null,
                 contact_number: cleanPhone,
@@ -686,7 +754,7 @@ module.exports = {
                 google_maps_link: google_maps_link ? String(google_maps_link).trim() : null,
                 origin: targetOrigin,
                 is_cold: false,
-                remarks: []
+                remarks: initialRemarks
             };
 
             let currentInsert = { ...insertPayload };
@@ -721,7 +789,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'alt_contact_title', 'alt_contact_person', 'alt_contact_designation', 'alt_contact_number', 'alt_phone', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentInsert[col] !== undefined) {
                         delete currentInsert[col];
                         pruned = true;
@@ -765,6 +833,11 @@ module.exports = {
             contact_title,
             contact_person,
             contact_designation,
+            alt_contact_title,
+            alt_contact_person,
+            alt_contact_designation,
+            alt_contact_number,
+            alt_phone,
             contact_number,
             phone,
             address,
@@ -807,8 +880,21 @@ module.exports = {
             const targetBranchId = (!isAdmin && userBranchId) ? userBranchId : (branch_id || userBranchId || null);
             const targetOrigin = (!isAdmin && userBranchId) ? 'BRANCH' : (origin || (targetBranchId ? 'BRANCH' : 'HQ'));
             const cleanPhone = clientPhone && String(clientPhone).trim() ? String(clientPhone).trim() : null;
+            const cleanAltPhone = (alt_contact_number || alt_phone) ? String(alt_contact_number || alt_phone).trim() : null;
             const resolvedPincode = pincode ? String(pincode).trim() : null;
             const lead_code = await generateNextLeadCodeLocal();
+
+            const initialFeedRemarks = [];
+            if (alt_contact_person || cleanAltPhone) {
+                initialFeedRemarks.push({
+                    type: 'alt_contact_profile',
+                    alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : 'Mr.',
+                    alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+                    alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+                    alt_contact_number: cleanAltPhone,
+                    alt_phone: cleanAltPhone
+                });
+            }
 
             const feedPayload = {
                 lead_code,
@@ -817,6 +903,11 @@ module.exports = {
                 contact_title: contact_title ? String(contact_title).trim() : 'Mr.',
                 contact_person: contact_person ? String(contact_person).trim() : null,
                 contact_designation: contact_designation ? String(contact_designation).trim() : null,
+                alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : (alt_contact_person ? 'Mr.' : null),
+                alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+                alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+                alt_contact_number: cleanAltPhone,
+                alt_phone: cleanAltPhone,
                 contact_number: cleanPhone,
                 phone: cleanPhone,
                 address: address ? String(address).trim() : null,
@@ -831,7 +922,7 @@ module.exports = {
                 origin: targetOrigin,
                 status: STAGES.FEEDS,
                 is_cold: false,
-                remarks: []
+                remarks: initialFeedRemarks
             };
 
             let currentInsert = { ...feedPayload };
@@ -862,7 +953,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'contact_title', 'contact_designation', 'contact_person', 'alt_contact_title', 'alt_contact_person', 'alt_contact_designation', 'alt_contact_number', 'alt_phone', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentInsert[col] !== undefined) {
                         delete currentInsert[col];
                         pruned = true;
@@ -918,6 +1009,11 @@ module.exports = {
             contact_title,
             contact_person,
             contact_designation,
+            alt_contact_title,
+            alt_contact_person,
+            alt_contact_designation,
+            alt_contact_number,
+            alt_phone,
             source,
             requirements,
             area,
@@ -947,6 +1043,8 @@ module.exports = {
             }
 
             const cleanPhone = phone ? String(phone).trim() : (req.body.contact_number ? String(req.body.contact_number).trim() : undefined);
+            const rawAltPhone = alt_contact_number !== undefined ? alt_contact_number : (alt_phone !== undefined ? alt_phone : (req.body.alt_contact_number || req.body.alt_phone));
+            const cleanAltPhone = rawAltPhone !== undefined ? (rawAltPhone ? String(rawAltPhone).trim() : null) : undefined;
             const resolvedPincode = pincode !== undefined ? (pincode ? String(pincode).trim() : null) : undefined;
 
             const updateFields = {
@@ -964,6 +1062,13 @@ module.exports = {
                 updateFields.contact_number = cleanPhone;
                 updateFields.phone = cleanPhone;
             }
+            if (cleanAltPhone !== undefined) {
+                updateFields.alt_contact_number = cleanAltPhone;
+                updateFields.alt_phone = cleanAltPhone;
+            }
+            if (alt_contact_title !== undefined) updateFields.alt_contact_title = alt_contact_title ? String(alt_contact_title).trim() : 'Mr.';
+            if (alt_contact_person !== undefined) updateFields.alt_contact_person = alt_contact_person ? String(alt_contact_person).trim() : null;
+            if (alt_contact_designation !== undefined) updateFields.alt_contact_designation = alt_contact_designation ? String(alt_contact_designation).trim() : null;
             if (resolvedPincode !== undefined) updateFields.pincode = resolvedPincode;
             if (email !== undefined) updateFields.email = email && email.trim() ? email.trim() : null;
             if (branch_id !== undefined) updateFields.branch_id = branch_id;
@@ -1023,7 +1128,7 @@ module.exports = {
                     pruned = true;
                 }
 
-                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
+                ['phone', 'contact_number', 'area', 'google_maps_link', 'origin', 'is_cold', 'organization_id', 'contact_title', 'contact_designation', 'contact_person', 'alt_contact_title', 'alt_contact_person', 'alt_contact_designation', 'alt_contact_number', 'alt_phone', 'city', 'state', 'pincode', 'country', 'branch_id', 'zone_id', 'industry_id'].forEach(col => {
                     if ((errLower.includes(`'${col.toLowerCase()}'`) || errLower.includes(`column '${col.toLowerCase()}'`)) && currentUpdate[col] !== undefined) {
                         delete currentUpdate[col];
                         pruned = true;
@@ -1035,6 +1140,26 @@ module.exports = {
 
             if (updateError) throw updateError;
 
+            // Maintain fallback in remarks JSONB for resilience
+            if (alt_contact_person !== undefined || cleanAltPhone !== undefined || alt_contact_designation !== undefined) {
+                try {
+                    const { data: leadRec } = await supabase.from('leads').select('remarks').eq('id', id).maybeSingle();
+                    let existingRemarks = Array.isArray(leadRec?.remarks) ? [...leadRec.remarks] : [];
+                    const filteredRemarks = existingRemarks.filter(r => !r || r.type !== 'alt_contact_profile');
+                    if (alt_contact_person || cleanAltPhone) {
+                        filteredRemarks.push({
+                            type: 'alt_contact_profile',
+                            alt_contact_title: alt_contact_title ? String(alt_contact_title).trim() : 'Mr.',
+                            alt_contact_person: alt_contact_person ? String(alt_contact_person).trim() : null,
+                            alt_contact_designation: alt_contact_designation ? String(alt_contact_designation).trim() : null,
+                            alt_contact_number: cleanAltPhone || null,
+                            alt_phone: cleanAltPhone || null
+                        });
+                    }
+                    await supabase.from('leads').update({ remarks: filteredRemarks }).eq('id', id);
+                } catch (_) {}
+            }
+
             // Synchronize linked organization if this lead is converted/linked to one
             try {
                 const { data: leadRow } = await supabase.from('leads').select('organization_id').eq('id', id).maybeSingle();
@@ -1044,6 +1169,13 @@ module.exports = {
                     if (contact_title !== undefined) orgSync.contact_title = contact_title ? String(contact_title).trim() : 'Mr.';
                     if (contact_person !== undefined) orgSync.contact_person = contact_person ? String(contact_person).trim() : null;
                     if (contact_designation !== undefined) orgSync.contact_designation = contact_designation ? String(contact_designation).trim() : null;
+                    if (alt_contact_title !== undefined) orgSync.alt_contact_title = alt_contact_title ? String(alt_contact_title).trim() : 'Mr.';
+                    if (alt_contact_person !== undefined) orgSync.alt_contact_person = alt_contact_person ? String(alt_contact_person).trim() : null;
+                    if (alt_contact_designation !== undefined) orgSync.alt_contact_designation = alt_contact_designation ? String(alt_contact_designation).trim() : null;
+                    if (cleanAltPhone !== undefined) {
+                        orgSync.alt_contact_number = cleanAltPhone;
+                        orgSync.alt_phone = cleanAltPhone;
+                    }
                     if (cleanPhone !== undefined) {
                         orgSync.contact_number = cleanPhone;
                         orgSync.phone = cleanPhone;
@@ -1581,5 +1713,171 @@ module.exports = {
     logContactOutcome: async (req, res) => {
         req.body.stage = req.body.stage || STAGES.FOLLOW_UPS;
         return module.exports.logActivity(req, res);
+    },
+
+    // 15. Revert Lead / Prospect Pipeline Stage with Performer & Timestamp Audit
+    revertStage: async (req, res) => {
+        const { id } = req.params;
+        const { reason, target_stage } = req.body;
+
+        try {
+            if (!reason || typeof reason !== 'string' || reason.trim().length < 3) {
+                return res.status(400).json({ error: 'A mandatory reason (at least 3 characters) is required to revert a stage.' });
+            }
+
+            // Fetch lead
+            const { data: lead, error: fetchErr } = await supabase
+                .from('leads')
+                .select('*')
+                .eq('id', id)
+                .single();
+
+            if (fetchErr || !lead) {
+                return res.status(404).json({ error: 'Lead record not found' });
+            }
+
+            const currentStatus = normalizeLeadStage(lead.status, lead);
+            const staff = await resolveStaffIdentity(req);
+
+            // Canonical Stage Progression hierarchy
+            const STAGE_ORDER = [
+                STAGES.FEEDS,
+                'Contacted Leads',
+                STAGES.OPEN_LEADS,
+                STAGES.NEW_LEADS,
+                STAGES.SALES_LEADS,
+                STAGES.FOLLOW_UPS,
+                STAGES.MEETINGS,
+                STAGES.HOT_LEADS,
+                STAGES.QUOTATIONS,
+                STAGES.DEALS,
+                STAGES.SO_CONVERTED
+            ];
+
+            const currentIndex = STAGE_ORDER.indexOf(currentStatus);
+
+            let resolvedTargetStage = target_stage ? normalizeLeadStage(target_stage, lead) : null;
+
+            if (!resolvedTargetStage) {
+                // Determine prior stage from lead_stage_history
+                const { data: history } = await supabase
+                    .from('lead_stage_history')
+                    .select('*')
+                    .eq('lead_id', id)
+                    .order('entered_at', { ascending: false });
+
+                if (history && history.length > 0) {
+                    // Find the most recent recorded stage that is NOT the current stage
+                    const priorEntry = history.find(h => normalizeLeadStage(h.stage, lead) !== currentStatus);
+                    if (priorEntry) {
+                        resolvedTargetStage = normalizeLeadStage(priorEntry.stage, lead);
+                    }
+                }
+
+                // Fallback to strict linear predecessor
+                if (!resolvedTargetStage) {
+                    if (currentIndex > 0) {
+                        resolvedTargetStage = STAGE_ORDER[currentIndex - 1];
+                    } else {
+                        resolvedTargetStage = STAGES.FEEDS;
+                    }
+                }
+            }
+
+            if (resolvedTargetStage === currentStatus) {
+                return res.status(400).json({ error: `Cannot revert to the same stage (${currentStatus}).` });
+            }
+
+            // Formatted date and time
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+            const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            const formattedDateTime = `${dateStr}, ${timeStr}`;
+
+            const transitionNote = `Reverted from "${currentStatus}" to "${resolvedTargetStage}" by ${staff.full_name} (${staff.designation}) on ${formattedDateTime}.\nReason: ${reason.trim()}`;
+
+            // 1. Exit current stage in lead_stage_history
+            await supabase
+                .from('lead_stage_history')
+                .update({ 
+                    exited_at: now.toISOString(),
+                    transition_reason: `Exited via rollback to ${resolvedTargetStage}`
+                })
+                .eq('lead_id', id)
+                .is('exited_at', null);
+
+            // 2. Insert new record in lead_stage_history
+            await supabase.from('lead_stage_history').insert([{
+                lead_id: id,
+                stage: resolvedTargetStage,
+                entered_at: now.toISOString(),
+                transition_reason: transitionNote,
+                performed_by: staff.id || null,
+                metadata: {
+                    is_revert: true,
+                    reverted_from: currentStatus,
+                    reverted_to: resolvedTargetStage,
+                    reverted_by: staff.full_name,
+                    reverted_by_id: staff.id,
+                    employee_id: staff.employee_id,
+                    designation: staff.designation,
+                    reason: reason.trim(),
+                    reverted_at: now.toISOString()
+                }
+            }]);
+
+            // 3. Record in lead_activities & sync to remarks JSONB
+            const updatedRemarks = await recordLeadActivity(id, {
+                stage: resolvedTargetStage,
+                activityType: 'stage_revert',
+                notes: `[STAGE REVERTED] Stage reverted from "${currentStatus}" back to "${resolvedTargetStage}" by ${staff.full_name} (${staff.designation}) on ${formattedDateTime}.\nReason: ${reason.trim()}`,
+                responseType: 'revert',
+                outcome: resolvedTargetStage,
+                staff,
+                currentRemarks: lead.remarks || []
+            });
+
+            // 4. Update leads table
+            const updatePayload = {
+                status: resolvedTargetStage,
+                is_cold: false,
+                remarks: updatedRemarks,
+                updated_at: now.toISOString()
+            };
+
+            const { data: updatedLead, error: updateErr } = await supabase
+                .from('leads')
+                .update(updatePayload)
+                .eq('id', id)
+                .select(`
+                    *,
+                    industries ( id, name ),
+                    branches ( id, name, branch_code ),
+                    zones ( id, name, code ),
+                    employees!leads_assigned_staff_id_fkey ( id, full_name, employee_id, designation, department ),
+                    organizations ( id, name, is_risk, is_special, client_tag )
+                `)
+                .single();
+
+            if (updateErr) {
+                console.error('[revertStage] Update Error:', updateErr);
+                // Fallback direct update
+                await supabase.from('leads').update(updatePayload).eq('id', id);
+            }
+
+            return res.json({
+                success: true,
+                message: `Stage successfully reverted from ${currentStatus} to ${resolvedTargetStage}`,
+                previous_stage: currentStatus,
+                current_stage: resolvedTargetStage,
+                reverted_by: staff.full_name,
+                reverted_at: formattedDateTime,
+                lead: updatedLead || { ...lead, ...updatePayload }
+            });
+
+        } catch (err) {
+            console.error('[revertStage] Exception:', err);
+            return res.status(500).json({ error: err.message });
+        }
     }
 };

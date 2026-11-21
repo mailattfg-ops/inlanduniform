@@ -17,6 +17,7 @@ router.delete('/:id', leadController.delete);
 // Stage and Assignment Workflow Endpoints
 router.post('/:id/assign-branch', leadController.assignBranch);
 router.post('/:id/assign-staff', leadController.assignStaff);
+router.post('/:id/revert-stage', leadController.revertStage);
 router.post('/:id/activity', leadController.logActivity);
 router.get('/:id/activities', leadController.getActivities);
 router.get('/:id/stage-history', leadController.getStageHistory);

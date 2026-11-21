@@ -1571,14 +1571,13 @@ exports.createQuotation = async (req, res) => {
       console.error("Logging failed:", logErr.message);
     }
 
-    // Automatically advance linked lead in Sales Pipeline to 'Proposal Sent'
+    // Automatically advance linked lead in Sales Pipeline to 'Proposal Sent' / log quotation activity
     try {
       if (organization_id) {
         let { data: leads } = await supabase
           .from("leads")
-          .select("id, status, remarks, name")
-          .eq("organization_id", organization_id)
-          .in("status", ["Qualified", "Contacted", "New"]);
+          .select("id, status, remarks, name, organization_id")
+          .eq("organization_id", organization_id);
 
         if (!leads || leads.length === 0) {
           const { data: org } = await supabase
@@ -1590,11 +1589,19 @@ exports.createQuotation = async (req, res) => {
           if (org && org.name) {
             const { data: matchedLeads } = await supabase
               .from("leads")
-              .select("id, status, remarks, name")
-              .ilike("name", org.name.trim())
-              .in("status", ["Qualified", "Contacted", "New"]);
+              .select("id, status, remarks, name, organization_id")
+              .ilike("name", org.name.trim());
             leads = matchedLeads;
           }
+        }
+
+        if ((!leads || leads.length === 0) && (req.body.lead_id || quote.lead_id)) {
+          const targetLeadId = req.body.lead_id || quote.lead_id;
+          const { data: leadById } = await supabase
+            .from("leads")
+            .select("id, status, remarks, name, organization_id")
+            .eq("id", targetLeadId);
+          if (leadById && leadById.length > 0) leads = leadById;
         }
 
         if (leads && leads.length > 0) {
@@ -1602,14 +1609,49 @@ exports.createQuotation = async (req, res) => {
           const dateStr = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
           const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
+          const isRevision = Boolean(metrics_summary?.is_revision || metrics_summary?.revised_from_id);
+          const parentQuoteNo = metrics_summary?.revised_from_quotation_no || (metrics_summary?.revised_from_id ? `QT-${metrics_summary.revised_from_id}` : '');
+
+          // If this is a revised quotation, update the parent quotation status to 'Revised'
+          if (metrics_summary?.revised_from_id) {
+            try {
+              const { data: parentQ } = await supabase
+                .from('quotations')
+                .select('id, quotation_no, metrics_summary')
+                .eq('id', metrics_summary.revised_from_id)
+                .maybeSingle();
+
+              if (parentQ) {
+                await supabase
+                  .from('quotations')
+                  .update({
+                    status: 'Revised',
+                    metrics_summary: {
+                      ...(parentQ.metrics_summary || {}),
+                      revised_to_id: quote.id,
+                      revised_to_quotation_no: quote.quotation_no,
+                      revised_at: new Date().toISOString()
+                    }
+                  })
+                  .eq('id', parentQ.id);
+              }
+            } catch (parentUpdErr) {
+              console.warn("Could not mark parent quotation as Revised:", parentUpdErr.message);
+            }
+          }
+
+          const activityText = isRevision
+            ? `Revised Quotation #${quote.quotation_no || quote.id} generated following customer revision request (Value: ₹${Number(quote.final_quote_value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}). Original Quotation: #${parentQuoteNo}.`
+            : `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Proposal Sent.`;
+
           for (const l of leads) {
             let curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
             curRemarks.push({
               date: dateStr,
               time: timeStr,
-              text: `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Proposal Sent.`,
-              stage: "Proposal Sent",
-              response_type: "positive",
+              text: activityText,
+              stage: "Quotations",
+              response_type: isRevision ? "quotation_revised" : "positive",
               author: {
                 name: req.user?.fullName || req.user?.full_name || "Sales Representative",
                 designation: req.user?.designation || req.user?.role || "Staff",
@@ -1629,16 +1671,24 @@ exports.createQuotation = async (req, res) => {
             await supabase.from("lead_stage_history").insert([{
               lead_id: l.id,
               stage: "Quotations",
-              transition_reason: `Quotation #${quote.quotation_no || quote.id} generated`
+              transition_reason: isRevision 
+                ? `Revised Quotation #${quote.quotation_no || quote.id} generated (Original: #${parentQuoteNo})`
+                : `Quotation #${quote.quotation_no || quote.id} generated`
             }]).catch(() => {});
 
             await supabase.from("lead_activities").insert([{
               lead_id: l.id,
               stage: "Quotations",
-              activity_type: "quotation_dispatched",
+              activity_type: isRevision ? `Revised Quote: #${quote.quotation_no || quote.id}` : "quotation_dispatched",
+              response_type: isRevision ? "quotation_revised" : "quotation_sent",
+              performed_by: req.user?.id || null,
               performed_by_name: req.user?.fullName || req.user?.full_name || "Sales Representative",
-              notes: `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Quotations.`,
-              outcome: "quotation_sent"
+              notes: activityText,
+              remarks: activityText,
+              quotation_id: quote.id,
+              quotation_no: quote.quotation_no,
+              outcome: isRevision ? "quotation_revised" : "quotation_sent",
+              created_at: now.toISOString()
             }]).catch(() => {});
           }
         }
@@ -3911,12 +3961,16 @@ exports.logQuotationFollowUp = async (req, res) => {
     const followUpOutcome = response_type || responseType || outcome || 'held';
     let targetStatus = quotation.status;
     const outcomeLower = String(followUpOutcome).toLowerCase();
+    const isCustomerRevision = outcomeLower.includes('revision') || outcomeLower === 'needs_revision';
+
     if (outcomeLower === 'rejected' || outcomeLower === 'negative') {
       targetStatus = 'Rejected';
     } else if (outcomeLower === 'held' || outcomeLower === 'hold') {
       targetStatus = 'Held';
     } else if (outcomeLower === 'approved' || outcomeLower === 'positive') {
       targetStatus = 'Approved';
+    } else if (isCustomerRevision) {
+      targetStatus = 'Revision Requested';
     }
     if (req.body.status) {
       targetStatus = req.body.status;
@@ -3929,8 +3983,8 @@ exports.logQuotationFollowUp = async (req, res) => {
       created_at: now.toISOString(),
       date: now.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }),
       time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-      response_type: followUpOutcome,
-      outcome: followUpOutcome,
+      response_type: isCustomerRevision ? 'revision_requested' : followUpOutcome,
+      outcome: isCustomerRevision ? 'revision_requested' : followUpOutcome,
       remarks: note,
       next_followup_date: next_followup_date || nextFollowUpDate || null,
       author: {
@@ -3948,7 +4002,13 @@ exports.logQuotationFollowUp = async (req, res) => {
       followups: [newFollowUp, ...curFollowups],
       last_followup: newFollowUp,
       last_followup_at: now.toISOString(),
-      customer_status: targetStatus
+      customer_status: targetStatus,
+      ...(isCustomerRevision ? {
+        needs_revision: true,
+        customer_revision_reason: note,
+        customer_revision_requested_at: now.toISOString(),
+        customer_revision_requested_by: authorName
+      } : {})
     };
 
     const { data: updatedQuote, error: updateErr } = await supabase
@@ -4034,24 +4094,63 @@ exports.logQuotationFollowUp = async (req, res) => {
     // Also mirror to active lead if organization_id matches
     if (quotation.organization_id) {
       try {
-        const { data: leads } = await supabase
+        let { data: leads } = await supabase
           .from('leads')
           .select('id, status, remarks')
-          .eq('organization_id', quotation.organization_id)
-          .limit(1);
+          .eq('organization_id', quotation.organization_id);
+
+        if (!leads || leads.length === 0) {
+          const { data: org } = await supabase
+            .from('organizations')
+            .select('name')
+            .eq('id', quotation.organization_id)
+            .maybeSingle();
+
+          if (org && org.name) {
+            const { data: leadsByName } = await supabase
+              .from('leads')
+              .select('id, status, remarks')
+              .ilike('name', org.name.trim());
+            leads = leadsByName;
+          }
+        }
 
         if (leads && leads.length > 0) {
-          const lead = leads[0];
-          await supabase.from('lead_activities').insert([{
-            lead_id: lead.id,
-            stage: 'Quotations',
-            activity_type: 'Quotation Follow-up',
-            response_type: followUpOutcome,
-            outcome: followUpOutcome,
-            remarks: `[Quote #${quotation.quotation_no}] ${note}`,
-            performed_by: req.user?.id || null,
-            created_at: now.toISOString()
-          }]);
+          for (const lead of leads) {
+            await supabase.from('lead_activities').insert([{
+              lead_id: lead.id,
+              stage: 'Quotations',
+              activity_type: isCustomerRevision ? `Customer Revision Requested: #${quotation.quotation_no}` : 'Quotation Follow-up',
+              response_type: isCustomerRevision ? 'Revision Requested' : followUpOutcome,
+              outcome: isCustomerRevision ? 'revision_requested' : followUpOutcome,
+              remarks: `[Quote #${quotation.quotation_no}] ${note}`,
+              notes: `[Quote #${quotation.quotation_no}] ${note}`,
+              quotation_id: quotation.id,
+              quotation_no: quotation.quotation_no,
+              performed_by: req.user?.id || null,
+              performed_by_name: authorName,
+              created_at: now.toISOString()
+            }]);
+
+            if (isCustomerRevision) {
+              let curRemarks = Array.isArray(lead.remarks) ? [...lead.remarks] : [];
+              curRemarks.push({
+                date: now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }),
+                time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+                text: `Customer requested revision on Quotation #${quotation.quotation_no || id}: ${note}`,
+                stage: "Quotations",
+                response_type: "revision_requested",
+                author: {
+                  name: authorName,
+                  role: "Commercial"
+                }
+              });
+              await supabase.from('leads').update({
+                remarks: curRemarks,
+                updated_at: new Date()
+              }).eq('id', lead.id);
+            }
+          }
         }
       } catch (mirrorErr) {
         console.warn('Could not mirror quotation follow-up to lead activities:', mirrorErr.message);

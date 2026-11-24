@@ -2,6 +2,7 @@ const supabase = require("../config/supabase");
 const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
 const crypto = require("crypto");
 const { logAction } = require("../utils/logger");
+const { customerActivity, getLastInvoiceDates } = require("../utils/customerActivity");
 
 const generatePassword = () =>
   crypto.randomBytes(4).toString("hex").toUpperCase();
@@ -252,6 +253,11 @@ exports.getOrganizations = async (req, res) => {
       }));
     }
 
+    const lastInvoiceDates = await getLastInvoiceDates().catch((err) => {
+      console.warn("[getOrganizations] Last invoice lookup failed:", err.message);
+      return {};
+    });
+
     enriched = enriched.map((o) => {
       const resolvedNum = o.contact_number || o.contact_phone || o.phone || null;
       const resolvedEmail = o.contact_email || o.email || null;
@@ -263,6 +269,8 @@ exports.getOrganizations = async (req, res) => {
         contact_email: resolvedEmail,
         email: resolvedEmail,
         is_b2b: Boolean(o.is_b2b || (o.gst_number && String(o.gst_number).trim() !== '')),
+        last_invoice_date: lastInvoiceDates[o.id] || null,
+        customer_activity: customerActivity(lastInvoiceDates[o.id]),
       };
     });
 

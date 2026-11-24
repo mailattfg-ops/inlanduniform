@@ -88,6 +88,8 @@ app.get("/api/ping", async (req, res) => {
   }
 });
 
+app.get("/api/cron/dormant-customers", require("./controllers/leadController").runDormantCustomerCron);
+
 app.get("/api/seed-lead", async (req, res) => {
   try {
     const result = await seedDemoLead();

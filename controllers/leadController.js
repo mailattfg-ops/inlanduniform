@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
+const { DORMANT_DAYS, daysSince, customerActivity, fetchAll, getLastInvoiceDates } = require('../utils/customerActivity');
 
 // Canonical CRM Lead Pipeline Stages (10 Stages)
 const STAGES = {
@@ -176,6 +177,71 @@ function normalizeLeadStage(status, lead = {}) {
     if (s === 'Lost') return STAGES.FOLLOW_UPS; // with is_cold = true
     if (s === 'Cold Leads' || s === 'Cold') return STAGES.FOLLOW_UPS;
     return s;
+}
+
+// Re-adds customers with no invoice for DORMANT_DAYS to Feeds, once per dormancy period.
+// Skipped when the customer already has any lead created after its last invoice (auto or manual).
+async function syncDormantCustomerFeeds({ dryRun = false } = {}) {
+    const lastDates = await getLastInvoiceDates();
+    const dormant = Object.entries(lastDates).filter(([, d]) => daysSince(d) >= DORMANT_DAYS);
+    const summary = { dormant: dormant.length, toCreate: 0, created: 0, skipped: 0, failed: 0, names: [] };
+    if (dormant.length === 0) return summary;
+
+    const dormantIds = new Set(dormant.map(([id]) => Number(id)));
+    const linkedLeads = await fetchAll(() => supabase
+        .from('leads')
+        .select('id, organization_id, created_at')
+        .not('organization_id', 'is', null)
+        .order('id', { ascending: true }));
+    const alreadyFed = new Set(linkedLeads
+        .filter(l => dormantIds.has(l.organization_id) && new Date(l.created_at) > new Date(lastDates[l.organization_id]))
+        .map(l => l.organization_id));
+    const toCreate = [...dormantIds].filter(id => !alreadyFed.has(id));
+    summary.toCreate = toCreate.length;
+
+    for (let i = 0; i < toCreate.length; i += 100) { // chunked to keep the .in() URL short
+        const { data: orgs, error: orgErr } = await supabase.from('organizations').select('*').in('id', toCreate.slice(i, i + 100));
+        if (orgErr) throw orgErr;
+
+        for (const org of orgs || []) {
+            summary.names.push(org.name);
+            if (dryRun) continue;
+            const phone = org.contact_number || org.contact_phone || org.phone || null;
+            const { error } = await supabase.from('leads').insert([{
+                lead_code: await generateNextLeadCodeLocal(),
+                name: org.name,
+                organization_id: org.id,
+                is_returning_customer: true,
+                dormant_since: lastDates[org.id],
+                industry_id: org.industry_id || null,
+                contact_title: org.contact_title || 'Mr.',
+                contact_person: org.contact_person || null,
+                contact_designation: org.contact_designation || null,
+                contact_number: phone,
+                phone,
+                email: org.contact_email || org.email || null,
+                address: org.address || null,
+                city: org.city || null,
+                state: org.state || null,
+                pincode: org.pincode || null,
+                country: org.country || 'India',
+                branch_id: org.branch_id || null,
+                zone_id: org.zone_id || null,
+                origin: org.origin || (org.branch_id ? 'BRANCH' : 'HQ'),
+                assigned_staff_id: org.relationship_manager_id || null,
+                status: STAGES.FEEDS,
+                is_cold: false,
+                remarks: []
+            }]);
+            if (!error) summary.created++;
+            else if (error.code === '23505') summary.skipped++; // unique index: already created by a parallel run
+            else {
+                summary.failed++;
+                console.warn(`⚠️ Dormant feed for organization ${org.id} not created:`, error.message);
+            }
+        }
+    }
+    return summary;
 }
 
 // Record an activity in lead_activities with backward-compatible remarks synchronization
@@ -425,6 +491,21 @@ async function ensureOrganizationForLead(lead, req, { createPortalCredentials = 
 }
 
 module.exports = {
+    // Daily Vercel cron: re-add dormant customers to Feeds. ?dry=1 only reports what would be created.
+    runDormantCustomerCron: async (req, res) => {
+        const secret = process.env.CRON_SECRET;
+        if (!secret) return res.status(500).json({ error: 'CRON_SECRET is not configured' });
+        if (req.headers.authorization !== `Bearer ${secret}`) return res.status(401).json({ error: 'Unauthorized' });
+        try {
+            const summary = await syncDormantCustomerFeeds({ dryRun: req.query.dry === '1' });
+            console.log('[dormant-customers]', JSON.stringify({ ...summary, names: summary.names.length }));
+            res.json({ dryRun: req.query.dry === '1', ...summary });
+        } catch (err) {
+            console.error('❌ Dormant customer cron failed:', err.message);
+            res.status(500).json({ error: err.message });
+        }
+    },
+
     // 1. List Leads with Stage & Cold Normalization
     list: async (req, res) => {
         try {
@@ -448,6 +529,11 @@ module.exports = {
             if (!canViewAny) {
                 return res.status(403).json({ error: 'Access Denied: You do not have permission to view leads' });
             }
+
+            const lastInvoiceDates = await getLastInvoiceDates().catch(err => {
+                console.warn('⚠️ Last invoice lookup failed:', err.message);
+                return {};
+            });
 
             let selectFieldsWithZone = `
                 *,
@@ -527,9 +613,13 @@ module.exports = {
                 const matchedOrg = l.organizations || (l.name ? orgsByName[l.name.toLowerCase().trim()] : null);
                 const altRemark = Array.isArray(l.remarks) ? l.remarks.find(r => r && r.type === 'alt_contact_profile') : null;
                 const altPhone = l.alt_contact_number || l.alt_phone || altRemark?.alt_contact_number || altRemark?.alt_phone || null;
+                const orgId = l.organization_id || matchedOrg?.id || null;
+                const lastInvoice = orgId ? lastInvoiceDates[orgId] : null;
                 return {
                     ...l,
-                    organization_id: l.organization_id || matchedOrg?.id || null,
+                    organization_id: orgId,
+                    last_invoice_date: lastInvoice || null,
+                    customer_activity: customerActivity(lastInvoice),
                     organizations: matchedOrg || null,
                     is_risk: Boolean(matchedOrg?.is_risk),
                     is_special: Boolean(matchedOrg?.is_special),

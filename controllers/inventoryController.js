@@ -1154,7 +1154,8 @@ exports.trims = {
 
       if (colError) {
         // Fallback to storing structured meta in description if columns do not exist
-        if (colError.code === "42703") {
+        const isMissingCol = colError.code === "42703" || colError.code === "PGRST204" || (colError.message && (colError.message.includes("Could not find the") || colError.message.includes("column") || colError.message.includes("schema cache")));
+        if (isMissingCol) {
           const { data: fbData, error: fbError } = await supabase
             .from("trims")
             .insert([
@@ -1167,8 +1168,22 @@ exports.trims = {
               "*, category:trim_categories(id, name, code_prefix, default_uom)",
             )
             .single();
-          if (fbError) throw fbError;
-          result = fbData;
+          if (fbError) {
+            const { data: simpleData, error: simpleErr } = await supabase
+              .from("trims")
+              .insert([
+                {
+                  ...basePayload,
+                  description: combinedDescription,
+                },
+              ])
+              .select("*")
+              .single();
+            if (simpleErr) throw simpleErr;
+            result = simpleData;
+          } else {
+            result = fbData;
+          }
         } else {
           throw colError;
         }
@@ -1258,7 +1273,8 @@ exports.trims = {
         .single();
 
       if (colError) {
-        if (colError.code === "42703") {
+        const isMissingCol = colError.code === "42703" || colError.code === "PGRST204" || (colError.message && (colError.message.includes("Could not find the") || colError.message.includes("column") || colError.message.includes("schema cache")));
+        if (isMissingCol) {
           const fbUpdates = { ...baseUpdates };
           if (combinedDescription !== undefined) fbUpdates.description = combinedDescription;
           const { data: fbData, error: fbError } = await supabase
@@ -1269,8 +1285,18 @@ exports.trims = {
               "*, category:trim_categories(id, name, code_prefix, default_uom)",
             )
             .single();
-          if (fbError) throw fbError;
-          result = fbData;
+          if (fbError) {
+            const { data: simpleData, error: simpleErr } = await supabase
+              .from("trims")
+              .update(fbUpdates)
+              .eq("id", id)
+              .select("*")
+              .single();
+            if (simpleErr) throw simpleErr;
+            result = simpleData;
+          } else {
+            result = fbData;
+          }
         } else {
           throw colError;
         }

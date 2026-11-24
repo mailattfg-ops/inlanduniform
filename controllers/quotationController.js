@@ -1604,6 +1604,9 @@ exports.createQuotation = async (req, res) => {
           if (leadById && leadById.length > 0) leads = leadById;
         }
 
+        // Won deals stay won; a new quote advances only open entries (e.g. a returning-customer feed)
+        leads = (leads || []).filter(l => !['SO Converted Deals', 'Converted'].includes(l.status));
+
         if (leads && leads.length > 0) {
           const now = new Date();
           const dateStr = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });

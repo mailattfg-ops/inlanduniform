@@ -1485,9 +1485,12 @@ module.exports = {
 
             // --- STAGE-SPECIFIC PROGRESSION RULES ---
 
+            // Cold Lead is set ONLY by a rejected meeting (C); Feeds and Follow-ups have no negative outcome.
+
             // A. FEEDS STAGE
             if (targetStage === STAGES.FEEDS || targetStage === 'Contacted Leads' || targetStage === 'Open Feeds') {
                 if (normResponse === 'positive') {
+                    nextIsCold = false; // clears cold flags left by the old Feeds negative option
                     // Branch feed -> New Leads; HQ feed -> Open Leads
                     if (lead.branch_id || lead.origin === 'BRANCH') {
                         nextStatus = STAGES.NEW_LEADS;
@@ -1496,10 +1499,6 @@ module.exports = {
                         nextStatus = STAGES.OPEN_LEADS;
                         transitionReason = 'Positive field feed response (HQ-created) -> Open Leads';
                     }
-                } else if (['negative', 'cold', 'rejected', 'drop', 'dropped'].includes(normResponse)) {
-                    nextStatus = 'Contacted Leads';
-                    nextIsCold = true;
-                    transitionReason = 'Feed follow-up negative response recorded -> Contacted Leads (Cold)';
                 } else {
                     nextStatus = 'Contacted Leads';
                     nextIsCold = false;
@@ -1509,19 +1508,12 @@ module.exports = {
 
             // B. FOLLOW-UPS STAGE
             else if (targetStage === STAGES.FOLLOW_UPS) {
-                const isColdChoice = ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped', 'negative'].includes(normResponse) ||
-                                     ['cold', 'cold_lead', 'cold lead', 'rejected', 'drop', 'dropped', 'negative'].includes(String(outcome || '').toLowerCase());
-
                 if (normResponse === 'positive') {
                     nextStatus = STAGES.MEETINGS;
                     nextIsCold = false;
                     transitionReason = 'Positive follow-up response -> Advancing to Meetings';
-                } else if (isColdChoice) {
-                    nextStatus = STAGES.FOLLOW_UPS;
-                    nextIsCold = true;
-                    transitionReason = 'Follow-up marked as Cold Lead (remains in Follow-ups with cold tag)';
-                    await recordStageTransition(id, STAGES.COLD_LEADS, 'Marked cold during follow-up', staff);
                 } else {
+                    // Hold: keeps any cold tag from a rejected meeting
                     nextStatus = STAGES.FOLLOW_UPS;
                     nextIsCold = lead.is_cold || false;
                     transitionReason = 'Follow-up on hold/pending (remains in Follow-ups)';

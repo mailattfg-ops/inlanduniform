@@ -1393,3 +1393,6 @@ async function safeInsertProduct(payload) {
             }
         };
 
+
+// Shared with inventory stock listing so stock pages see the same derived fields as /products
+exports.parseProductMetadata = parseProductMetadata;

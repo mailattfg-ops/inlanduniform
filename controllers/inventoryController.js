@@ -1354,13 +1354,19 @@ exports.stocks = {
       const fabrics = fabricsRes.data || [];
       const trims = trimsRes.data || [];
 
-      // Map products with their stock entries
+      // Map products with their stock entries, plus the same derived fields /products returns
+      // (brand, specification, colour, shade, size, size unit parsed from materials/remarks).
+      // `materials` stays raw: stock pages read its [ProductType:] tags.
+      const { parseProductMetadata } = require("./productController");
       const enrichedProducts = products.map((p) => {
         const matchedStocks = stockRecords.filter(
           (s) => String(s.product_id) === String(p.id),
         );
+        const meta = parseProductMetadata(p) || {};
         return {
           ...p,
+          ...meta,
+          materials: p.materials,
           stocks: matchedStocks || [],
         };
       });

@@ -323,7 +323,7 @@ function formatArtNumberDisplayName(p) {
             }
 
             if (itemName) {
-                return [itemName, specName, genderName].filter(Boolean).join(' ');
+                return [genderName, itemName, specName].filter(Boolean).join(' ');
             }
         }
     }
@@ -613,7 +613,7 @@ async function safeInsertProduct(payload) {
         async function resolveArtNumberProductTitle(artNumber, itemId, specificationId, gender, category, productType, materials) {
             if (!artNumber && !itemId) return null;
 
-            // Only in-house manufactured readymades use the [Item] [Specification] [Gender] format
+            // Only in-house manufactured readymades use the [Gender] [Item] [Specification] format
             const rawArt = (artNumber || '').toUpperCase();
             const accPrefixes = ['TIE-', 'BLT-', 'SCK-', 'BDG-', 'CAP-', 'SCF-', 'EPL-', 'LNY-', 'BOW-', 'PKS-', 'CRST-', 'ACC-'];
             const cat = (category || '').toLowerCase();
@@ -709,7 +709,7 @@ async function safeInsertProduct(payload) {
             const cleanSpec = specName ? specName.trim() : '';
             const cleanGender = resolvedGender ? (resolvedGender.charAt(0).toUpperCase() + resolvedGender.slice(1).toLowerCase()) : '';
 
-            const partsTitle = [cleanItem, cleanSpec, cleanGender].filter(Boolean);
+            const partsTitle = [cleanGender, cleanItem, cleanSpec].filter(Boolean);
             if (partsTitle.length > 0) {
                 return partsTitle.join(' ');
             }
@@ -727,7 +727,7 @@ async function safeInsertProduct(payload) {
                     brand_name, specification, color, shade_no, size_uom
                 } = req.body;
 
-                // Auto-derive product name for Art Numbers: Format is [Item] [Specification] [Gender] (Readymades in-house only)
+                // Auto-derive product name for Art Numbers: Format is [Gender] [Item] [Specification] (Readymades in-house only)
                 const derivedTitle = await resolveArtNumberProductTitle(art_number, req.body.item_id, req.body.specification_id, gender, category, req.body.product_type || product_type_id, materials);
                 if (derivedTitle) {
                     name = derivedTitle;
@@ -940,7 +940,7 @@ async function safeInsertProduct(payload) {
                     brand_name, specification, color, shade_no, size_uom
                 } = req.body;
 
-                // Auto-derive product name for Art Numbers: Format is [Item] [Specification] [Gender] (Readymades in-house only)
+                // Auto-derive product name for Art Numbers: Format is [Gender] [Item] [Specification] (Readymades in-house only)
                 const derivedTitle = await resolveArtNumberProductTitle(art_number, req.body.item_id, req.body.specification_id, gender, category, req.body.product_type || product_type_id, materials);
                 if (derivedTitle) {
                     name = derivedTitle;

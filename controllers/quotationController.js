@@ -11,7 +11,7 @@ const { getOwnScope, ids: ownIds, canSeeQuote, canHqApprove } = require("../util
 const { PRE_APPROVAL_STATUSES, FINAL_SEND_STATUSES } = require("./quoteWorkflowController");
 const SHAREABLE_STATUSES = [
   "Draft", "Pending Branch Approval", "BM Approved", "Pending Ops Approval",
-  "Ops Approved", "Pending Customer Approval", "Held", "Approved", "Revision Requested", "Rejected",
+  "Ops Approved", "Pending Customer Approval", "Approved", "Revision Requested", "Rejected",
 ];
 
 // Local helper to generate the next design number
@@ -2028,9 +2028,8 @@ exports.updateQuotation = async (req, res) => {
       });
     }
     // The editor may change a quote's content only while it is a Draft (incl. returned by BM / Ops), and it
-    // never sets the workflow status (that is done by Send to BM / BM / Ops / customer actions). Cancel is allowed.
-    const isCancel = status === "Cancelled";
-    if (existingQuote && !isCancel && (existingQuote.status || "Draft") !== "Draft") {
+    // never sets the workflow status (that is done by Send to BM / BM / Ops / customer actions).
+    if (existingQuote && (existingQuote.status || "Draft") !== "Draft") {
       return res.status(400).json({
         error: `Only draft quotations can be edited (status: ${existingQuote.status}). Ask the approver to return it, or revise it after the customer's response.`,
       });
@@ -2052,7 +2051,7 @@ exports.updateQuotation = async (req, res) => {
       title: title.trim(),
       quotation_no: quotation_no ? quotation_no.trim() : undefined,
       organization_id,
-      status: isCancel ? "Cancelled" : (existingQuote?.status || "Draft"),
+      status: existingQuote?.status || "Draft",
       estimated_expenses: estimated_expenses || 0,
       total_estimated_time: total_estimated_time || "",
       production_days_estimate: production_days_estimate || 0,
@@ -4042,21 +4041,20 @@ exports.logQuotationFollowUp = async (req, res) => {
     const isManualNote = Boolean(outcome) && String(outcome).toLowerCase() !== String(response_type || responseType || outcome).toLowerCase();
     // The customer's response changes the status only once the approved quote was sent to them.
     // Before that (draft shared early) it is recorded as a manual log and the status stays as it is.
-    const isDecisionStage = ['Pending Customer Approval', 'Held'].includes(quotation.status);
+    const isDecisionStage = quotation.status === 'Pending Customer Approval';
     const appliesDecision = isDecisionStage && !isManualNote;
     const isCustomerRevision = appliesDecision && (outcomeLower.includes('revision') || outcomeLower === 'needs_revision');
 
     if (appliesDecision) {
       if (outcomeLower === 'rejected' || outcomeLower === 'negative') {
         targetStatus = 'Rejected';
-      } else if (outcomeLower === 'held' || outcomeLower === 'hold') {
-        targetStatus = 'Held';
       } else if (outcomeLower === 'approved' || outcomeLower === 'positive') {
         targetStatus = 'Approved';
       } else if (isCustomerRevision) {
         targetStatus = 'Revision Requested';
       }
     }
+    // "Hold" (customer undecided) is logged as a follow-up; the quote stays Pending Customer Approval.
     // (The status is no longer taken from the request body: it follows the rules above.)
 
     const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Sales Representative';

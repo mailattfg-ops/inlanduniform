@@ -881,7 +881,7 @@ exports.notifyCustomer = async (req, res) => {
 
         // Customer-facing link: the tokenised proposal PDF (the staff app needs a login, so never link to it)
         let shareUrl = null;
-        if (quote && ['BM Approved', 'Held', 'Approved'].includes(quote.status)) {
+        if (quote && ['BM Approved', 'Pending Customer Approval', 'Approved'].includes(quote.status)) {
             const ms = quote.metrics_summary || {};
             let token = ms.share_token;
             if (!token) {

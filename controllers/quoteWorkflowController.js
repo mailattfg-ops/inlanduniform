@@ -19,7 +19,7 @@ function canOpsApprove(user) {
 
 // Statuses before the quote is cleared for the customer (shared copies carry a NOT APPROVED watermark)
 const PRE_APPROVAL_STATUSES = ['Draft', 'Pending Branch Approval', 'BM Approved', 'Pending Ops Approval'];
-const FINAL_SEND_STATUSES = ['Ops Approved', 'Pending Customer Approval', 'Held'];
+const FINAL_SEND_STATUSES = ['Ops Approved', 'Pending Customer Approval'];
 
 async function loadQuote(id) {
   const { data, error } = await supabase

@@ -1,6 +1,18 @@
 const supabase = require("../config/supabase");
+const { notifyQuoteEvent } = require("../utils/notify");
 const { toSafeInt } = require("../utils/sanitize");
 const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
+const crypto = require("crypto");
+const { sendMail, apiBaseUrl } = require("../utils/mailer");
+const { getOwnScope, ids: ownIds, canSeeQuote, canHqApprove } = require("../utils/ownScope");
+
+// Quotes a customer may view through a tokenised proposal link. Before Ops approval the copy is
+// watermarked NOT APPROVED (PRE_APPROVAL_STATUSES); superseded (Revised) quotes are not shared.
+const { PRE_APPROVAL_STATUSES, FINAL_SEND_STATUSES } = require("./quoteWorkflowController");
+const SHAREABLE_STATUSES = [
+  "Draft", "Pending Branch Approval", "BM Approved", "Pending Ops Approval",
+  "Ops Approved", "Pending Customer Approval", "Held", "Approved", "Revision Requested", "Rejected",
+];
 
 // Local helper to generate the next design number
 async function generateNextDesignNumberLocal() {
@@ -791,20 +803,41 @@ exports.listQuotations = async (req, res) => {
     let query = supabase
       .from("quotations")
       .select(
-        "*, organizations(*), group_design_number:group_design_numbers(code), orders(id, order_no, status, branch_id)",
+        "*, organizations(*, relationship_manager:employees!organizations_relationship_manager_id_fkey(id, full_name, employee_id)), group_design_number:group_design_numbers(code), orders(id, order_no, status, branch_id)",
       )
       .order("created_at", { ascending: false });
 
+    // Salespeople (Marketing / Sales Executive): only quotes they created/submitted or for their customers
+    const own = await getOwnScope(req);
+    if (own && own.quoteIds.size === 0) return res.json([]);
+    if (own) query = query.in("id", ownIds(own.quoteIds));
+
+    let data;
     if (userOrgId) {
       // Strictly scope to this organization's quotations
-      query = query.eq("organization_id", userOrgId);
+      const r = await query.eq("organization_id", userOrgId);
+      if (r.error) throw r.error;
+      data = r.data;
     } else if (!isAdmin && userBranchId) {
-      // Strictly scope to this branch's quotations only
-      query = query.eq("branch_id", userBranchId);
+      // This branch's quotations: the quote's own branch, plus quotes with no branch
+      // (e.g. created or revised by HQ/Admin) whose customer belongs to this branch.
+      const { data: branchOrgs, error: oErr } = await supabase
+        .from("organizations")
+        .select("id")
+        .eq("branch_id", userBranchId);
+      if (oErr) throw oErr;
+      const orgIds = (branchOrgs || []).map((o) => o.id);
+      const filter = orgIds.length
+        ? `branch_id.eq.${userBranchId},and(branch_id.is.null,organization_id.in.(${orgIds.join(",")}))`
+        : `branch_id.eq.${userBranchId}`;
+      const r = await query.or(filter);
+      if (r.error) throw r.error;
+      data = r.data;
+    } else {
+      const r = await query;
+      if (r.error) throw r.error;
+      data = r.data;
     }
-
-    const { data, error } = await query;
-    if (error) throw error;
     const enrichedQuotes = (data || []).map((q) => {
       let fv = Number(q.final_quote_value) || 0;
       if (fv === 0) {
@@ -839,7 +872,7 @@ exports.getQuotationDetails = async (req, res) => {
     let query = supabase
       .from("quotations")
       .select(
-        "*, organizations(*), group_design_number:group_design_numbers(code)",
+        "*, organizations(*, relationship_manager:employees!organizations_relationship_manager_id_fkey(id, full_name, employee_id)), group_design_number:group_design_numbers(code)",
       );
     if (/^\d+$/.test(String(id).trim())) {
       query = query.eq("id", parseInt(id, 10));
@@ -879,28 +912,19 @@ exports.getQuotationDetails = async (req, res) => {
         });
     }
 
+    if (!(await canSeeQuote(req, quotation))) {
+      return res.status(403).json({ error: "Access Denied: this quotation is not yours" });
+    }
+
     // Fetch all items within this quotation using quotation.id
     const quoteNumericId = quotation.id;
-    let items = [];
     const { data: rawItems, error: itemsError } = await supabase
       .from("quotation_items")
-      .select("*, product_types(name)")
+      .select("*")
       .eq("quotation_id", quoteNumericId);
 
-    if (itemsError) {
-      console.warn(
-        "Selecting quotation_items with product_types failed, attempting fallback select:",
-        itemsError.message,
-      );
-      const { data: fallbackItems, error: fallbackError } = await supabase
-        .from("quotation_items")
-        .select("*")
-        .eq("quotation_id", id);
-      if (fallbackError) throw fallbackError;
-      items = fallbackItems || [];
-    } else {
-      items = rawItems || [];
-    }
+    if (itemsError) throw itemsError;
+    let items = rawItems || [];
 
     // Hydrate items if size_breakdown or costs were stored in notes
     items = (items || []).map((it) => {
@@ -1139,6 +1163,49 @@ async function enrichQuotationItemsWithDesignNumbers(items) {
 }
 
 // Helper to extract design codes (including nested ones for set type) and resolve/create group design number
+// Design numbers for every line (and products inside sets):
+//  1) look up all of them at once, read-only (dryRun) - existing combinations are the common case
+//  2) create the genuinely new combinations one at a time, so new DNS-#### codes never collide
+// Returns true if any line reused an existing design number.
+async function resolveDesignNumbersForItems(items) {
+  const targets = [];
+  for (const item of items || []) {
+    if (item.size_breakdown && item.size_breakdown.is_set && Array.isArray(item.size_breakdown.products)) {
+      item.size_breakdown.products.forEach((p) => targets.push({ obj: p, child: true }));
+    } else {
+      targets.push({ obj: item, child: false });
+    }
+  }
+  let anyExisting = false;
+  const apply = (t, r) => {
+    if (!r || !r.designNumber) return;
+    if (t.child) {
+      t.obj.design_number = r.designNumber;
+      t.obj.product_design_number = r.designNumber;
+    } else {
+      t.obj.design_number = r.designNumber;
+      if (!t.obj.size_breakdown) t.obj.size_breakdown = {};
+      t.obj.size_breakdown.design_number = r.designNumber;
+    }
+    if (r.alreadyExists) anyExisting = true;
+  };
+
+  const previews = await Promise.all(
+    targets.map((t) => resolveOrCreateQuotationItemDesignNumber(t.obj, { dryRun: true }).catch(() => null))
+  );
+  const toCreate = [];
+  targets.forEach((t, i) => {
+    const p = previews[i];
+    // Found an existing design number (a lookup error falls through to the normal path)
+    if (p && p.alreadyExists && p.designNumber && p.designNumber !== "DNS-STANDARD") apply(t, p);
+    else toCreate.push(t);
+  });
+  for (const t of toCreate) {
+    apply(t, await resolveOrCreateQuotationItemDesignNumber(t.obj));
+  }
+  return anyExisting;
+}
+
 async function resolveGroupDesignNumberForQuotation(
   items,
   metrics_summary,
@@ -1266,62 +1333,39 @@ exports.createQuotation = async (req, res) => {
     // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
     console.log(`\n================== [CREATE QUOTATION START] ==================`);
     console.log(`[CREATE QUOTATION] Received ${items.length} item(s) to process for organization ${organization_id}`);
-    let anyDesignNumberAlreadyExists = false;
-    let quoteItemCounter = 0;
-    for (const item of items) {
-      quoteItemCounter++;
-      const itemLabel = item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || `Item #${quoteItemCounter}`;
-      console.log(`\n[CREATE QUOTATION] Processing Item #${quoteItemCounter}: ${itemLabel}`);
+    // Quote number and branch don't depend on the items: work them out while design numbers resolve
+    const quoteNoPromise = quotation_no && quotation_no.trim()
+      ? Promise.resolve(quotation_no.trim())
+      : generateNextDocumentNumber(supabase, {
+          prefix: 'QT',
+          table: 'quotations',
+          column: 'quotation_no',
+          branch: req.user?.branchId || 1,
+          date: new Date()
+        });
+    // Branch the quote belongs to (drives which BM sees and approves it):
+    // a revision keeps its original's branch; otherwise the creator's branch, else the customer's.
+    const branchPromise = (async () => {
+      const [parentRes, orgRes] = await Promise.all([
+        metrics_summary?.revised_from_id
+          ? supabase.from("quotations").select("branch_id").eq("id", metrics_summary.revised_from_id).maybeSingle()
+          : Promise.resolve({ data: null }),
+        organization_id && !req.user?.branchId
+          ? supabase.from("organizations").select("branch_id").eq("id", organization_id).maybeSingle()
+          : Promise.resolve({ data: null }),
+      ]);
+      return parentRes.data?.branch_id || req.user?.branchId || orgRes.data?.branch_id || null;
+    })();
 
-      if (
-        item.size_breakdown &&
-        item.size_breakdown.is_set &&
-        Array.isArray(item.size_breakdown.products)
-      ) {
-        console.log(`[CREATE QUOTATION] Item #${quoteItemCounter} is a Set with ${item.size_breakdown.products.length} nested products:`);
-        for (const p of item.size_breakdown.products) {
-          const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
-          if (resObj && resObj.designNumber) {
-            p.design_number = resObj.designNumber;
-            p.product_design_number = resObj.designNumber;
-            if (resObj.alreadyExists) {
-              anyDesignNumberAlreadyExists = true;
-            }
-            console.log(`[CREATE QUOTATION] Set Product (${p.product_name || p.name}) Assigned DNS: ${resObj.designNumber}`);
-          }
-        }
-      } else {
-        const resObj = await resolveOrCreateQuotationItemDesignNumber(item);
-        if (resObj && resObj.designNumber) {
-          item.design_number = resObj.designNumber;
-          if (!item.size_breakdown) item.size_breakdown = {};
-          item.size_breakdown.design_number = resObj.designNumber;
-          if (resObj.alreadyExists) {
-            anyDesignNumberAlreadyExists = true;
-          }
-          console.log(`[CREATE QUOTATION] Item #${quoteItemCounter} (${itemLabel}) Assigned DNS: ${resObj.designNumber}`);
-        }
-      }
-    }
-    console.log(`================== [CREATE QUOTATION: ALL ITEMS RESOLVED] ==================\n`);
+    const anyDesignNumberAlreadyExists = await resolveDesignNumbersForItems(items);
+    console.log(`[CREATE QUOTATION] Design numbers resolved for ${items.length} item(s)`);
 
     // Find or create group design number (with smart nested resolve and auto-fallback generation)
-    const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(
-      items,
-      metrics_summary,
-    );
-
-    // Generate a unique quotation number if not provided: QT-IU[Branch NO]-[FY]/[MM][seq]
-    const finalQuotationNo =
-      quotation_no && quotation_no.trim()
-        ? quotation_no.trim()
-        : await generateNextDocumentNumber(supabase, {
-            prefix: 'QT',
-            table: 'quotations',
-            column: 'quotation_no',
-            branch: req.user?.branchId || 1,
-            date: new Date()
-          });
+    const [groupDesignNumberId, finalQuotationNo, quoteBranchId] = await Promise.all([
+      resolveGroupDesignNumberForQuotation(items, metrics_summary),
+      quoteNoPromise,
+      branchPromise,
+    ]);
 
     // Calculate or resolve final_quote_value
     let resolvedFinalQuoteValue = Number(final_quote_value) || 0;
@@ -1334,12 +1378,13 @@ exports.createQuotation = async (req, res) => {
       resolvedFinalQuoteValue = Number((preTax + taxAmount).toFixed(2));
     }
 
+
     // Insert the quotation header (with fallback if estimated_expenses column is missing from schema cache)
     const quoteInsertPayload = {
       quotation_no: finalQuotationNo,
       title: title.trim(),
       organization_id,
-      branch_id: req.user?.branchId || null,
+      branch_id: quoteBranchId,
       estimated_expenses: estimated_expenses || 0,
       total_estimated_time: total_estimated_time || "",
       production_days_estimate: production_days_estimate || 0,
@@ -1349,6 +1394,11 @@ exports.createQuotation = async (req, res) => {
       status: "Draft",
       metrics_summary: {
         ...(metrics_summary || {}),
+        // Who generated this quote (shown on the quote card in the lead pipeline timeline)
+        created_by_id: req.user?.id || null,
+        created_by_name: req.user?.fullName || req.user?.full_name || null,
+        created_by_designation: req.user?.designation || req.user?.role || null,
+        created_by_department: req.user?.department || null,
         submitted_to_bm: false,
         submitted_to_bm_at: null,
         needs_revision: false,
@@ -1557,148 +1607,147 @@ exports.createQuotation = async (req, res) => {
       throw itemsError;
     }
 
-    // Auto-update fabrics latest_sam values from quotation
-    await updateFabricLatestSAMs(items);
+    // After the quote and its lines are saved, these steps are independent: run them together
+    const isRevision = Boolean(metrics_summary?.is_revision || metrics_summary?.revised_from_id);
+    const parentQuoteNo = metrics_summary?.revised_from_quotation_no || (metrics_summary?.revised_from_id ? `QT-${metrics_summary.revised_from_id}` : '');
 
-    // Log action if available
-    try {
-      const { logAction } = require("../utils/logger");
-      await logAction(req.user.id, "CREATE", "quotation", quote.id, {
-        quotation_no: quote.quotation_no,
-        final_quote_value: quote.final_quote_value,
-      });
-    } catch (logErr) {
-      console.error("Logging failed:", logErr.message);
-    }
+    const fabricSamStep = updateFabricLatestSAMs(items);
 
-    // Automatically advance linked lead in Sales Pipeline to 'Proposal Sent' / log quotation activity
-    try {
-      if (organization_id) {
-        let { data: leads } = await supabase
-          .from("leads")
-          .select("id, status, remarks, name, organization_id")
-          .eq("organization_id", organization_id);
+    const auditStep = (async () => {
+      try {
+        const { logAction } = require("../utils/logger");
+        await logAction(req.user.id, "CREATE", "quotation", quote.id, {
+          quotation_no: quote.quotation_no,
+          final_quote_value: quote.final_quote_value,
+        });
+      } catch (logErr) {
+        console.error("Logging failed:", logErr.message);
+      }
+    })();
 
-        if (!leads || leads.length === 0) {
-          const { data: org } = await supabase
-            .from("organizations")
-            .select("name")
-            .eq("id", organization_id)
-            .maybeSingle();
-
-          if (org && org.name) {
-            const { data: matchedLeads } = await supabase
-              .from("leads")
-              .select("id, status, remarks, name, organization_id")
-              .ilike("name", org.name.trim());
-            leads = matchedLeads;
-          }
+    // A revision supersedes its original (whether or not the customer has a lead)
+    const parentStep = (async () => {
+      if (!metrics_summary?.revised_from_id) return;
+      try {
+        const { data: parentQ } = await supabase
+          .from('quotations')
+          .select('id, quotation_no, metrics_summary')
+          .eq('id', metrics_summary.revised_from_id)
+          .maybeSingle();
+        if (parentQ) {
+          await supabase
+            .from('quotations')
+            .update({
+              status: 'Revised',
+              metrics_summary: {
+                ...(parentQ.metrics_summary || {}),
+                revised_to_id: quote.id,
+                revised_to_quotation_no: quote.quotation_no,
+                revised_at: new Date().toISOString()
+              }
+            })
+            .eq('id', parentQ.id);
         }
+      } catch (parentUpdErr) {
+        console.warn("Could not mark parent quotation as Revised:", parentUpdErr.message);
+      }
+    })();
 
-        if ((!leads || leads.length === 0) && (req.body.lead_id || quote.lead_id)) {
-          const targetLeadId = req.body.lead_id || quote.lead_id;
-          const { data: leadById } = await supabase
+    // Automatically advance linked lead in Sales Pipeline to 'Quotations' and log the quote on it
+    const leadStep = (async () => {
+      if (!organization_id) return;
+      let { data: leads } = await supabase
+        .from("leads")
+        .select("id, status, remarks, name, organization_id")
+        .eq("organization_id", organization_id);
+
+      if (!leads || leads.length === 0) {
+        const { data: org } = await supabase
+          .from("organizations")
+          .select("name")
+          .eq("id", organization_id)
+          .maybeSingle();
+
+        if (org && org.name) {
+          const { data: matchedLeads } = await supabase
             .from("leads")
             .select("id, status, remarks, name, organization_id")
-            .eq("id", targetLeadId);
-          if (leadById && leadById.length > 0) leads = leadById;
-        }
-
-        // Won deals stay won; a new quote advances only open entries (e.g. a returning-customer feed)
-        leads = (leads || []).filter(l => !['SO Converted Deals', 'Converted'].includes(l.status));
-
-        if (leads && leads.length > 0) {
-          const now = new Date();
-          const dateStr = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-          const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-
-          const isRevision = Boolean(metrics_summary?.is_revision || metrics_summary?.revised_from_id);
-          const parentQuoteNo = metrics_summary?.revised_from_quotation_no || (metrics_summary?.revised_from_id ? `QT-${metrics_summary.revised_from_id}` : '');
-
-          // If this is a revised quotation, update the parent quotation status to 'Revised'
-          if (metrics_summary?.revised_from_id) {
-            try {
-              const { data: parentQ } = await supabase
-                .from('quotations')
-                .select('id, quotation_no, metrics_summary')
-                .eq('id', metrics_summary.revised_from_id)
-                .maybeSingle();
-
-              if (parentQ) {
-                await supabase
-                  .from('quotations')
-                  .update({
-                    status: 'Revised',
-                    metrics_summary: {
-                      ...(parentQ.metrics_summary || {}),
-                      revised_to_id: quote.id,
-                      revised_to_quotation_no: quote.quotation_no,
-                      revised_at: new Date().toISOString()
-                    }
-                  })
-                  .eq('id', parentQ.id);
-              }
-            } catch (parentUpdErr) {
-              console.warn("Could not mark parent quotation as Revised:", parentUpdErr.message);
-            }
-          }
-
-          const activityText = isRevision
-            ? `Revised Quotation #${quote.quotation_no || quote.id} generated following customer revision request (Value: ₹${Number(quote.final_quote_value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}). Original Quotation: #${parentQuoteNo}.`
-            : `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Proposal Sent.`;
-
-          for (const l of leads) {
-            let curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
-            curRemarks.push({
-              date: dateStr,
-              time: timeStr,
-              text: activityText,
-              stage: "Quotations",
-              response_type: isRevision ? "quotation_revised" : "positive",
-              author: {
-                name: req.user?.fullName || req.user?.full_name || "Sales Representative",
-                designation: req.user?.designation || req.user?.role || "Staff",
-                department: req.user?.department || "Sales & Marketing"
-              }
-            });
-
-            await supabase
-              .from("leads")
-              .update({
-                status: "Quotations",
-                remarks: curRemarks,
-                updated_at: new Date()
-              })
-              .eq("id", l.id);
-
-            await supabase.from("lead_stage_history").insert([{
-              lead_id: l.id,
-              stage: "Quotations",
-              transition_reason: isRevision 
-                ? `Revised Quotation #${quote.quotation_no || quote.id} generated (Original: #${parentQuoteNo})`
-                : `Quotation #${quote.quotation_no || quote.id} generated`
-            }]).catch(() => {});
-
-            await supabase.from("lead_activities").insert([{
-              lead_id: l.id,
-              stage: "Quotations",
-              activity_type: isRevision ? `Revised Quote: #${quote.quotation_no || quote.id}` : "quotation_dispatched",
-              response_type: isRevision ? "quotation_revised" : "quotation_sent",
-              performed_by: req.user?.id || null,
-              performed_by_name: req.user?.fullName || req.user?.full_name || "Sales Representative",
-              notes: activityText,
-              remarks: activityText,
-              quotation_id: quote.id,
-              quotation_no: quote.quotation_no,
-              outcome: isRevision ? "quotation_revised" : "quotation_sent",
-              created_at: now.toISOString()
-            }]).catch(() => {});
-          }
+            .ilike("name", org.name.trim());
+          leads = matchedLeads;
         }
       }
-    } catch (leadProgErr) {
+
+      if ((!leads || leads.length === 0) && (req.body.lead_id || quote.lead_id)) {
+        const targetLeadId = req.body.lead_id || quote.lead_id;
+        const { data: leadById } = await supabase
+          .from("leads")
+          .select("id, status, remarks, name, organization_id")
+          .eq("id", targetLeadId);
+        if (leadById && leadById.length > 0) leads = leadById;
+      }
+
+      // Won deals stay won; a new quote advances only open entries (e.g. a returning-customer feed)
+      leads = (leads || []).filter(l => !['SO Converted Deals', 'Converted'].includes(l.status));
+      if (leads.length === 0) return;
+
+      const now = new Date();
+      const dateStr = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      const activityText = isRevision
+        ? `Revised Quotation #${quote.quotation_no || quote.id} generated following customer revision request (Value: ₹${Number(quote.final_quote_value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}). Original Quotation: #${parentQuoteNo}.`
+        : `Proposal Sent: Quotation #${quote.quotation_no || quote.id} generated & sent (Value: ₹${quote.final_quote_value || 0}). Stage advanced to Proposal Sent.`;
+
+      await Promise.all(leads.map(async (l) => {
+        const curRemarks = Array.isArray(l.remarks) ? [...l.remarks] : [];
+        curRemarks.push({
+          date: dateStr,
+          time: timeStr,
+          text: activityText,
+          stage: "Quotations",
+          response_type: isRevision ? "quotation_revised" : "positive",
+          author: {
+            name: req.user?.fullName || req.user?.full_name || "Sales Representative",
+            designation: req.user?.designation || req.user?.role || "Staff",
+            department: req.user?.department || "Sales & Marketing"
+          }
+        });
+
+        const [, , actRes] = await Promise.all([
+          supabase
+            .from("leads")
+            .update({ status: "Quotations", remarks: curRemarks, updated_at: new Date() })
+            .eq("id", l.id),
+          supabase.from("lead_stage_history").insert([{
+            lead_id: l.id,
+            stage: "Quotations",
+            transition_reason: isRevision
+              ? `Revised Quotation #${quote.quotation_no || quote.id} generated (Original: #${parentQuoteNo})`
+              : `Quotation #${quote.quotation_no || quote.id} generated`
+          }]).then((r) => r, () => ({})),
+          // lead_activities columns only (quote reference goes in metadata; performed_by is the employee id)
+          supabase.from("lead_activities").insert([{
+            lead_id: l.id,
+            stage: "Quotations",
+            activity_type: isRevision ? `Revised Quote: #${quote.quotation_no || quote.id}` : "quotation_dispatched",
+            response_type: isRevision ? "quotation_revised" : "quotation_sent",
+            performed_by: toSafeInt(req.user?.employeeRecordId),
+            performed_by_name: req.user?.fullName || req.user?.full_name || null,
+            performed_by_emp_id: req.user?.employeeId || null,
+            performed_by_designation: req.user?.designation || req.user?.role || null,
+            performed_by_dept: req.user?.department || null,
+            notes: activityText,
+            outcome: isRevision ? "quotation_revised" : "quotation_sent",
+            metadata: { quotation_id: quote.id, quotation_no: quote.quotation_no, branch_name: req.user?.branchName || null },
+            created_at: now.toISOString()
+          }]),
+        ]);
+        if (actRes?.error) console.warn("[createQuotation] lead activity log not saved:", actRes.error.message);
+      }));
+    })().catch((leadProgErr) => {
       console.warn("Could not auto-advance lead pipeline to Quotations:", leadProgErr.message);
-    }
+    });
+
+    await Promise.all([fabricSamStep, auditStep, parentStep, leadStep]);
 
     res.json({
       success: true,
@@ -1950,54 +1999,27 @@ exports.updateQuotation = async (req, res) => {
         .json({ error: "At least one product item is required" });
     }
 
-    // Resolve or auto-create variant design numbers for each configured item (including nested products inside sets)
-    console.log(`\n================== [UPDATE QUOTATION START] ==================`);
-    console.log(`[UPDATE QUOTATION] Received ${items.length} item(s) to process for quotation ${id}`);
-    let anyDesignNumberAlreadyExists = false;
-    let updateItemCounter = 0;
-    for (const item of items) {
-      updateItemCounter++;
-      const itemLabel = item.product_name || item.name || (item.size_breakdown && item.size_breakdown.product_name) || `Item #${updateItemCounter}`;
-      console.log(`\n[UPDATE QUOTATION] Processing Item #${updateItemCounter}: ${itemLabel}`);
-
-      if (
-        item.size_breakdown &&
-        item.size_breakdown.is_set &&
-        Array.isArray(item.size_breakdown.products)
-      ) {
-        console.log(`[UPDATE QUOTATION] Item #${updateItemCounter} is a Set with ${item.size_breakdown.products.length} nested products:`);
-        for (const p of item.size_breakdown.products) {
-          const resObj = await resolveOrCreateQuotationItemDesignNumber(p);
-          if (resObj && resObj.designNumber) {
-            p.design_number = resObj.designNumber;
-            p.product_design_number = resObj.designNumber;
-            if (resObj.alreadyExists) {
-              anyDesignNumberAlreadyExists = true;
-            }
-            console.log(`[UPDATE QUOTATION] Set Product (${p.product_name || p.name}) Assigned DNS: ${resObj.designNumber}`);
-          }
-        }
-      } else {
-        const resObj = await resolveOrCreateQuotationItemDesignNumber(item);
-        if (resObj && resObj.designNumber) {
-          item.design_number = resObj.designNumber;
-          if (!item.size_breakdown) item.size_breakdown = {};
-          item.size_breakdown.design_number = resObj.designNumber;
-          if (resObj.alreadyExists) {
-            anyDesignNumberAlreadyExists = true;
-          }
-          console.log(`[UPDATE QUOTATION] Item #${updateItemCounter} (${itemLabel}) Assigned DNS: ${resObj.designNumber}`);
-        }
-      }
-    }
-    console.log(`================== [UPDATE QUOTATION: ALL ITEMS RESOLVED] ==================\n`);
-
-    // Retrieve existing quotation to preserve its group_design_number_id and enforce PRD M5.3 lock
+    // Retrieve existing quotation first: its lock / status checks must run before any design number is created
     const { data: existingQuote } = await supabase
       .from("quotations")
-      .select("group_design_number_id, status")
+      .select("group_design_number_id, status, metrics_summary")
       .eq("id", id)
       .maybeSingle();
+
+    // The editor sends a fresh metrics_summary; keep the audit trail it doesn't know about
+    // (customer follow-up log, who created the quote, who approved/returned it).
+    const prevMs = existingQuote?.metrics_summary || {};
+    const AUDIT_KEYS = [
+      "followups",
+      "created_by_id", "created_by_name", "created_by_designation", "created_by_department",
+      "bm_approved_by", "bm_approved_by_name", "bm_approved_at",
+      "bm_rejected_by", "bm_rejected_by_name", "bm_rejected_at",
+      "submitted_to_bm_by", "submitted_to_bm_by_name",
+    ];
+    const preservedAudit = {};
+    AUDIT_KEYS.forEach((k) => {
+      if (prevMs[k] !== undefined && (metrics_summary || {})[k] === undefined) preservedAudit[k] = prevMs[k];
+    });
 
     if (existingQuote && existingQuote.status === "Approved") {
       return res.status(400).json({
@@ -2005,6 +2027,18 @@ exports.updateQuotation = async (req, res) => {
           "Approved quotations are locked and cannot be modified. Please duplicate or create a new revision.",
       });
     }
+    // The editor may change a quote's content only while it is a Draft (incl. returned by BM / Ops), and it
+    // never sets the workflow status (that is done by Send to BM / BM / Ops / customer actions). Cancel is allowed.
+    const isCancel = status === "Cancelled";
+    if (existingQuote && !isCancel && (existingQuote.status || "Draft") !== "Draft") {
+      return res.status(400).json({
+        error: `Only draft quotations can be edited (status: ${existingQuote.status}). Ask the approver to return it, or revise it after the customer's response.`,
+      });
+    }
+
+    // Design numbers for each line (existing ones looked up together; new ones created one by one)
+    const anyDesignNumberAlreadyExists = await resolveDesignNumbersForItems(items);
+    console.log(`[UPDATE QUOTATION] Design numbers resolved for ${items.length} item(s) on quotation ${id}`);
 
     // Find or create group design number (with smart nested resolve and auto-fallback generation)
     const groupDesignNumberId = await resolveGroupDesignNumberForQuotation(
@@ -2018,7 +2052,7 @@ exports.updateQuotation = async (req, res) => {
       title: title.trim(),
       quotation_no: quotation_no ? quotation_no.trim() : undefined,
       organization_id,
-      status: status || "Draft",
+      status: isCancel ? "Cancelled" : (existingQuote?.status || "Draft"),
       estimated_expenses: estimated_expenses || 0,
       total_estimated_time: total_estimated_time || "",
       production_days_estimate: production_days_estimate || 0,
@@ -2026,6 +2060,7 @@ exports.updateQuotation = async (req, res) => {
       profit_margin_percent: profit_margin_percent || 0,
       final_quote_value: final_quote_value || 0,
       metrics_summary: {
+        ...preservedAudit,
         ...(metrics_summary || {}),
         estimated_expenses: estimated_expenses || 0,
       },
@@ -2295,7 +2330,7 @@ exports.updateQuotation = async (req, res) => {
                 lead_id: ml.id,
                 stage: "Deals",
                 transition_reason: `Quotation #${quote.quotation_no || id} approved by Operations Team (SO Draft)`
-              }]).catch(() => {});
+              }]).then(() => {}, () => {});
 
               await supabase.from("lead_activities").insert([{
                 lead_id: ml.id,
@@ -2304,7 +2339,7 @@ exports.updateQuotation = async (req, res) => {
                 performed_by_name: req.user?.fullName || req.user?.full_name || "Operations Team",
                 notes: `Quotation #${quote.quotation_no || id} approved by Operations Team. Pipeline advanced to Deals as SO Draft.`,
                 outcome: "deal_won"
-              }]).catch(() => {});
+              }]).then(() => {}, () => {});
             }
           }
         }
@@ -2421,6 +2456,7 @@ exports.submitToBranchManager = async (req, res) => {
       );
     }
 
+    await notifyQuoteEvent(req, id, 'quote_submitted_bm');
     res.json({
       success: true,
       message: `Quotation ${quotation.quotation_no} submitted to Branch Manager for approval.`,
@@ -2448,8 +2484,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
       isAdmin ||
       userRole === "branch manager" ||
       userPermissions.includes("submit_quotations_ops") ||
-      userPermissions.includes("corporate_approver") ||
-      userPermissions.includes("manage_quotations");
+      userPermissions.includes("corporate_approver");
 
     if (!hasOpsAuthority) {
       return res
@@ -2464,7 +2499,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
     const { data: quotation, error: fetchError } = await supabase
       .from("quotations")
       .select(
-        "id, quotation_no, status, metrics_summary, organization_id, organizations(branch_id)",
+        "id, quotation_no, status, metrics_summary, organization_id, branch_id, organizations(branch_id)",
       )
       .eq("id", id)
       .single();
@@ -2478,10 +2513,13 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
         .status(400)
         .json({ error: "Quotation has already been approved." });
     }
+    if (quotation.status !== "Pending Branch Approval") {
+      return res.status(400).json({ error: `This quotation is not waiting for BM approval (status: ${quotation.status || "Draft"}).` });
+    }
 
     // Enforce branch scope if branch manager
     if (!isAdmin && req.user?.branchId) {
-      const quoteBranchId = quotation.organizations?.branch_id;
+      const quoteBranchId = quotation.branch_id || quotation.organizations?.branch_id;
       if (
         quoteBranchId &&
         String(quoteBranchId) !== String(req.user.branchId)
@@ -2508,10 +2546,9 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
         : quotation.metrics_summary?.bm_notes || null,
       bm_rejection_reason: null,
       needs_revision: false,
-      submitted_to_ops: true,
-      submitted_to_ops_at: approvedAt,
-      submitted_to_ops_by: req.user?.id || null,
-      submitted_to_ops_by_name: req.user?.fullName || req.user?.email || null,
+      returned_by: null,
+      // The salesperson sends it to Ops next (Send to Ops); BM approval no longer queues it automatically
+      submitted_to_ops: false,
     };
 
     const { data: updatedQuote, error: updateError } = await supabase
@@ -2554,6 +2591,7 @@ exports.bmApproveAndSubmitToOps = async (req, res) => {
       );
     }
 
+    await notifyQuoteEvent(req, id, 'quote_bm_approved');
     res.json({
       success: true,
       message: `Quotation ${quotation.quotation_no} approved by Branch Manager. Ready for customer proposal.`,
@@ -2581,8 +2619,7 @@ exports.bmRejectQuotation = async (req, res) => {
       isAdmin ||
       userRole === "branch manager" ||
       userPermissions.includes("submit_quotations_ops") ||
-      userPermissions.includes("corporate_approver") ||
-      userPermissions.includes("manage_quotations");
+      userPermissions.includes("corporate_approver");
 
     if (!hasOpsAuthority) {
       return res
@@ -2605,7 +2642,7 @@ exports.bmRejectQuotation = async (req, res) => {
     const { data: quotation, error: fetchError } = await supabase
       .from("quotations")
       .select(
-        "id, quotation_no, status, metrics_summary, organization_id, organizations(branch_id)",
+        "id, quotation_no, status, metrics_summary, organization_id, branch_id, organizations(branch_id)",
       )
       .eq("id", id)
       .single();
@@ -2619,10 +2656,13 @@ exports.bmRejectQuotation = async (req, res) => {
         .status(400)
         .json({ error: "Approved quotations cannot be rejected." });
     }
+    if (quotation.status !== "Pending Branch Approval") {
+      return res.status(400).json({ error: `This quotation is not waiting for BM approval (status: ${quotation.status || "Draft"}).` });
+    }
 
     // Enforce branch scope if branch manager
     if (!isAdmin && req.user?.branchId) {
-      const quoteBranchId = quotation.organizations?.branch_id;
+      const quoteBranchId = quotation.branch_id || quotation.organizations?.branch_id;
       if (
         quoteBranchId &&
         String(quoteBranchId) !== String(req.user.branchId)
@@ -2647,6 +2687,7 @@ exports.bmRejectQuotation = async (req, res) => {
       bm_rejected_by: req.user?.id || null,
       bm_rejected_by_name: req.user?.fullName || req.user?.email || null,
       submitted_to_ops: false,
+      returned_by: "bm", // shown as "Returned by BM"
     };
 
     const { data: updatedQuote, error: updateError } = await supabase
@@ -2689,6 +2730,7 @@ exports.bmRejectQuotation = async (req, res) => {
       );
     }
 
+    await notifyQuoteEvent(req, id, 'quote_bm_returned');
     res.json({
       success: true,
       message: `Quotation ${quotation.quotation_no} returned to Draft for revisions.`,
@@ -2832,7 +2874,7 @@ exports.getSharePDF = async (req, res) => {
     const { id } = req.params;
     const { data, error } = await supabase
       .from("quotations")
-      .select("pdf_html, quotation_no, status")
+      .select("pdf_html, quotation_no, status, metrics_summary")
       .eq("id", id)
       .single();
 
@@ -2841,15 +2883,23 @@ exports.getSharePDF = async (req, res) => {
       return res.status(404).send("Quotation not found.");
     }
 
+    // Access: a quote that was emailed has a share token and needs it (?t=...).
+    // Older links to customer-approved quotes (no token yet) keep working.
+    const shareToken = data.metrics_summary?.share_token;
+    if (shareToken) {
+      if (String(req.query.t || "") !== String(shareToken)) {
+        return res.status(404).send("This proposal link is invalid or has expired.");
+      }
+    } else if (data.status !== "Approved") {
+      return res.status(404).send("Proposal PDF not generated or not approved yet.");
+    }
+    if (!SHAREABLE_STATUSES.includes(data.status)) {
+      return res.status(404).send("This proposal is no longer available.");
+    }
+
     let rawHtml = null; // Always compile dynamically to reflect latest company settings & QR image
 
     if (!rawHtml) {
-      // If status is not Approved, we do not expose/generate the public PDF
-      if (data.status !== "Approved") {
-        return res
-          .status(404)
-          .send("Proposal PDF not generated or not approved yet.");
-      }
 
       // Dynamically compile PDF HTML for Approved quotations that don't have it saved
       console.log(
@@ -2872,7 +2922,7 @@ exports.getSharePDF = async (req, res) => {
       // 2. Fetch quotation items
       const { data: items, error: itemsError } = await supabase
         .from("quotation_items")
-        .select("*, product_types(name)")
+        .select("*")
         .eq("quotation_id", id);
 
       if (itemsError) throw itemsError;
@@ -3399,6 +3449,9 @@ exports.getSharePDF = async (req, res) => {
       rawHtml = compiledHtml;
     }
 
+    // Not yet cleared by BM + Ops: the customer's copy carries a NOT APPROVED watermark on every page
+    const isDraftCopy = PRE_APPROVAL_STATUSES.includes(data.status);
+
     // Wrap the rawHtml in the automatic html2pdf downloader page
     const downloaderHtml = `
       <!DOCTYPE html>
@@ -3434,8 +3487,10 @@ exports.getSharePDF = async (req, res) => {
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
             </svg>
           </div>
-          <h2 class="text-xl font-black text-[#3a525d] tracking-tight">Generating Proposal PDF</h2>
-          <p class="text-xs text-gray-500 mt-2 leading-relaxed">Please wait, your official proposal document is compiling and will download automatically.</p>
+          <h2 class="text-xl font-black text-[#3a525d] tracking-tight">${isDraftCopy ? "Generating Draft Proposal PDF" : "Generating Proposal PDF"}</h2>
+          <p class="text-xs text-gray-500 mt-2 leading-relaxed">${isDraftCopy
+            ? "This is a draft for your review. It is not yet approved and is subject to change."
+            : "Please wait, your official proposal document is compiling and will download automatically."}</p>
           
           <div class="mt-6 w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
             <div class="bg-[#2d8d9b] h-1.5 rounded-full animate-shimmer" style="width: 70%;"></div>
@@ -3472,9 +3527,28 @@ exports.getSharePDF = async (req, res) => {
             const noPrintElements = element.querySelectorAll('.no-print');
             noPrintElements.forEach(el => el.remove());
 
+            // Draft (not BM + Ops approved): diagonal NOT APPROVED watermark, one per A4 page, plus a header note
+            if (${isDraftCopy ? "true" : "false"}) {
+              element.style.position = 'relative';
+              const note = document.createElement('div');
+              note.textContent = 'DRAFT - NOT APPROVED. This proposal has not been approved yet and is subject to change.';
+              note.style.cssText = 'background:#FFF1F1;color:#B91C1C;border:1px solid #FCA5A5;font:700 11px Inter,sans-serif;letter-spacing:.04em;text-align:center;padding:6px 8px;margin-bottom:8px;';
+              element.insertBefore(note, element.firstChild);
+              const pageH = Math.round(element.offsetWidth * 297 / 210); // A4 height at this width
+              const total = Math.max(element.scrollHeight, pageH);
+              for (let y = 0; y < total; y += pageH) {
+                const wm = document.createElement('div');
+                wm.textContent = 'NOT APPROVED';
+                wm.style.cssText = 'position:absolute;left:50%;top:' + (y + pageH / 2) + 'px;transform:translate(-50%,-50%) rotate(-35deg);' +
+                  'font:900 110px Inter,sans-serif;letter-spacing:.08em;color:rgba(200,42,43,0.16);border:10px solid rgba(200,42,43,0.16);' +
+                  'padding:10px 40px;border-radius:24px;white-space:nowrap;pointer-events:none;z-index:50;';
+                element.appendChild(wm);
+              }
+            }
+
             const opt = {
               margin:       [0.3, 0.3, 0.3, 0.3],
-              filename:     'Proposal_${data.quotation_no || "QT-" + id}.pdf',
+              filename:     '${isDraftCopy ? "DRAFT_NOT_APPROVED_" : ""}Proposal_${data.quotation_no || "QT-" + id}.pdf',
               image:        { type: 'jpeg', quality: 0.98 },
               html2canvas:  { scale: 2, useCORS: true, logging: false },
               jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' }
@@ -3964,20 +4038,26 @@ exports.logQuotationFollowUp = async (req, res) => {
     const followUpOutcome = response_type || responseType || outcome || 'held';
     let targetStatus = quotation.status;
     const outcomeLower = String(followUpOutcome).toLowerCase();
-    const isCustomerRevision = outcomeLower.includes('revision') || outcomeLower === 'needs_revision';
+    // A manual note sends a label (e.g. "Manual Note") as outcome, different from response_type
+    const isManualNote = Boolean(outcome) && String(outcome).toLowerCase() !== String(response_type || responseType || outcome).toLowerCase();
+    // The customer's response changes the status only once the approved quote was sent to them.
+    // Before that (draft shared early) it is recorded as a manual log and the status stays as it is.
+    const isDecisionStage = ['Pending Customer Approval', 'Held'].includes(quotation.status);
+    const appliesDecision = isDecisionStage && !isManualNote;
+    const isCustomerRevision = appliesDecision && (outcomeLower.includes('revision') || outcomeLower === 'needs_revision');
 
-    if (outcomeLower === 'rejected' || outcomeLower === 'negative') {
-      targetStatus = 'Rejected';
-    } else if (outcomeLower === 'held' || outcomeLower === 'hold') {
-      targetStatus = 'Held';
-    } else if (outcomeLower === 'approved' || outcomeLower === 'positive') {
-      targetStatus = 'Approved';
-    } else if (isCustomerRevision) {
-      targetStatus = 'Revision Requested';
+    if (appliesDecision) {
+      if (outcomeLower === 'rejected' || outcomeLower === 'negative') {
+        targetStatus = 'Rejected';
+      } else if (outcomeLower === 'held' || outcomeLower === 'hold') {
+        targetStatus = 'Held';
+      } else if (outcomeLower === 'approved' || outcomeLower === 'positive') {
+        targetStatus = 'Approved';
+      } else if (isCustomerRevision) {
+        targetStatus = 'Revision Requested';
+      }
     }
-    if (req.body.status) {
-      targetStatus = req.body.status;
-    }
+    // (The status is no longer taken from the request body: it follows the rules above.)
 
     const authorName = req.user?.fullName || req.user?.full_name || req.user?.email || 'Sales Representative';
     const now = new Date();
@@ -3987,9 +4067,12 @@ exports.logQuotationFollowUp = async (req, res) => {
       date: now.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }),
       time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
       response_type: isCustomerRevision ? 'revision_requested' : followUpOutcome,
-      outcome: isCustomerRevision ? 'revision_requested' : followUpOutcome,
+      outcome: isCustomerRevision ? 'revision_requested' : (isManualNote ? outcome : followUpOutcome),
       remarks: note,
       next_followup_date: next_followup_date || nextFollowUpDate || null,
+      // Logged before BM + Ops approval: kept as a manual record, status not changed
+      manual_log: !appliesDecision,
+      quote_status_at_log: quotation.status,
       author: {
         name: authorName,
         email: req.user?.email || null,
@@ -4005,7 +4088,7 @@ exports.logQuotationFollowUp = async (req, res) => {
       followups: [newFollowUp, ...curFollowups],
       last_followup: newFollowUp,
       last_followup_at: now.toISOString(),
-      customer_status: targetStatus,
+      customer_status: appliesDecision ? targetStatus : (quotation.metrics_summary?.customer_status || null),
       ...(isCustomerRevision ? {
         needs_revision: true,
         customer_revision_reason: note,
@@ -4085,7 +4168,7 @@ exports.logQuotationFollowUp = async (req, res) => {
                 lead_id: ml.id,
                 stage: "Deals",
                 transition_reason: `Quotation #${quotation.quotation_no || id} approved by customer (SO Draft)`
-              }]).catch(() => {});
+              }]).then(() => {}, () => {});
             }
           }
         }
@@ -4120,20 +4203,23 @@ exports.logQuotationFollowUp = async (req, res) => {
 
         if (leads && leads.length > 0) {
           for (const lead of leads) {
-            await supabase.from('lead_activities').insert([{
+            // lead_activities columns only (quote reference goes in metadata; performed_by is the employee id)
+            const { error: fActErr } = await supabase.from('lead_activities').insert([{
               lead_id: lead.id,
               stage: 'Quotations',
               activity_type: isCustomerRevision ? `Customer Revision Requested: #${quotation.quotation_no}` : 'Quotation Follow-up',
               response_type: isCustomerRevision ? 'Revision Requested' : followUpOutcome,
               outcome: isCustomerRevision ? 'revision_requested' : followUpOutcome,
-              remarks: `[Quote #${quotation.quotation_no}] ${note}`,
               notes: `[Quote #${quotation.quotation_no}] ${note}`,
-              quotation_id: quotation.id,
-              quotation_no: quotation.quotation_no,
-              performed_by: req.user?.id || null,
+              performed_by: toSafeInt(req.user?.employeeRecordId),
               performed_by_name: authorName,
+              performed_by_emp_id: req.user?.employeeId || null,
+              performed_by_designation: req.user?.designation || req.user?.role || null,
+              performed_by_dept: req.user?.department || null,
+              metadata: { quotation_id: quotation.id, quotation_no: quotation.quotation_no, branch_name: req.user?.branchName || null },
               created_at: now.toISOString()
             }]);
+            if (fActErr) console.warn('[logQuotationFollowUp] lead activity log not saved:', fActErr.message);
 
             if (isCustomerRevision) {
               let curRemarks = Array.isArray(lead.remarks) ? [...lead.remarks] : [];
@@ -4158,6 +4244,14 @@ exports.logQuotationFollowUp = async (req, res) => {
       } catch (mirrorErr) {
         console.warn('Could not mirror quotation follow-up to lead activities:', mirrorErr.message);
       }
+    }
+
+    // Customer decision (Log Decision form sends the same value as outcome and response_type);
+    // manual notes send a label like "Manual Note" as outcome and are not alerted
+    const decision = isCustomerRevision ? 'revision_requested' : outcomeLower;
+    const sameAsOutcome = String(outcome || '').toLowerCase() === String(response_type || responseType || '').toLowerCase();
+    if (appliesDecision && sameAsOutcome && ['approved', 'rejected', 'held', 'revision_requested'].includes(decision)) {
+      await notifyQuoteEvent(req, id, 'quote_customer_decision', { decision, remarks: note });
     }
 
     return res.json({
@@ -4300,6 +4394,7 @@ exports.submitSoToBm = async (req, res) => {
       return res.status(500).json({ error: 'Failed to submit deal to Branch Manager' });
     }
 
+    await notifyQuoteEvent(req, id, 'deal_submitted_bm');
     return res.json({
       success: true,
       message: 'Deal submitted to Branch Manager for approval. It is now locked from branch editing.',
@@ -4356,6 +4451,7 @@ exports.bmApproveSo = async (req, res) => {
       return res.status(500).json({ error: 'Failed to approve deal by Branch Manager' });
     }
 
+    await notifyQuoteEvent(req, id, 'deal_bm_approved');
     return res.json({
       success: true,
       message: 'Deal approved by Branch Manager. Returned to marketing staff to submit to Corporate for final approval.',
@@ -4410,6 +4506,7 @@ exports.submitSoToCorporate = async (req, res) => {
       return res.status(500).json({ error: 'Failed to submit deal to Corporate' });
     }
 
+    await notifyQuoteEvent(req, id, 'deal_submitted_hq');
     return res.json({
       success: true,
       message: 'Deal submitted to Corporate for final approval.',
@@ -4435,6 +4532,14 @@ exports.corporateApproveSo = async (req, res) => {
 
     if (fetchErr || !quotation) {
       return res.status(404).json({ error: 'Quotation not found' });
+    }
+
+    // Only designated HQ staff may give HQ approval, and only to a deal that is waiting for it
+    if (!canHqApprove(req.user)) {
+      return res.status(403).json({ error: 'Access Denied: HQ approval is restricted to HQ approvers.' });
+    }
+    if ((quotation.metrics_summary?.so_deal_stage || 'NEW_DEALS') !== 'PENDING_CORP_APPROVAL') {
+      return res.status(400).json({ error: 'This deal is not waiting for HQ approval (it must be sent to HQ after BM approval).' });
     }
 
     const existingMetrics = quotation.metrics_summary || {};
@@ -4531,6 +4636,7 @@ exports.corporateApproveSo = async (req, res) => {
       }
     }
 
+    await notifyQuoteEvent(req, id, 'deal_hq_approved');
     return res.json({
       success: true,
       message: 'Deal approved by Corporate and converted to active Production Sales Order.',
@@ -4543,3 +4649,130 @@ exports.corporateApproveSo = async (req, res) => {
 };
 
 
+
+// POST /quotations/:id/send-email  { to, subject, message }
+// Emails the proposal link to the customer through Brevo and records the send on the quote.
+exports.sendProposalEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { to, subject, message, draft } = req.body || {};
+    const isDraft = Boolean(draft);
+
+    const { data: quote, error } = await supabase
+      .from("quotations")
+      .select("id, quotation_no, title, status, organization_id, metrics_summary, organizations(name, contact_email)")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!quote) return res.status(404).json({ error: "Quotation not found." });
+    if (!(await canSeeQuote(req, quote))) return res.status(403).json({ error: "Access Denied: this quotation is not yours." });
+    // Draft copy (watermarked, status unchanged) only before Ops approval; the final proposal only after it
+    if (isDraft && !PRE_APPROVAL_STATUSES.includes(quote.status)) {
+      return res.status(400).json({ error: "This quotation is already approved; use Send to Customer instead." });
+    }
+    if (!isDraft && !FINAL_SEND_STATUSES.includes(quote.status)) {
+      return res.status(400).json({ error: `Only Ops-approved quotations can be sent to the customer (status: ${quote.status || "Draft"}). Use Send Draft for an unapproved copy.` });
+    }
+
+    const recipient = String(to || quote.organizations?.contact_email || "").trim();
+    const ms = quote.metrics_summary || {};
+    const shareToken = ms.share_token || crypto.randomBytes(18).toString("base64url");
+    const shareUrl = `${apiBaseUrl(req)}/api/quotations/${quote.id}/share?t=${shareToken}`;
+
+    // The proposal link always goes in, with the token; drop any untokenised link the editor pre-filled
+    const cleaned = String(message || "").replace(/https?:\/\/\S*\/api\/quotations\/\d+\/share\S*/g, shareUrl);
+    const draftNote = isDraft ? "\n\nPlease note: this is a DRAFT for your review. It has not been approved yet and is subject to change." : "";
+    const text = (cleaned.includes(shareUrl)
+      ? cleaned
+      : `${cleaned.trim()}\n\nView and download your ${isDraft ? "draft " : ""}proposal:\n${shareUrl}`) + draftNote;
+    const defaultSubject = isDraft
+      ? `DRAFT (not approved) - Quotation #${quote.quotation_no}`
+      : `Quotation Proposal #${quote.quotation_no}`;
+
+    const sent = await sendMail({
+      to: recipient,
+      subject: subject || defaultSubject,
+      text,
+      replyTo: req.user?.email,
+    });
+    if (!sent.ok) {
+      const code = sent.code === "MAIL_NOT_CONFIGURED" ? 503 : 400;
+      return res.status(code).json({ error: sent.error, code: sent.code });
+    }
+
+    const sentAt = new Date().toISOString();
+    const emails = Array.isArray(ms.emails) ? ms.emails : [];
+    const sentBy = req.user?.fullName || req.user?.full_name || req.user?.email || null;
+    emails.push({
+      type: isDraft ? "draft" : "proposal",
+      to: sent.to,
+      subject: subject || defaultSubject,
+      message_id: sent.messageId,
+      sent_at: sentAt,
+      sent_by: req.user?.id || null,
+      sent_by_name: sentBy,
+    });
+    // Final send: Ops Approved -> Pending Customer Approval (re-sends keep the current status)
+    const nextStatus = !isDraft && quote.status === "Ops Approved" ? "Pending Customer Approval" : quote.status;
+    const draftShares = Array.isArray(ms.draft_shares) ? ms.draft_shares : [];
+    await supabase
+      .from("quotations")
+      .update({
+        status: nextStatus,
+        metrics_summary: {
+          ...ms, share_token: shareToken, emails, last_emailed_at: sentAt,
+          ...(isDraft
+            ? { draft_shares: [...draftShares, { channel: "email", to: sent.to, sent_at: sentAt, sent_by_name: sentBy }] }
+            : { sent_to_customer: true, sent_to_customer_at: ms.sent_to_customer_at || sentAt, sent_to_customer_by_name: ms.sent_to_customer_by_name || sentBy }),
+        },
+        updated_at: sentAt,
+      })
+      .eq("id", quote.id);
+
+    try {
+      await supabase.from("record_activity_logs").insert([{
+        entity_type: "Quotation",
+        entity_id: quote.id,
+        action: isDraft ? "DRAFT_EMAILED" : "PROPOSAL_EMAILED",
+        performed_by: toSafeInt(req.user?.id),
+        details: { quotation_no: quote.quotation_no, to: sent.to, message_id: sent.messageId, sent_by_name: req.user?.fullName || null },
+      }]);
+    } catch (logErr) {
+      console.warn("[sendProposalEmail] activity log failed:", logErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: `${isDraft ? "Draft (not approved)" : "Proposal"} emailed to ${sent.to.join(", ")}`,
+      status: nextStatus, to: sent.to, message_id: sent.messageId, share_url: shareUrl,
+    });
+  } catch (err) {
+    console.error("[sendProposalEmail]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// POST /quotations/:id/share-link -> { share_url } (tokenised customer link, e.g. for WhatsApp)
+exports.getShareLink = async (req, res) => {
+  try {
+    const { data: quote, error } = await supabase
+      .from("quotations")
+      .select("id, status, metrics_summary")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!quote) return res.status(404).json({ error: "Quotation not found." });
+    if (!SHAREABLE_STATUSES.includes(quote.status)) {
+      return res.status(400).json({ error: `The proposal link is available once the Branch Manager has approved the quote (current status: ${quote.status || "Draft"}).` });
+    }
+    const ms = quote.metrics_summary || {};
+    let token = ms.share_token;
+    if (!token) {
+      token = crypto.randomBytes(18).toString("base64url");
+      await supabase.from("quotations").update({ metrics_summary: { ...ms, share_token: token } }).eq("id", quote.id);
+    }
+    res.json({ share_url: `${apiBaseUrl(req)}/api/quotations/${quote.id}/share?t=${token}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};

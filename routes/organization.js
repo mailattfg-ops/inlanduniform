@@ -5,6 +5,17 @@ const { authMiddleware, checkPermission } = require('../middleware/authMiddlewar
 
 router.use(authMiddleware);
 
+// Salespeople (Marketing / Sales Executive): any /:id route only for customers they manage
+const { canSeeOrganization } = require('../utils/ownScope');
+router.param('id', async (req, res, next, id) => {
+  try {
+    if (await canSeeOrganization(req, id)) return next();
+    return res.status(403).json({ error: 'Access Denied: this customer is not assigned to you' });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // Organization management
 router.get('/', (req, res, next) => {
   const role = (req.user?.role || '').toLowerCase();

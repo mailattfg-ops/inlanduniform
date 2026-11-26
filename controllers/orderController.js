@@ -1,4 +1,6 @@
 const supabase = require('../config/supabase');
+const { notifyOrderEvent } = require('../utils/notify');
+const { getOwnScope, ids: ownIds, canHqApprove } = require('../utils/ownScope');
 const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
 const { toSafeInt } = require('../utils/sanitize');
 
@@ -41,7 +43,7 @@ exports.listOrders = async (req, res) => {
 
         let query = supabase
             .from('orders')
-            .select('*, quotations!inner(id, quotation_no, title, final_quote_value, paid_amount, expected_delivery_date, organization_id, metrics_summary, organizations(id, name, address, delivery_address, delivery_city, delivery_state, delivery_pincode, delivery_country, city, state, pincode, contact_person, phone))');
+            .select('*, quotations!inner(id, quotation_no, title, final_quote_value, paid_amount, expected_delivery_date, organization_id, metrics_summary, organizations(id, name, address, delivery_address, delivery_city, delivery_state, delivery_pincode, delivery_country, city, state, pincode, contact_person, phone, contact_email))');
 
         if (userOrgId) {
             query = query.eq('quotations.organization_id', userOrgId);
@@ -59,6 +61,11 @@ exports.listOrders = async (req, res) => {
         if (corporate_action) {
             query = query.eq('corporate_action', corporate_action);
         }
+
+        // Salespeople (Marketing / Sales Executive): only orders from their own quotes
+        const own = await getOwnScope(req);
+        if (own && own.quoteIds.size === 0) return res.json([]);
+        if (own) query = query.in('quotation_id', ownIds(own.quoteIds));
 
         const { data, error } = await query.order('created_at', { ascending: false });
 
@@ -476,7 +483,7 @@ exports.createOrder = async (req, res) => {
                             lead_id: l.id,
                             stage: 'SO Converted Deals',
                             transition_reason: `Converted to Sales Order #${newOrder.order_no}`
-                        }]).catch(() => {});
+                        }]).then(() => {}, () => {});
 
                         await supabase.from('lead_activities').insert([{
                             lead_id: l.id,
@@ -485,7 +492,7 @@ exports.createOrder = async (req, res) => {
                             performed_by_name: req.user?.fullName || req.user?.full_name || 'Operations Staff',
                             notes: `Converted to Sales Order #${newOrder.order_no}. Pipeline completed successfully!`,
                             outcome: 'so_converted'
-                        }]).catch(() => {});
+                        }]).then(() => {}, () => {});
                     }
                 }
             }
@@ -579,6 +586,7 @@ exports.submitToCorporate = async (req, res) => {
             console.error('Logging activity failed:', logErr.message);
         }
 
+        await notifyOrderEvent(req, id, 'order_submitted_hq');
         res.json({
             success: true,
             message: 'Sales Order submitted to Corporate for review.',
@@ -594,6 +602,11 @@ exports.corporateAction = async (req, res) => {
     try {
         const { id } = req.params;
         const { action, reason } = req.body; // Accept, Reject, Hold
+
+        // Only designated HQ staff (approve_hq_deals) may accept / hold / reject at HQ
+        if (!canHqApprove(req.user)) {
+            return res.status(403).json({ error: 'Access Denied: HQ review is restricted to HQ approvers.' });
+        }
 
         const validActions = ['Accept', 'Reject', 'Hold'];
         if (!validActions.includes(action)) {
@@ -736,6 +749,7 @@ exports.corporateAction = async (req, res) => {
             console.error('Logging activity failed:', logErr.message);
         }
 
+        await notifyOrderEvent(req, id, 'order_hq_decision', { action, reason: reason ? String(reason).trim() : '' });
         res.json({
             success: true,
             message: `Corporate has set order action to ${action}${autoPO ? ` (Auto-PO ${autoPO.po_number} generated for material shortages)` : ''}.`,
@@ -846,10 +860,12 @@ exports.notifyCustomer = async (req, res) => {
     try {
         const { id } = req.params;
         const { channel, custom_message, email } = req.body;
+        const crypto = require('crypto');
+        const { sendMail, apiBaseUrl } = require('../utils/mailer');
 
         const { data: order, error: fetchErr } = await supabase
             .from('orders')
-            .select('*, quotations(id, quotation_no, title, final_quote_value, organization_id, organizations(id, name, address, customer_code))')
+            .select('*, quotations(id, quotation_no, title, status, final_quote_value, metrics_summary, organization_id, organizations(id, name, address, customer_code, contact_email, contact_number))')
             .eq('id', id)
             .single();
 
@@ -857,31 +873,75 @@ exports.notifyCustomer = async (req, res) => {
             return res.status(404).json({ error: 'Order not found' });
         }
 
-        const org = order.quotations?.organizations || {};
-        const customerName = org.name || 'Valued Customer';
-        const customerEmail = email || 'client@organization.com';
+        const quote = order.quotations || null;
+        const org = quote?.organizations || {};
+        const customerName = org.name || 'Customer';
+        const mode = channel === 'link' ? 'link' : 'email';
+        const message = (custom_message || 'Your Sales Order has been confirmed and sent to Corporate HQ for processing.').trim();
 
-        // Generate customer-facing tracking / review link
-        const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const shareUrl = order.quotation_id 
-            ? `${baseUrl}/marketing/quotations?preview=${order.quotation_id}`
-            : `${baseUrl}/marketing/order-placement?order=${order.id}`;
+        // Customer-facing link: the tokenised proposal PDF (the staff app needs a login, so never link to it)
+        let shareUrl = null;
+        if (quote && ['BM Approved', 'Held', 'Approved'].includes(quote.status)) {
+            const ms = quote.metrics_summary || {};
+            let token = ms.share_token;
+            if (!token) {
+                token = crypto.randomBytes(18).toString('base64url');
+                await supabase.from('quotations').update({ metrics_summary: { ...ms, share_token: token } }).eq('id', quote.id);
+            }
+            shareUrl = `${apiBaseUrl(req)}/api/quotations/${quote.id}/share?t=${token}`;
+        }
 
-        // Audit Log entry (PRD M1.7)
+        let sent = null;
+        let recipient = null;
+        if (mode === 'email') {
+            recipient = String(email || org.contact_email || '').trim();
+            const value = Number(order.total_amount || quote?.final_quote_value || 0)
+                .toLocaleString('en-IN', { minimumFractionDigits: 2 });
+            const text = [
+                `Dear ${customerName},`,
+                '',
+                message,
+                '',
+                `Sales Order No: ${order.order_no}`,
+                quote?.quotation_no ? `Quotation No: ${quote.quotation_no}` : null,
+                `Order Value: Rs. ${value}`,
+                shareUrl ? `\nView your proposal:\n${shareUrl}` : null,
+                '',
+                'Regards,',
+                req.user?.fullName || 'Sales Team',
+                process.env.MAIL_FROM_NAME || 'Inland Uniform',
+            ].filter((l) => l !== null).join('\n');
+
+            sent = await sendMail({
+                to: recipient,
+                subject: `Sales Order ${order.order_no} confirmed`,
+                text,
+                replyTo: req.user?.email,
+            });
+            if (!sent.ok) {
+                const code = sent.code === 'MAIL_NOT_CONFIGURED' ? 503 : 400;
+                const hint = sent.code === 'NO_RECIPIENT' ? ' Add a contact email to this customer first.' : '';
+                return res.status(code).json({ error: sent.error + hint, code: sent.code });
+            }
+        }
+
+        // Audit Log entry (PRD M1.7): only real outcomes are recorded
         try {
             await supabase.from('record_activity_logs').insert([{
                 entity_type: 'Order',
                 entity_id: id,
-                action: 'SO_CUSTOMER_NOTIFIED',
+                action: mode === 'email' ? 'SO_CUSTOMER_EMAILED' : 'SO_SHARE_LINK_CREATED',
                 performed_by: req.user?.id && /^\d+$/.test(String(req.user.id)) ? parseInt(req.user.id, 10) : null,
                 details: {
                     order_no: order.order_no,
                     customer_name: customerName,
-                    customer_email: customerEmail,
-                    channel: channel || 'email',
+                    channel: mode,
+                    to: sent?.to || null,
+                    message_id: sent?.messageId || null,
                     share_url: shareUrl,
-                    notified_at: new Date().toISOString(),
-                    custom_message: custom_message || 'Your Sales Order has been confirmed and sent to Corporate HQ for processing.'
+                    sent_by_name: req.user?.fullName || req.user?.email || null,
+                    at: new Date().toISOString(),
+                    custom_message: message
                 }
             }]);
         } catch (logErr) {
@@ -890,14 +950,12 @@ exports.notifyCustomer = async (req, res) => {
 
         res.json({
             success: true,
-            message: `Customer (${customerName}) notified via ${channel || 'email'} successfully!`,
+            message: mode === 'email'
+                ? `Email sent to ${sent.to.join(', ')}`
+                : (shareUrl ? 'Link ready: copy it and share it with the customer' : 'No customer link available for this order yet (quote not BM approved)'),
             share_url: shareUrl,
-            customer: {
-                name: customerName,
-                email: customerEmail,
-                phone: org.phone || 'N/A'
-            },
-            notified_at: new Date().toISOString()
+            customer: { name: customerName, email: org.contact_email || null, phone: org.contact_number || null },
+            notified_at: mode === 'email' ? new Date().toISOString() : null
         });
 
     } catch (err) {

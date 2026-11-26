@@ -653,6 +653,22 @@ exports.listInvoices = async (req, res) => {
             query = query.eq('branch_id', userBranchId);
         }
 
+        // Salespeople (Marketing / Sales Executive): only invoices of their customers or their quotes' orders
+        const { getOwnScope, ids: ownIds } = require('../utils/ownScope');
+        const own = await getOwnScope(req);
+        if (own) {
+            let myOrderIds = [];
+            if (own.quoteIds.size) {
+                const { data: myOrders } = await supabase.from('orders').select('id').in('quotation_id', ownIds(own.quoteIds));
+                myOrderIds = (myOrders || []).map(o => o.id);
+            }
+            const conds = [];
+            if (own.orgIds.size) conds.push(`organization_id.in.(${ownIds(own.orgIds).join(',')})`);
+            if (myOrderIds.length) conds.push(`order_id.in.(${myOrderIds.join(',')})`);
+            if (!conds.length) return res.json([]);
+            query = query.or(conds.join(','));
+        }
+
         const { data, error } = await query;
         if (error) throw error;
 

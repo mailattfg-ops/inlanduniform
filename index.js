@@ -67,6 +67,8 @@ app.use("/api/leads", require("./routes/leads.js"));
 app.use("/api/branches", require("./routes/branches.js"));
 app.use("/api/job-cards", require("./routes/jobCard.js"));
 app.use("/api/invoices", require("./routes/invoices.js"));
+app.use("/api/mail", require("./routes/mail.js"));
+app.use("/api/notifications", require("./routes/notifications.js"));
 app.use("/api/delivery-challans", require("./routes/deliveryChallans.js"));
 app.use("/api/measurement-tokens", require("./routes/measurementTokens.js"));
 app.use("/api/taxes", require("./routes/taxMaster.js"));

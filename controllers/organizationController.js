@@ -3,6 +3,7 @@ const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator
 const crypto = require("crypto");
 const { logAction } = require("../utils/logger");
 const { customerActivity, getLastInvoiceDates } = require("../utils/customerActivity");
+const { getOwnScope, ids: ownIds, canSeeOrganization } = require("../utils/ownScope");
 
 const generatePassword = () =>
   crypto.randomBytes(4).toString("hex").toUpperCase();
@@ -87,6 +88,11 @@ exports.getOrganizations = async (req, res) => {
       query = query.eq("branch_id", userBranchId);
     }
 
+    // Salespeople (Marketing / Sales Executive): only customers they are relationship manager of
+    const own = await getOwnScope(req);
+    if (own && own.orgIds.size === 0) return res.json([]);
+    if (own) query = query.in("id", ownIds(own.orgIds));
+
     if (industryId) {
       query = query.eq("industry_id", industryId);
     }
@@ -112,6 +118,7 @@ exports.getOrganizations = async (req, res) => {
       } else if (!isAdmin && userBranchId) {
         fallbackQuery = fallbackQuery.eq("branch_id", userBranchId);
       }
+      if (own) fallbackQuery = fallbackQuery.in("id", ownIds(own.orgIds));
       if (industryId) fallbackQuery = fallbackQuery.eq("industry_id", industryId);
 
       const fallbackRes = await fallbackQuery;
@@ -581,6 +588,17 @@ exports.createOrganization = async (req, res) => {
       name: data.name,
     });
 
+    // 6. Email the portal login to the customer (never blocks creation)
+    let credentialEmail = { emailed: false, email_error: "No email address entered, so the login was not emailed." };
+    if (cleanEmail) {
+      const { sendPortalCredentials } = require("../utils/mailer");
+      const sent = await sendPortalCredentials({
+        req, to: cleanEmail, customerName: data.name, username: portalLoginId, password: resolvedPassword,
+      });
+      credentialEmail = { emailed: sent.ok, email_error: sent.ok ? null : sent.error };
+      if (!sent.ok) console.warn(`[createOrganization] login email not sent to ${cleanEmail}:`, sent.error);
+    }
+
     res.json({
       success: true,
       data,
@@ -588,6 +606,8 @@ exports.createOrganization = async (req, res) => {
         username: portalLoginId,
         password: resolvedPassword,
         customer_code: finalCustomerCode,
+        email: cleanEmail,
+        ...credentialEmail,
       },
     });
   } catch (err) {
@@ -867,6 +887,9 @@ exports.getOrganizationDetails = async (req, res) => {
     return res.status(403).json({
       error: "Access Denied: You cannot view another organization's details",
     });
+  }
+  if (!(await canSeeOrganization(req, id))) {
+    return res.status(403).json({ error: "Access Denied: this customer is not assigned to you" });
   }
   try {
     // 1. Get Departments

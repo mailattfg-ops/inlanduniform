@@ -1,5 +1,61 @@
 const supabase = require('../config/supabase');
 const { generateNextDocumentNumber } = require('../utils/documentNumberGenerator');
+const { sendMail, renderEmail, money } = require('../utils/mailer');
+
+// Payment receipt email. Resolves { sent, to?, reason? }; never throws on mail errors.
+async function sendPaymentReceipt({ req, voucherNo, amount, method, reference, paidAt, quotation, invoice, quoteId, orderId, toOverride }) {
+    const orgId = quotation?.organization_id || invoice?.organization_id;
+    if (!orgId && !toOverride) return { sent: false, reason: 'No customer linked to this payment' };
+    const { data: org } = orgId
+        ? await supabase.from('organizations').select('name, contact_email, contact_person').eq('id', orgId).maybeSingle()
+        : { data: null };
+    const to = String(toOverride || org?.contact_email || '').trim();
+    if (!to) return { sent: false, reason: 'Customer has no email address on file' };
+
+    // Totals after this payment, against the same document it was recorded on
+    let total = null;
+    let paidSoFar = null;
+    if (invoice) {
+        total = parseFloat(invoice.total_amount || 0);
+        if (orderId) {
+            const { data: rows } = await supabase.from('payments').select('amount, status').eq('order_id', orderId);
+            paidSoFar = (rows || []).filter(r => r.status !== 'Cancelled').reduce((s, r) => s + parseFloat(r.amount || 0), 0);
+        } else paidSoFar = amount;
+    } else if (quotation && quoteId) {
+        total = parseFloat(quotation.final_quote_value || 0);
+        const { data: rows } = await supabase.from('payments').select('amount, status').eq('quotation_id', quoteId);
+        paidSoFar = (rows || []).filter(r => r.status !== 'Cancelled').reduce((s, r) => s + parseFloat(r.amount || 0), 0);
+    }
+    const balance = total !== null && paidSoFar !== null ? Math.max(0, total - paidSoFar) : null;
+    const against = invoice ? `Invoice #${invoice.invoice_number || invoice.id}` : `Quotation #${quotation?.quotation_no || quoteId}`;
+    const brand = process.env.MAIL_FROM_NAME || 'Inland Uniform';
+    const date = new Date(paidAt || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
+    const { html, text } = renderEmail({
+        greeting: `Dear ${org?.contact_person || org?.name || 'Customer'},`,
+        intro: [`Thank you. We have received your payment of ${money(amount)}.`],
+        rows: [
+            ['Receipt No', voucherNo],
+            ['Date', date],
+            ['Customer', org?.name],
+            ['Against', against],
+            ['Amount Received', money(amount)],
+            ['Payment Mode', method],
+            ['Reference', reference && reference !== voucherNo ? reference : null],
+            ['Total Value', total !== null ? money(total) : null],
+            ['Total Paid to Date', paidSoFar !== null ? money(paidSoFar) : null],
+            ['Balance Due', balance !== null ? money(balance) : null],
+        ],
+        outro: ['Please keep this email as your payment receipt.'],
+        signature: ['Regards,', req.user?.fullName || 'Accounts Team', brand],
+    });
+    const sent = await sendMail({ to, subject: `Payment receipt ${voucherNo} - ${money(amount)}`, html, text, replyTo: req.user?.email });
+    if (!sent.ok) {
+        console.warn(`[paymentController] receipt not sent to ${to}:`, sent.error);
+        return { sent: false, to, reason: sent.error };
+    }
+    return { sent: true, to, message_id: sent.messageId };
+}
 
 // 1. List all payments
 exports.listPayments = async (req, res) => {
@@ -15,6 +71,12 @@ exports.listPayments = async (req, res) => {
         if (!isAdmin && userBranchId) {
             query = query.eq('quotations.branch_id', userBranchId);
         }
+
+        // Salespeople (Marketing / Sales Executive): only payments against their own quotes
+        const { getOwnScope, ids: ownIds } = require('../utils/ownScope');
+        const own = await getOwnScope(req);
+        if (own && own.quoteIds.size === 0) return res.json([]);
+        if (own) query = query.in('quotation_id', ownIds(own.quoteIds));
 
         const { data, error } = await query;
 
@@ -146,7 +208,7 @@ exports.recordPayment = async (req, res) => {
         const voucher_no = await generateNextDocumentNumber(supabase, {
             prefix: 'CP',
             table: 'payments',
-            column: 'voucher_no',
+            column: 'reference_no',
             branch: branchForPayment,
             date: effectivePaidAt
         });
@@ -164,28 +226,12 @@ exports.recordPayment = async (req, res) => {
         if (parsedQuoteId) insertPayload.quotation_id = parsedQuoteId;
         if (parsedOrderId) insertPayload.order_id = parsedOrderId;
 
-        let newPayment = null;
-        let paymentError = null;
-
-        // Try inserting with voucher_no column
-        const primaryInsert = await supabase
+        // Insert payment record
+        const { data: newPayment, error: paymentError } = await supabase
             .from('payments')
-            .insert([{ ...insertPayload, voucher_no }])
+            .insert([insertPayload])
             .select()
             .single();
-
-        if (primaryInsert.error) {
-            // Fallback if voucher_no column does not exist in schema cache
-            const fallbackInsert = await supabase
-                .from('payments')
-                .insert([insertPayload])
-                .select()
-                .single();
-            newPayment = fallbackInsert.data;
-            paymentError = fallbackInsert.error;
-        } else {
-            newPayment = primaryInsert.data;
-        }
 
         if (paymentError || !newPayment) {
             console.error('[paymentController:recordPayment] Database error inserting payment:', paymentError);
@@ -298,7 +344,7 @@ exports.recordPayment = async (req, res) => {
                         lead_id: matchedLead.id,
                         stage: 'Deals',
                         transition_reason: `Payment of ₹${parseFloat(amount)} received for ${targetLabel}`
-                    }]).catch(() => {});
+                    }]).then(() => {}, () => {});
 
                     await supabase.from('lead_activities').insert([{
                         lead_id: matchedLead.id,
@@ -307,7 +353,7 @@ exports.recordPayment = async (req, res) => {
                         performed_by_name: req.user?.fullName || req.user?.full_name || 'Finance Staff',
                         notes: `Deal Closed: Payment of ₹${parseFloat(amount)} recorded for ${targetLabel}. Pipeline advanced to Deals.`,
                         outcome: 'deal_won'
-                    }]).catch(() => {});
+                    }]).then(() => {}, () => {});
                 }
             } catch (leadDealErr) {
                 console.warn('[paymentController] Could not auto-advance lead to Deals:', leadDealErr.message);
@@ -325,10 +371,27 @@ exports.recordPayment = async (req, res) => {
             });
         } catch (logErr) {}
 
+        // Email the payment receipt to the customer (never blocks the payment)
+        let receiptEmail = { sent: false, reason: 'Receipt email skipped' };
+        if (req.body.send_receipt !== false) {
+            try {
+                receiptEmail = await sendPaymentReceipt({
+                    req, payment: newPayment, voucherNo: newPayment.voucher_no || voucher_no,
+                    amount: parseFloat(amount), method: effectivePaymentMethod, reference: effectiveReferenceNo,
+                    paidAt: effectivePaidAt, quotation, invoice: targetInvoice, quoteId: parsedQuoteId, orderId: parsedOrderId,
+                    toOverride: req.body.receipt_email
+                });
+            } catch (mailErr) {
+                console.warn('[paymentController] receipt email failed:', mailErr.message);
+                receiptEmail = { sent: false, reason: mailErr.message };
+            }
+        }
+
         res.status(201).json({
             message: 'Payment recorded successfully',
             payment: newPayment,
-            target_type: targetInvoice ? 'invoice' : 'quotation'
+            target_type: targetInvoice ? 'invoice' : 'quotation',
+            receipt_email: receiptEmail
         });
     } catch (err) {
         console.error('[paymentController:recordPayment] Error:', err);

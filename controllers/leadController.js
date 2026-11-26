@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
 const { DORMANT_DAYS, daysSince, customerActivity, fetchAll, getLastInvoiceDates } = require('../utils/customerActivity');
+const { getOwnScope, canSeeLead, isOwnScopeUser } = require('../utils/ownScope');
 
 // Canonical CRM Lead Pipeline Stages (10 Stages)
 const STAGES = {
@@ -128,7 +129,8 @@ async function resolveStaffIdentity(req) {
     const email = req.user?.email;
 
     try {
-        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department, branch_id, branches(id, name)');
+        // employees has several FKs to branches (branch_id, temp_, deputed_): name the home-branch one
+        let query = supabase.from('employees').select('id, employee_id, full_name, designation, department, branch_id, branches!employees_branch_id_fkey(id, name)');
         if (empRecordId) query = query.eq('id', empRecordId);
         else if (empCode) query = query.eq('employee_id', empCode);
         else if (email) query = query.eq('email', email);
@@ -487,6 +489,23 @@ async function ensureOrganizationForLead(lead, req, { createPortalCredentials = 
     // Link organization to lead
     await supabase.from('leads').update({ organization_id: orgData.id }).eq('id', lead.id);
 
+    // Email the new portal login to the customer (never blocks the conversion)
+    if (credentials) {
+        if (credentials.email) {
+            const { sendPortalCredentials } = require('../utils/mailer');
+            const sent = await sendPortalCredentials({
+                req, to: credentials.email, customerName: orgData.name,
+                username: credentials.username, password: credentials.password
+            });
+            credentials.emailed = sent.ok;
+            credentials.email_error = sent.ok ? null : sent.error;
+            if (!sent.ok) console.warn(`[ensureOrganizationForLead] login email not sent to ${credentials.email}:`, sent.error);
+        } else {
+            credentials.emailed = false;
+            credentials.email_error = 'No email address on the lead, so the login was not emailed.';
+        }
+    }
+
     return { organization: orgData, credentials };
 }
 
@@ -565,6 +584,11 @@ module.exports = {
                 query = query.eq('assigned_staff_id', staff.id);
             }
 
+            // Salespeople (Marketing / Sales Executive): only leads assigned to them
+            const own = await getOwnScope(req);
+            if (own && !own.empId) return res.json([]);
+            if (own) query = query.eq('assigned_staff_id', own.empId);
+
             let { data, error } = await query.order('created_at', { ascending: false });
 
             if (error && (error.code === 'PGRST200' || error.message?.toLowerCase().includes('zone'))) {
@@ -577,6 +601,7 @@ module.exports = {
                 } else if (!canViewAll && staff?.id) {
                     fallbackQuery = fallbackQuery.eq('assigned_staff_id', staff.id);
                 }
+                if (own) fallbackQuery = fallbackQuery.eq('assigned_staff_id', own.empId);
 
                 const fallbackRes = await fallbackQuery.order('created_at', { ascending: false });
                 data = fallbackRes.data;
@@ -680,6 +705,10 @@ module.exports = {
                 }
             }
 
+            if (data && !(await canSeeLead(req, data))) {
+                return res.status(403).json({ error: 'Access Denied: this lead is not assigned to you' });
+            }
+
             if (data) {
                 const altRemark = Array.isArray(data.remarks) ? data.remarks.find(r => r && r.type === 'alt_contact_profile') : null;
                 const altPhone = data.alt_contact_number || data.alt_phone || altRemark?.alt_contact_number || altRemark?.alt_phone || null;
@@ -759,6 +788,7 @@ module.exports = {
             // Determine if the creating user is a salesperson
             const isSalesperson = Boolean(
                 staff?.id && (
+                    isOwnScopeUser(req.user) ||
                     String(staff.designation || '').toLowerCase().includes('sales') ||
                     String(req.user?.role || '').toLowerCase().includes('sales') ||
                     String(staff.department || '').toLowerCase().includes('sales')
@@ -1014,6 +1044,8 @@ module.exports = {
                 is_cold: false,
                 remarks: initialFeedRemarks
             };
+            // Salespeople on "own records only" see only leads assigned to them, so own the feed they log
+            if (isOwnScopeUser(req.user) && staff?.id) feedPayload.assigned_staff_id = staff.id;
 
             let currentInsert = { ...feedPayload };
             let insertResult = null;
@@ -1303,8 +1335,8 @@ module.exports = {
                 return res.status(403).json({ error: 'Access Denied: You do not have permission to delete leads (requires manage_leads)' });
             }
 
-            await supabase.from('lead_activities').delete().eq('lead_id', id).catch(() => {});
-            await supabase.from('lead_stage_history').delete().eq('lead_id', id).catch(() => {});
+            await supabase.from('lead_activities').delete().eq('lead_id', id).then(() => {}, () => {});
+            await supabase.from('lead_stage_history').delete().eq('lead_id', id).then(() => {}, () => {});
             const { error } = await supabase.from('leads').delete().eq('id', id);
             if (error) throw error;
             res.json({ success: true });
@@ -1638,6 +1670,13 @@ module.exports = {
         const { stage } = req.query;
 
         try {
+            if (await getOwnScope(req)) {
+                const { data: leadRow } = await supabase.from('leads').select('id, assigned_staff_id').eq('id', id).maybeSingle();
+                if (leadRow && !(await canSeeLead(req, leadRow))) {
+                    return res.status(403).json({ error: 'Access Denied: this lead is not assigned to you' });
+                }
+            }
+
             let query = supabase
                 .from('lead_activities')
                 .select('*')

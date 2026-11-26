@@ -245,8 +245,13 @@ exports.login = async (req, res) => {
 
     const token = jwt.sign(
       { 
-        id: fullUser.id, 
-        email: fullUser.email, 
+        id: fullUser.id,
+        email: fullUser.email,
+        // Identity for activity/approval logs (also back-filled by authMiddleware for older tokens)
+        fullName: fullUser.fullName || null,
+        designation: fullUser.designation || null,
+        department: fullUser.department || null,
+        branchName: fullUser.branchName || null,
         role: fullUser.role,
         permissions: fullUser.permissions,
         organizationId: fullUser.organizationId,

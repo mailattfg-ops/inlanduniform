@@ -1,10 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const quotationController = require('../controllers/quotationController');
+const quoteWorkflow = require('../controllers/quoteWorkflowController');
 const { authMiddleware, checkPermission } = require('../middleware/authMiddleware');
 
 // Public route to view/download proposal PDF
 router.get('/:id/share', quotationController.getSharePDF);
+
+// Email the proposal link to the customer (Brevo)
+router.post('/:id/send-email', authMiddleware, checkPermission(['dispatch_proposals', 'manage_quotations', 'branch_sales']), quotationController.sendProposalEmail);
+router.post('/:id/share-link', authMiddleware, checkPermission(['dispatch_proposals', 'manage_quotations', 'branch_sales']), quotationController.getShareLink);
 
 // List quotations (anyone logged in can view)
 router.get('/', authMiddleware, quotationController.listQuotations);
@@ -38,13 +43,16 @@ router.put('/:id', authMiddleware, checkPermission(['manage_quotations', 'branch
 router.put('/:id/submit-to-bm', authMiddleware, checkPermission(['submit_quotations_bm', 'manage_quotations', 'branch_sales']), quotationController.submitToBranchManager);
 
 // Branch Manager approves quotation
-router.put('/:id/bm-approve', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver', 'manage_quotations']), quotationController.bmApproveAndSubmitToOps);
+router.put('/:id/bm-approve', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmApproveAndSubmitToOps);
 
 // Branch Manager rejects quotation back to Draft for revisions
-router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver', 'manage_quotations']), quotationController.bmRejectQuotation);
+router.put('/:id/bm-reject', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.bmRejectQuotation);
 
-// Submit quotation directly to operations team (Branch Managers with Ops Submission authority)
-router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['submit_quotations_ops', 'corporate_approver']), quotationController.submitToOps);
+// After BM approval: salesperson sends to Ops; Ops approves or returns; then the salesperson sends to the customer
+router.put('/:id/submit-to-ops', authMiddleware, checkPermission(['manage_quotations', 'branch_sales', 'submit_quotations_bm']), quoteWorkflow.submitToOps);
+router.put('/:id/ops-approve', authMiddleware, quoteWorkflow.opsApprove);
+router.put('/:id/ops-return', authMiddleware, quoteWorkflow.opsReturn);
+router.put('/:id/mark-sent', authMiddleware, checkPermission(['manage_quotations', 'branch_sales', 'dispatch_proposals']), quoteWorkflow.markSent);
 
 // Log follow-up activity on quotation
 router.post('/:id/follow-up', authMiddleware, quotationController.logQuotationFollowUp);

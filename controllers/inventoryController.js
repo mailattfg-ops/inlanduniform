@@ -131,25 +131,17 @@ exports.fabrics = {
         finalCode = await generateNextFabricCodeLocal();
       }
 
-      // Standard fabric format: Garmenttype - BrandQualityShade(width)
+      // Standard fabric format: Brand Quality Shade (width)
       let finalName = name;
       const bqs = [brand_name, quality, shade]
         .map((s) => (s || "").toString().trim())
         .filter(Boolean)
         .join(" ");
-      let standardName = "";
-      const gCat = (garment_category || "").toString().trim();
-      if (gCat && bqs) {
-        standardName = `${gCat} - ${bqs}`;
-      } else if (gCat) {
-        standardName = gCat;
-      } else if (bqs) {
-        standardName = bqs;
-      }
+      let standardName = bqs;
       if (width && width.toString().trim()) {
         const w = width.toString().trim();
         const widthStr = w.endsWith('"') ? w : `${w}"`;
-        standardName = standardName ? `${standardName}(${widthStr})` : `(${widthStr})`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
       }
       if (standardName) {
         finalName = standardName;
@@ -215,19 +207,11 @@ exports.fabrics = {
         .map((s) => (s || "").toString().trim())
         .filter(Boolean)
         .join(" ");
-      let standardName = "";
-      const gCat = (garment_category || "").toString().trim();
-      if (gCat && bqs) {
-        standardName = `${gCat} - ${bqs}`;
-      } else if (gCat) {
-        standardName = gCat;
-      } else if (bqs) {
-        standardName = bqs;
-      }
+      let standardName = bqs;
       if (width && width.toString().trim()) {
         const w = width.toString().trim();
         const widthStr = w.endsWith('"') ? w : `${w}"`;
-        standardName = standardName ? `${standardName}(${widthStr})` : `(${widthStr})`;
+        standardName = standardName ? `${standardName} (${widthStr})` : `(${widthStr})`;
       }
       if (standardName) {
         finalName = standardName;

@@ -448,28 +448,71 @@ exports.deleteGender = async (req, res) => {
 // ==========================================
 exports.getNextPatternCode = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('art_patterns')
-            .select('code')
-            .order('code', { ascending: true });
+        const { gender_code, item_code, spec_code } = req.query;
 
-        if (error) {
-            if (isMissingTableError(error)) {
-                return res.json({ nextCode: '001' });
+        // If gender_code and item_code are provided, compute next pattern code specifically for (gender, item, specification)
+        if (gender_code && item_code) {
+            const cleanGender = String(gender_code).trim().toUpperCase();
+            const cleanItem = String(item_code).trim().toUpperCase();
+            const cleanSpec = spec_code ? String(spec_code).trim().toUpperCase() : '';
+            const targetItemPart = `${cleanItem}${cleanSpec}`;
+
+            let maxNum = 0;
+
+            // 1. Scan products table
+            const { data: prodData, error: prodErr } = await supabase
+                .from('products')
+                .select('art_number');
+
+            if (!prodErr && prodData) {
+                prodData.forEach(p => {
+                    if (!p.art_number) return;
+                    if (p.art_number.startsWith('ACC-') || p.art_number.startsWith('TRIM-') || p.art_number.startsWith('FAB-')) return;
+                    const parts = p.art_number.split('-');
+                    if (parts.length >= 2) {
+                        const itemPart = parts[0].toUpperCase();
+                        const middle = parts[1].toUpperCase();
+                        if (itemPart === targetItemPart && middle.startsWith(cleanGender)) {
+                            const patStr = middle.slice(cleanGender.length);
+                            if (/^\d+$/.test(patStr)) {
+                                const num = parseInt(patStr, 10);
+                                if (!isNaN(num) && num > maxNum) maxNum = num;
+                            }
+                        }
+                    }
+                });
             }
-            throw error;
+
+            // 2. Also scan art_numbers table if available
+            const { data: artData } = await supabase
+                .from('art_numbers')
+                .select('code');
+
+            if (artData) {
+                artData.forEach(an => {
+                    const rawCode = an.code || '';
+                    if (rawCode.startsWith('ACC-') || rawCode.startsWith('TRIM-') || rawCode.startsWith('FAB-')) return;
+                    const parts = rawCode.split('-');
+                    if (parts.length >= 2) {
+                        const itemPart = parts[0].toUpperCase();
+                        const middle = parts[1].toUpperCase();
+                        if (itemPart === targetItemPart && middle.startsWith(cleanGender)) {
+                            const patStr = middle.slice(cleanGender.length);
+                            if (/^\d+$/.test(patStr)) {
+                                const num = parseInt(patStr, 10);
+                                if (!isNaN(num) && num > maxNum) maxNum = num;
+                            }
+                        }
+                    }
+                });
+            }
+
+            const nextCode = String(maxNum + 1).padStart(3, '0');
+            return res.json({ nextCode });
         }
 
-        let maxNum = 0;
-        (data || []).forEach(p => {
-            if (p.code && /^\d{1,3}$/.test(String(p.code).trim())) {
-                const num = parseInt(p.code, 10);
-                if (!isNaN(num) && num > maxNum && num < 1000) maxNum = num;
-            }
-        });
-
-        const nextCode = String(maxNum + 1).padStart(3, '0');
-        res.json({ nextCode });
+        // Fallback: return '001'
+        res.json({ nextCode: '001' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

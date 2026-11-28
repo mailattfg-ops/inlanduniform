@@ -78,13 +78,20 @@ function getMonthNumber(dateInput = new Date()) {
 /**
  * Formats a document number synchronously given explicit components.
  */
-function formatDocumentNumber({ prefix, branch, date = new Date(), seq = 1 }) {
+function formatDocumentNumber({ prefix, branch, date = new Date(), seq = 1, rev = 1 }) {
     const cleanPrefix = (prefix || 'DOC').toUpperCase();
     const branchNo = extractBranchNo(branch);
     const fyYY = getFinancialYearYY(date);
     const monthNo = getMonthNumber(date);
     const nth = Math.max(1, parseInt(String(seq).replace(/\D/g, '') || '1', 10));
     const nthFormatted = String(nth).padStart(2, '0');
+
+    // Quotation and Proforma numbers include the version series (/01 for main, /02 for revised, etc.)
+    if (cleanPrefix === 'QT' || cleanPrefix === 'PR') {
+        const revNum = Math.max(1, parseInt(String(rev).replace(/\D/g, '') || '1', 10));
+        const revFormatted = String(revNum).padStart(2, '0');
+        return `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}${nthFormatted}/${revFormatted}`;
+    }
 
     return `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}${nthFormatted}`;
 }
@@ -97,11 +104,13 @@ async function generateNextDocumentNumber(supabase, { prefix, table, column, bra
     const branchNo = extractBranchNo(branch);
     const fyYY = getFinancialYearYY(date);
     const monthNo = getMonthNumber(date);
+    const isQuoteOrProforma = cleanPrefix === 'QT' || cleanPrefix === 'PR';
     const prefixPattern = `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}`;
+    const defaultInitialDoc = isQuoteOrProforma ? `${prefixPattern}01/01` : `${prefixPattern}01`;
 
     try {
         if (!supabase || !table || !column) {
-            return `${prefixPattern}01`;
+            return defaultInitialDoc;
         }
 
         const { data, error } = await supabase
@@ -111,12 +120,13 @@ async function generateNextDocumentNumber(supabase, { prefix, table, column, bra
 
         if (error) {
             console.warn(`[documentNumberGenerator] Error querying ${table}.${column}:`, error.message);
-            return `${prefixPattern}01`;
+            return defaultInitialDoc;
         }
 
         let maxSeq = 0;
         if (data && Array.isArray(data)) {
-            const regex = new RegExp(`/${monthNo}(\\d+)`);
+            // Match the 2-digit monthly serial right after /MM
+            const regex = new RegExp(`/${monthNo}(\\d{2})`);
             for (const row of data) {
                 const val = String(row[column] || '');
                 const match = val.match(regex);
@@ -131,10 +141,12 @@ async function generateNextDocumentNumber(supabase, { prefix, table, column, bra
 
         const nextSeq = maxSeq + 1;
         const nthFormatted = String(nextSeq).padStart(2, '0');
-        return `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}${nthFormatted}`;
+        return isQuoteOrProforma
+            ? `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}${nthFormatted}/01`
+            : `${cleanPrefix}-IU${branchNo}-${fyYY}/${monthNo}${nthFormatted}`;
     } catch (err) {
         console.warn(`[documentNumberGenerator] Exception in generateNextDocumentNumber for ${cleanPrefix}:`, err.message);
-        return `${prefixPattern}01`;
+        return defaultInitialDoc;
     }
 }
 

@@ -8,6 +8,7 @@ const BREVO_URL = 'https://api.brevo.com/v3/smtp/email';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const isEmail = (v) => EMAIL_RE.test(String(v || '').trim());
+const LOCAL_LINK_RE = /https?:\/\/(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(:\d+)?/i;
 
 const escapeHtml = (s) => String(s || '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -40,6 +41,14 @@ async function sendMail({ to, subject, text, html, replyTo, attachments }) {
   if (recipients.length === 0) return { ok: false, code: 'NO_RECIPIENT', error: 'No recipient email address.' };
   if (invalid.length) return { ok: false, code: 'BAD_RECIPIENT', error: `Invalid email address: ${invalid.join(', ')}` };
   if (!subject || !(text || html)) return { ok: false, code: 'EMPTY_MESSAGE', error: 'Subject and message are required.' };
+  // A link to this computer (localhost) cannot be opened by the customer: stop instead of sending a broken link
+  if (LOCAL_LINK_RE.test(`${text || ''} ${html || ''}`)) {
+    return {
+      ok: false,
+      code: 'LOCAL_LINK',
+      error: 'The email contains a localhost link the customer cannot open. Set PUBLIC_API_URL (backend URL) and PORTAL_URL (portal URL) in the backend environment.',
+    };
+  }
 
   const fromEmail = process.env.MAIL_FROM_EMAIL || 'inlanduniform@gmail.com';
   const fromName = process.env.MAIL_FROM_NAME || 'Inland Uniform';

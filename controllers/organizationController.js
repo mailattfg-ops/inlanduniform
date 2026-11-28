@@ -2,7 +2,7 @@ const supabase = require("../config/supabase");
 const { generateNextDocumentNumber } = require("../utils/documentNumberGenerator");
 const crypto = require("crypto");
 const { logAction } = require("../utils/logger");
-const { customerActivity, getLastInvoiceDates } = require("../utils/customerActivity");
+const { customerActivity, computeMonthGap, getLastInvoiceDates } = require("../utils/customerActivity");
 const { getOwnScope, ids: ownIds, canSeeOrganization } = require("../utils/ownScope");
 
 const generatePassword = () =>
@@ -276,7 +276,10 @@ exports.getOrganizations = async (req, res) => {
         contact_email: resolvedEmail,
         email: resolvedEmail,
         is_b2b: Boolean(o.is_b2b || (o.gst_number && String(o.gst_number).trim() !== '')),
+        last_proforma_date: lastInvoiceDates[o.id] || null,
         last_invoice_date: lastInvoiceDates[o.id] || null,
+        proforma_gap_months: computeMonthGap(lastInvoiceDates[o.id]).months,
+        proforma_gap_label: computeMonthGap(lastInvoiceDates[o.id]).label,
         customer_activity: customerActivity(lastInvoiceDates[o.id]),
       };
     });

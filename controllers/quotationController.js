@@ -1334,15 +1334,45 @@ exports.createQuotation = async (req, res) => {
     console.log(`\n================== [CREATE QUOTATION START] ==================`);
     console.log(`[CREATE QUOTATION] Received ${items.length} item(s) to process for organization ${organization_id}`);
     // Quote number and branch don't depend on the items: work them out while design numbers resolve
-    const quoteNoPromise = quotation_no && quotation_no.trim()
-      ? Promise.resolve(quotation_no.trim())
-      : generateNextDocumentNumber(supabase, {
-          prefix: 'QT',
-          table: 'quotations',
-          column: 'quotation_no',
-          branch: req.user?.branchId || 1,
-          date: new Date()
-        });
+    const quoteNoPromise = (async () => {
+      if (quotation_no && quotation_no.trim()) {
+        return quotation_no.trim();
+      }
+      // If this is a revision and no quotation_no was passed, compute next revision in the /02 series
+      if (metrics_summary?.revised_from_id) {
+        const { data: parentQ } = await supabase
+          .from("quotations")
+          .select("quotation_no")
+          .eq("id", metrics_summary.revised_from_id)
+          .maybeSingle();
+
+        if (parentQ && parentQ.quotation_no) {
+          const parentNo = parentQ.quotation_no.trim();
+          const slashRevMatch = parentNo.match(/^(.*)\/(\d{2})$/);
+          const legacyRMatch = parentNo.match(/^(.*)-R(\d+)$/i);
+          let basePrefix = parentNo;
+          let nextRevNum = 2;
+
+          if (slashRevMatch) {
+            basePrefix = slashRevMatch[1];
+            nextRevNum = parseInt(slashRevMatch[2], 10) + 1;
+          } else if (legacyRMatch) {
+            basePrefix = legacyRMatch[1];
+            nextRevNum = parseInt(legacyRMatch[2], 10) + 1;
+          }
+
+          return `${basePrefix}/${String(nextRevNum).padStart(2, '0')}`;
+        }
+      }
+
+      return generateNextDocumentNumber(supabase, {
+        prefix: 'QT',
+        table: 'quotations',
+        column: 'quotation_no',
+        branch: req.user?.branchId || 1,
+        date: new Date()
+      });
+    })();
     // Branch the quote belongs to (drives which BM sees and approves it):
     // a revision keeps its original's branch; otherwise the creator's branch, else the customer's.
     const branchPromise = (async () => {
@@ -3073,8 +3103,8 @@ exports.getSharePDF = async (req, res) => {
         });
 
         departmentsHtml = `
-            <div class="py-8 border-b border-gray-100">
-              <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-4">Target Departments Sizing Breakdown</p>
+            <div class="py-6 border-b border-gray-100">
+              <p class="avoid-break text-[9px] font-black text-gray-400 uppercase tracking-widest mb-3">Target Departments Sizing Breakdown</p>
               <div class="border border-gray-150 rounded-2xl overflow-hidden shadow-sm max-w-2xl bg-white">
                 <table class="w-full text-left border-collapse">
                   <thead>
@@ -3125,6 +3155,7 @@ exports.getSharePDF = async (req, res) => {
           (item) => item.size_breakdown?.department_name,
         );
 
+        let itemIndex = 1;
         if (hasDeptItems) {
           const groups = {};
           standardItems.forEach((item) => {
@@ -3140,20 +3171,20 @@ exports.getSharePDF = async (req, res) => {
           Object.entries(groups).forEach(([cleanDeptName, groupItems]) => {
             itemsHtml += `
                             <tr class="bg-gray-50/80 border-t border-b border-gray-150 text-[10px] font-black uppercase text-[#3a525d] tracking-wider">
-                              <td colspan="7" class="py-2.5 px-4 font-black">DEPARTMENT: ${cleanDeptName}</td>
+                              <td colspan="4" class="py-2.5 px-4 font-black">DEPARTMENT: ${cleanDeptName}</td>
                             </tr>
                         `;
 
             groupItems.forEach((item) => {
               const pTypeName =
+                item.product_name ||
+                item.size_breakdown?.product_name ||
+                item.manual_item_name ||
                 item.product_types?.name ||
                 item.product_type_name ||
                 "Uniform Item";
               const deptId = item.size_breakdown?.department_id;
               const qty = Number(item.quantity) || 0;
-
-              let firstCellHtml = "";
-              let fabricStyleCellHtml = "";
 
               const deptMeta = quote.metrics_summary?.departments?.find(
                 (d) => String(d.id) === String(deptId),
@@ -3179,8 +3210,8 @@ exports.getSharePDF = async (req, res) => {
 
               const designNotes = item.size_breakdown?.design_number || "";
               const productLine = designNotes
-                ? `* ${pTypeName} - ${designNotes}`
-                : `* ${pTypeName}`;
+                ? `${pTypeName} - ${designNotes}`
+                : `${pTypeName}`;
 
               const fabricId = item.size_breakdown?.fabric_id;
               const fabric = fabricsList.find(
@@ -3209,36 +3240,26 @@ exports.getSharePDF = async (req, res) => {
                 : "";
               const att2Line = att2Id ? `FAB(A) - ${att2Brand}` : "";
 
-              firstCellHtml = `
-                              <div class="space-y-0.5 py-1 text-left">
-                                <div class="font-bold text-gray-500 uppercase text-[9px] tracking-wider">${deptHeader}</div>
-                                <div class="font-bold text-gray-800 text-xs">${productLine}</div>
-                                ${mainFabricLine ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${mainFabricLine}</div>` : ""}
-                                ${att1Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att1Line}</div>` : ""}
-                                ${att2Line ? `<div class="text-gray-400 text-[10px] pl-2 font-medium">${att2Line}</div>` : ""}
-                              </div>
-                            `;
-              fabricStyleCellHtml = "—";
+              const itemDetailsHtml = `
+                                <div class="py-0.5 text-left">
+                                  <div class="font-bold text-gray-500 uppercase text-[9px] tracking-wider">${deptHeader}</div>
+                                  <div class="font-bold text-gray-800 text-xs">${productLine}</div>
+                                  <div class="text-gray-500 text-[10px] font-semibold mt-0.5">Quantity: <span class="font-bold text-gray-800">${qty} pcs</span></div>
+                                  ${mainFabricLine ? `<div class="text-gray-400 text-[10px] font-medium">${mainFabricLine}</div>` : ""}
+                                  ${att1Line ? `<div class="text-gray-400 text-[10px] font-medium">${att1Line}</div>` : ""}
+                                  ${att2Line ? `<div class="text-gray-400 text-[10px] font-medium">${att2Line}</div>` : ""}
+                                </div>
+                              `;
 
-              const designNum =
-                item.size_breakdown?.product_design_number ||
-                item.size_breakdown?.design_number ||
-                "—";
-              const sam = item.size_breakdown?.sam_value
-                ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}`
-                : "—";
               const price = Number(item.unit_price) || 0;
               const total = Number(item.total_price) || 0;
 
               itemsHtml += `
                               <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                                <td class="py-3.5 px-4">${firstCellHtml}</td>
-                                <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
-                                <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
-                                <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
-                                <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${qty}</td>
-                                <td class="py-3.5 px-4 text-gray-700 text-xs text-right font-mono">₹ ${price.toFixed(2)}</td>
-                                <td class="py-3.5 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono">₹ ${total.toFixed(2)}</td>
+                                <td class="py-3 px-4 text-center text-xs font-bold text-gray-600 align-top">${itemIndex++}</td>
+                                <td class="py-3 px-4 align-top">${itemDetailsHtml}</td>
+                                <td class="py-3 px-4 text-gray-700 text-xs text-right font-mono whitespace-nowrap align-top">₹ ${price.toFixed(2)}</td>
+                                <td class="py-3 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
                               </tr>
                             `;
             });
@@ -3246,6 +3267,9 @@ exports.getSharePDF = async (req, res) => {
         } else {
           standardItems.forEach((item) => {
             const pTypeName =
+              item.product_name ||
+              item.size_breakdown?.product_name ||
+              item.manual_item_name ||
               item.product_types?.name ||
               item.product_type_name ||
               "Uniform Item";
@@ -3256,28 +3280,31 @@ exports.getSharePDF = async (req, res) => {
             const fabricBrand = fabric
               ? fabric.brand_name || fabric.name || "Custom Fabric"
               : "Custom Fabric";
-            const firstCellHtml = `<span class="font-bold text-gray-800 text-xs">${pTypeName}</span>`;
-            const fabricStyleCellHtml = fabricBrand;
+            const className = item.size_breakdown?.class_name;
+            const classPrefix = className ? `[${className}] ` : "";
 
             const designNum =
               item.size_breakdown?.product_design_number ||
-              item.size_breakdown?.design_number ||
-              "—";
-            const sam = item.size_breakdown?.sam_value
-              ? `₹ ${Number(item.size_breakdown.sam_value).toFixed(2)}`
-              : "—";
+              item.size_breakdown?.design_number;
+
+            const qty = Number(item.quantity) || 0;
             const price = Number(item.unit_price) || 0;
             const total = Number(item.total_price) || 0;
 
+            const itemDetailsHtml = `
+              <div class="py-0.5 text-left">
+                <span class="font-bold text-gray-800 text-xs">${classPrefix}${pTypeName}${designNum ? ` (${designNum})` : ""}</span>
+                <div class="text-gray-500 text-[10px] font-semibold mt-0.5">Quantity: <span class="font-bold text-gray-800">${qty} pcs</span></div>
+                ${fabricBrand && fabricBrand !== "Custom Fabric" ? `<div class="text-gray-400 text-[10px] font-medium">${fabricBrand}</div>` : ""}
+              </div>
+            `;
+
             itemsHtml += `
                           <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                            <td class="py-3.5 px-4">${firstCellHtml}</td>
-                            <td class="py-3.5 px-4 text-gray-600 text-xs">${fabricStyleCellHtml}</td>
-                            <td class="py-3.5 px-4 text-gray-600 text-xs">${designNum}</td>
-                            <td class="py-3.5 px-4 text-gray-600 text-xs text-center font-mono">${sam}</td>
-                            <td class="py-3.5 px-4 text-gray-800 text-xs text-right font-black">${item.quantity}</td>
-                            <td class="py-3.5 px-4 text-gray-700 text-xs text-right font-mono">₹ ${price.toFixed(2)}</td>
-                            <td class="py-3.5 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono">₹ ${total.toFixed(2)}</td>
+                            <td class="py-3 px-4 text-center text-xs font-bold text-gray-600 align-top">${itemIndex++}</td>
+                            <td class="py-3 px-4 align-top">${itemDetailsHtml}</td>
+                            <td class="py-3 px-4 text-gray-700 text-xs text-right font-mono whitespace-nowrap align-top">₹ ${price.toFixed(2)}</td>
+                            <td class="py-3 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
                           </tr>
                         `;
           });
@@ -3285,10 +3312,10 @@ exports.getSharePDF = async (req, res) => {
       }
 
       const compiledHtml = `
-          <div class="max-w-4xl mx-auto border border-gray-150 p-8 md:p-10 rounded-[2.5rem] shadow-sm relative bg-white print-container">
-            
+          <div class="mx-auto relative bg-white print-container">
+
             <!-- LETTERHEAD BRANDING -->
-            <div class="flex justify-between items-start border-b-2 border-gray-100 pb-8 flex-wrap gap-4">
+            <div class="avoid-break flex justify-between items-start border-b-2 border-gray-100 pb-6 gap-4">
               <div>
                 <div class="flex items-center gap-2.5">
                   <!-- SVG Gradient Logo -->
@@ -3305,7 +3332,7 @@ exports.getSharePDF = async (req, res) => {
 
               <div class="text-right">
                 <span class="px-3 py-1 bg-[#2d8d9b]/10 text-[#2d8d9b] font-black text-[9px] uppercase tracking-widest rounded-lg border border-[#2d8d9b]/15 inline-block">
-                  ${quote.status} Proposal
+                  ${PRE_APPROVAL_STATUSES.includes(quote.status) ? "Draft Proposal" : "Proposal"}
                 </span>
                 <h1 class="text-xl font-black text-gray-800 mt-2 font-outfit">${quote.quotation_no}</h1>
                 <p class="text-xs text-gray-500 font-bold mt-1">Date: ${dateStr}</p>
@@ -3313,18 +3340,18 @@ exports.getSharePDF = async (req, res) => {
             </div>
 
             <!-- CLIENT & TARGET INFO -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 py-6 border-b border-gray-100 text-xs">
+            <div class="avoid-break grid grid-cols-3 gap-6 py-5 border-b border-gray-100 text-xs">
               <div>
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Prepared For</p>
                 <p class="text-sm font-black text-gray-800 mt-1">${quote.organizations?.name || "Customer"}</p>
                 <p class="text-gray-500 mt-0.5 font-medium">Associated Uniform Contract Client</p>
               </div>
-              <div class="md:text-center">
+              <div class="text-center">
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Group Design Number</p>
                 <p class="text-sm font-black text-[#2d8d9b] mt-1">${quote.group_design_number?.code || "—"}</p>
                 <p class="text-gray-500 mt-0.5 font-medium">Auto-generated Design Collection</p>
               </div>
-              <div class="md:text-right">
+              <div class="text-right">
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Expected Delivery Target</p>
                 <p class="text-sm font-black text-[#2d8d9b] mt-1">${deliveryDateStr}</p>
                 <p class="text-gray-500 mt-0.5 font-medium">Est. Days: ${quote.production_days_estimate} Production Days</p>
@@ -3335,11 +3362,9 @@ exports.getSharePDF = async (req, res) => {
             ${
               quote.metrics_summary?.cover_letter
                 ? `
-              <div class="py-8 border-b border-gray-100">
-                <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-4">Letter of Proposal</p>
-                <div class="text-xs text-gray-600 leading-relaxed font-semibold whitespace-pre-wrap italic bg-gray-50/50 p-6 rounded-2xl border border-gray-150">
-                  ${quote.metrics_summary.cover_letter}
-                </div>
+              <div class="avoid-break py-6 border-b border-gray-100">
+                <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-3">Letter of Proposal</p>
+                <div class="text-xs text-gray-600 leading-relaxed font-medium whitespace-pre-line bg-gray-50/50 px-6 py-5 rounded-2xl border border-gray-150">${String(quote.metrics_summary.cover_letter).trim()}</div>
               </div>
             `
                 : ""
@@ -3349,19 +3374,16 @@ exports.getSharePDF = async (req, res) => {
             ${departmentsHtml}
 
             <!-- SPECIFICATIONS TABLE -->
-            <div class="py-8 page-break">
-              <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-4">Quotation Product Specifications</p>
+            <div class="page-break-before py-6" style="page-break-before: always; break-before: page;">
+              <p class="avoid-break text-[9px] font-black text-gray-400 uppercase tracking-widest mb-3">Quotation Product Specifications</p>
               <div class="border border-gray-150 rounded-2xl overflow-hidden shadow-sm">
-                <table class="w-full text-left border-collapse">
+                <table class="w-full text-left border-collapse" style="width: 100%;">
                   <thead>
                     <tr class="bg-gray-50 border-b border-gray-150 text-[9px] font-black uppercase tracking-widest text-gray-500">
-                      <th class="py-3 px-4">Garment Line</th>
-                      <th class="py-3 px-4">Fabric Style</th>
-                      <th class="py-3 px-4">Design Num</th>
-                      <th class="py-3 px-4 text-center font-mono">SAM (₹)</th>
-                      <th class="py-3 px-4 text-right">Quantity</th>
-                      <th class="py-3 px-4 text-right">Unit Price</th>
-                      <th class="py-3 px-4 text-right">Total Price</th>
+                      <th class="py-3 px-4 text-center w-14 whitespace-nowrap">Sl. No.</th>
+                      <th class="py-3 px-4">Item Name</th>
+                      <th class="py-3 px-4 text-right whitespace-nowrap w-32">Rate</th>
+                      <th class="py-3 px-4 text-right whitespace-nowrap w-36">Total Price</th>
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-gray-100 font-semibold">
@@ -3372,27 +3394,29 @@ exports.getSharePDF = async (req, res) => {
             </div>
 
             <!-- PRICING & GST COMPILATION -->
-            <div class="flex justify-end py-6 border-t border-gray-100">
-              <div class="w-80 space-y-3.5 text-xs font-bold text-gray-500">
-                <div class="flex justify-between">
-                  <span>Subtotal (Pre-Tax):</span>e-Tax):</span>
-                  <span class="font-mono text-gray-800 font-black">₹ ${subtotal.toFixed(2)}</span>
-                </div>
-                <div class="flex justify-between border-b border-gray-100 pb-2">
-                  <span>GST Tax (${gstRate}%):</span>
-                  <span class="font-mono text-red-500 font-black">₹ ${gstValue.toFixed(2)}</span>
-                </div>
-                <div class="flex justify-between items-end pt-2 text-[#2d8d9b]">
-                  <div>
-                    <p class="text-[9px] font-black uppercase text-gray-400 tracking-wider">Total Contract Value</p>
-                    <p class="text-2xl font-black italic font-outfit mt-0.5">₹ ${finalValue.toFixed(2)}</p>
-                  </div>
-                </div>
-              </div>
+            <div class="avoid-break py-5 border-t border-gray-100 flex justify-end">
+              <table style="width: 320px; border-collapse: collapse;" class="text-xs font-bold text-gray-500">
+                <tbody>
+                  <tr>
+                    <td style="padding: 4px 0; text-align: left;">Subtotal (Pre-Tax):</td>
+                    <td style="padding: 4px 0; text-align: right;" class="font-mono text-gray-800 font-black">₹ ${subtotal.toFixed(2)}</td>
+                  </tr>
+                  <tr style="border-bottom: 1px solid #f3f4f6;">
+                    <td style="padding: 4px 0 8px 0; text-align: left;">GST Tax (${gstRate}%):</td>
+                    <td style="padding: 4px 0 8px 0; text-align: right;" class="font-mono text-red-500 font-black">₹ ${gstValue.toFixed(2)}</td>
+                  </tr>
+                  <tr>
+                    <td colspan="2" style="padding-top: 10px; text-align: right;">
+                      <p class="text-[9px] font-black uppercase text-gray-400 tracking-wider">Total Contract Value</p>
+                      <p class="text-2xl font-black italic font-outfit text-[#2d8d9b] mt-0.5">₹ ${finalValue.toFixed(2)}</p>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
 
             <!-- BANK PAYMENT DETAILS -->
-            <div class="mt-8 p-6 bg-gray-50/50 border border-gray-150 rounded-2xl text-[10px] text-gray-600 font-semibold grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="avoid-break mt-4 p-5 bg-gray-50/50 border border-gray-150 rounded-2xl text-[10px] text-gray-600 font-semibold grid grid-cols-2 gap-4">
               <div>
                 <p class="text-[8px] font-black text-gray-450 uppercase tracking-widest mb-2">Bank Transfer Details</p>
                 <p><span class="text-gray-400">Bank Name:</span> ${companySettings.bank_name}</p>
@@ -3410,7 +3434,7 @@ exports.getSharePDF = async (req, res) => {
             ${
               companySettings.qr_image
                 ? `
-            <div class="mt-4 p-4 bg-white border border-gray-150 rounded-2xl flex flex-col items-center justify-center text-center">
+            <div class="avoid-break mt-4 p-4 bg-white border border-gray-150 rounded-2xl flex flex-col items-center justify-center text-center">
               <p class="text-[8px] font-black text-gray-450 uppercase tracking-widest mb-2">Scan QR Code to Pay</p>
               <img src="${companySettings.qr_image}" alt="Payment QR Code" style="width: 120px; height: 120px; object-fit: contain;" />
             </div>
@@ -3419,7 +3443,7 @@ exports.getSharePDF = async (req, res) => {
             }
 
             <!-- SIGNATURES BLOCK -->
-            <div class="grid grid-cols-2 gap-12 mt-16 pt-8 border-t border-gray-100 text-xs">
+            <div class="avoid-break grid grid-cols-2 gap-12 mt-10 pt-6 border-t border-gray-100 text-xs">
               <div class="space-y-12">
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Authorized By</p>
                 <div class="border-t border-gray-200 pt-3">
@@ -3468,8 +3492,11 @@ exports.getSharePDF = async (req, res) => {
             position: absolute;
             left: -9999px;
             top: -9999px;
-            width: 800px;
+            width: 703px; /* printable A4 width: 210mm - 2 x 12mm margins = 186mm at 96 dpi */
           }
+          #pdf-wrapper .print-container { padding: 0; border: 0; box-shadow: none; border-radius: 0; max-width: none; }
+          #pdf-wrapper tr, #pdf-wrapper .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+          .page-break-before { page-break-before: always !important; break-before: page !important; }
           body {
             font-family: 'Inter', sans-serif;
           }
@@ -3515,7 +3542,9 @@ exports.getSharePDF = async (req, res) => {
           \`;
           document.head.appendChild(style);
 
-          window.addEventListener('load', function() {
+          window.addEventListener('load', async function() {
+            // Wait for web fonts so text is measured and drawn with the right font
+            try { await document.fonts.ready; } catch (e) {}
             const wrapper = document.getElementById('pdf-wrapper');
             let element = wrapper.querySelector('.print-container');
             if (!element) {
@@ -3526,34 +3555,62 @@ exports.getSharePDF = async (req, res) => {
             const noPrintElements = element.querySelectorAll('.no-print');
             noPrintElements.forEach(el => el.remove());
 
-            // Draft (not BM + Ops approved): diagonal NOT APPROVED watermark, one per A4 page, plus a header note
-            if (${isDraftCopy ? "true" : "false"}) {
-              element.style.position = 'relative';
+            const isDraftCopy = ${isDraftCopy ? "true" : "false"};
+            // Draft (not BM + Ops approved): header note on the document
+            if (isDraftCopy) {
               const note = document.createElement('div');
               note.textContent = 'DRAFT - NOT APPROVED. This proposal has not been approved yet and is subject to change.';
-              note.style.cssText = 'background:#FFF1F1;color:#B91C1C;border:1px solid #FCA5A5;font:700 11px Inter,sans-serif;letter-spacing:.04em;text-align:center;padding:6px 8px;margin-bottom:8px;';
+              note.style.cssText = 'background:#FFF1F1;color:#B91C1C;border:1px solid #FCA5A5;border-radius:8px;font:700 11px Inter,sans-serif;letter-spacing:.04em;text-align:center;padding:7px 8px;margin-bottom:14px;';
               element.insertBefore(note, element.firstChild);
-              const pageH = Math.round(element.offsetWidth * 297 / 210); // A4 height at this width
-              const total = Math.max(element.scrollHeight, pageH);
-              for (let y = 0; y < total; y += pageH) {
-                const wm = document.createElement('div');
-                wm.textContent = 'NOT APPROVED';
-                wm.style.cssText = 'position:absolute;left:50%;top:' + (y + pageH / 2) + 'px;transform:translate(-50%,-50%) rotate(-35deg);' +
-                  'font:900 110px Inter,sans-serif;letter-spacing:.08em;color:rgba(200,42,43,0.16);border:10px solid rgba(200,42,43,0.16);' +
-                  'padding:10px 40px;border-radius:24px;white-space:nowrap;pointer-events:none;z-index:50;';
-                element.appendChild(wm);
-              }
             }
 
             const opt = {
-              margin:       [0.3, 0.3, 0.3, 0.3],
-              filename:     '${isDraftCopy ? "DRAFT_NOT_APPROVED_" : ""}Proposal_${data.quotation_no || "QT-" + id}.pdf',
+              margin:       [12, 12, 14, 12], // mm: top, left, bottom, right
+              filename:     '${isDraftCopy ? "DRAFT_NOT_APPROVED_" : ""}Proposal_${String(data.quotation_no || "QT-" + id).replace(/[^A-Za-z0-9-]+/g, "_")}.pdf',
               image:        { type: 'jpeg', quality: 0.98 },
               html2canvas:  { scale: 2, useCORS: true, logging: false },
-              jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' }
+              jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+              // Never split a table row or a section across pages, and break before .page-break-before
+              pagebreak:    { mode: ['css', 'legacy'], avoid: ['tr', '.avoid-break'], before: '.page-break-before' }
             };
-            
-            html2pdf().set(opt).from(element).save().then(() => {
+
+            // Stamp each finished page: the NOT APPROVED watermark sits centred on the page diagonal,
+            // whole and visible on every page (also on pages with little content); plus page numbers.
+            const stampPages = (pdf) => {
+              const pages = pdf.internal.getNumberOfPages();
+              const W = pdf.internal.pageSize.getWidth();
+              const H = pdf.internal.pageSize.getHeight();
+              for (let p = 1; p <= pages; p++) {
+                pdf.setPage(p);
+                if (isDraftCopy) {
+                  const angle = Math.atan2(H, W) * 180 / Math.PI; // bottom-left to top-right
+                  const rad = angle * Math.PI / 180;
+                  const label = 'NOT APPROVED';
+                  pdf.setFont('helvetica', 'bold');
+                  let size = 80;
+                  pdf.setFontSize(size);
+                  const maxW = Math.hypot(W, H) * 0.72;
+                  let w = pdf.getTextWidth(label);
+                  if (w > maxW) { size = size * maxW / w; pdf.setFontSize(size); w = pdf.getTextWidth(label); }
+                  const capH = size * 0.3528 * 0.7; // font size in mm x cap height
+                  // Start point so the text's centre lands on the page centre
+                  const cx = W / 2, cy = H / 2;
+                  const x = cx - (w / 2) * Math.cos(rad) + (capH / 2) * Math.sin(rad);
+                  const y = cy + (w / 2) * Math.sin(rad) + (capH / 2) * Math.cos(rad);
+                  pdf.saveGraphicsState();
+                  if (pdf.GState) pdf.setGState(new pdf.GState({ opacity: 0.14 }));
+                  pdf.setTextColor(200, 42, 43);
+                  pdf.text(label, x, y, { angle });
+                  pdf.restoreGraphicsState();
+                }
+                pdf.setFont('helvetica', 'normal');
+                pdf.setFontSize(8);
+                pdf.setTextColor(150, 150, 150);
+                pdf.text('Page ' + p + ' of ' + pages, W / 2, H - 6, { align: 'center' });
+              }
+            };
+
+            html2pdf().set(opt).from(element).toPdf().get('pdf').then(stampPages).save().then(() => {
               const overlay = document.getElementById('loading-overlay');
               overlay.innerHTML = \`
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-green-500 text-white shadow-lg mb-6">
@@ -4267,15 +4324,13 @@ exports.logQuotationFollowUp = async (req, res) => {
 // SALES ORDER DEALS LIFECYCLE WORKFLOW
 // -------------------------------------------------------------
 
-// 1. Save branch remarks against each quotation item
+// 1. Save branch remarks against each quotation item (supports blank remarks to shift directly to SO Draft)
 exports.saveDealItemRemarks = async (req, res) => {
   try {
     const { id } = req.params;
-    const { item_remarks } = req.body;
-
-    if (!item_remarks || typeof item_remarks !== 'object') {
-      return res.status(400).json({ error: 'item_remarks object is required' });
-    }
+    const item_remarks = (req.body && typeof req.body.item_remarks === 'object' && req.body.item_remarks !== null)
+      ? req.body.item_remarks
+      : {};
 
     const { data: quotation, error: fetchErr } = await supabase
       .from('quotations')

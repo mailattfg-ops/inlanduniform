@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase');
 const crypto = require('crypto');
-const { DORMANT_DAYS, daysSince, customerActivity, fetchAll, getLastInvoiceDates } = require('../utils/customerActivity');
+const { DORMANT_DAYS, daysSince, customerActivity, computeMonthGap, fetchAll, getLastInvoiceDates, getLastProformaDates } = require('../utils/customerActivity');
 const { getOwnScope, canSeeLead, isOwnScopeUser } = require('../utils/ownScope');
 
 // Canonical CRM Lead Pipeline Stages (10 Stages)
@@ -639,12 +639,16 @@ module.exports = {
                 const altRemark = Array.isArray(l.remarks) ? l.remarks.find(r => r && r.type === 'alt_contact_profile') : null;
                 const altPhone = l.alt_contact_number || l.alt_phone || altRemark?.alt_contact_number || altRemark?.alt_phone || null;
                 const orgId = l.organization_id || matchedOrg?.id || null;
-                const lastInvoice = orgId ? lastInvoiceDates[orgId] : null;
+                const lastProforma = (orgId ? lastInvoiceDates[orgId] : null) || l.dormant_since || null;
+                const gapInfo = computeMonthGap(lastProforma);
                 return {
                     ...l,
                     organization_id: orgId,
-                    last_invoice_date: lastInvoice || null,
-                    customer_activity: customerActivity(lastInvoice),
+                    last_proforma_date: lastProforma || null,
+                    last_invoice_date: lastProforma || null,
+                    customer_activity: customerActivity(lastProforma),
+                    proforma_gap_months: gapInfo.months,
+                    proforma_gap_label: gapInfo.label,
                     organizations: matchedOrg || null,
                     is_risk: Boolean(matchedOrg?.is_risk),
                     is_special: Boolean(matchedOrg?.is_special),
@@ -1517,20 +1521,24 @@ module.exports = {
 
             // --- STAGE-SPECIFIC PROGRESSION RULES ---
 
-            // Cold Lead is set ONLY by a rejected meeting (C); Feeds and Follow-ups have no negative outcome.
-
             // A. FEEDS STAGE
             if (targetStage === STAGES.FEEDS || targetStage === 'Contacted Leads' || targetStage === 'Open Feeds') {
                 if (normResponse === 'positive') {
-                    nextIsCold = false; // clears cold flags left by the old Feeds negative option
-                    // Branch feed -> New Leads; HQ feed -> Open Leads
-                    if (lead.branch_id || lead.origin === 'BRANCH') {
+                    nextIsCold = false; // clears cold flags
+                    // Returning customer (already has branch from organization): directly goes to New Leads
+                    if (lead.is_returning_customer || lead.branch_id || lead.origin === 'BRANCH') {
                         nextStatus = STAGES.NEW_LEADS;
-                        transitionReason = 'Positive field feed response (Branch-created) -> New Leads';
+                        transitionReason = lead.is_returning_customer
+                            ? 'Positive response: Returning customer converted -> New Leads (pending sales person assignment)'
+                            : 'Positive field feed response (Branch-created) -> New Leads';
                     } else {
                         nextStatus = STAGES.OPEN_LEADS;
                         transitionReason = 'Positive field feed response (HQ-created) -> Open Leads';
                     }
+                } else if (normResponse === 'negative' || normResponse === 'not_interested' || normResponse === 'rejected') {
+                    nextStatus = 'Contacted Leads';
+                    nextIsCold = true; // Cold Feed badge near sector
+                    transitionReason = 'Negative field feed response (Prospect declined / Cold Feed)';
                 } else {
                     nextStatus = 'Contacted Leads';
                     nextIsCold = false;
@@ -1544,8 +1552,12 @@ module.exports = {
                     nextStatus = STAGES.MEETINGS;
                     nextIsCold = false;
                     transitionReason = 'Positive follow-up response -> Advancing to Meetings';
+                } else if (normResponse === 'negative' || normResponse === 'cold_lead' || normResponse === 'rejected') {
+                    nextStatus = STAGES.FOLLOW_UPS;
+                    nextIsCold = true; // Cold Lead in Follow-ups
+                    transitionReason = 'Negative follow-up response (Prospect declined / Cold Lead)';
                 } else {
-                    // Hold: keeps any cold tag from a rejected meeting
+                    // Hold: keeps any existing cold tag
                     nextStatus = STAGES.FOLLOW_UPS;
                     nextIsCold = lead.is_cold || false;
                     transitionReason = 'Follow-up on hold/pending (remains in Follow-ups)';

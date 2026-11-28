@@ -3097,7 +3097,7 @@ exports.getSharePDF = async (req, res) => {
                         <td class="py-3 px-4 text-gray-400">${dDivision}</td>
                         <td class="py-3 px-4 text-right">${dPersons}</td>
                         <td class="py-3 px-4 text-right">${dSets}</td>
-                        <td class="py-3 px-4 text-right font-black text-[#2d8d9b]">${dTotal}</td>
+                        <td class="py-3 px-4 text-right font-black text-[#C82A2B]">${dTotal}</td>
                       </tr>
                     `;
         });
@@ -3123,7 +3123,7 @@ exports.getSharePDF = async (req, res) => {
                       <td class="py-3 px-4" colspan="2">Total</td>
                       <td class="py-3 px-4 text-right">${totalPersons}</td>
                       <td class="py-3 px-4"></td>
-                      <td class="py-3 px-4 text-right text-[#2d8d9b]">${totalSetsQty}</td>
+                      <td class="py-3 px-4 text-right text-[#C82A2B]">${totalSetsQty}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -3170,7 +3170,7 @@ exports.getSharePDF = async (req, res) => {
 
           Object.entries(groups).forEach(([cleanDeptName, groupItems]) => {
             itemsHtml += `
-                            <tr class="bg-gray-50/80 border-t border-b border-gray-150 text-[10px] font-black uppercase text-[#3a525d] tracking-wider">
+                            <tr class="bg-gray-50/80 border-t border-b border-gray-150 text-[10px] font-black uppercase text-[#801416] tracking-wider">
                               <td colspan="4" class="py-2.5 px-4 font-black">DEPARTMENT: ${cleanDeptName}</td>
                             </tr>
                         `;
@@ -3259,7 +3259,7 @@ exports.getSharePDF = async (req, res) => {
                                 <td class="py-3 px-4 text-center text-xs font-bold text-gray-600 align-top">${itemIndex++}</td>
                                 <td class="py-3 px-4 align-top">${itemDetailsHtml}</td>
                                 <td class="py-3 px-4 text-gray-700 text-xs text-right font-mono whitespace-nowrap align-top">₹ ${price.toFixed(2)}</td>
-                                <td class="py-3 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
+                                <td class="py-3 px-4 text-[#C82A2B] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
                               </tr>
                             `;
             });
@@ -3304,7 +3304,7 @@ exports.getSharePDF = async (req, res) => {
                             <td class="py-3 px-4 text-center text-xs font-bold text-gray-600 align-top">${itemIndex++}</td>
                             <td class="py-3 px-4 align-top">${itemDetailsHtml}</td>
                             <td class="py-3 px-4 text-gray-700 text-xs text-right font-mono whitespace-nowrap align-top">₹ ${price.toFixed(2)}</td>
-                            <td class="py-3 px-4 text-[#2d8d9b] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
+                            <td class="py-3 px-4 text-[#C82A2B] text-xs text-right font-black font-mono whitespace-nowrap align-top">₹ ${total.toFixed(2)}</td>
                           </tr>
                         `;
           });
@@ -3319,19 +3319,19 @@ exports.getSharePDF = async (req, res) => {
               <div>
                 <div class="flex items-center gap-2.5">
                   <!-- SVG Gradient Logo -->
-                  <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-[#3a525d] to-[#2d8d9b] flex items-center justify-center text-white shadow-md">
+                  <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-[#9E1B1D] to-[#C82A2B] flex items-center justify-center text-white shadow-md">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor" class="w-5 h-5">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M15.59 14.37a6 6 0 0 1-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 0 0 6.16-12.12A14.98 14.98 0 0 0 9.61 3.51a6 6 0 0 1 5.98 10.86Z" />
                     </svg>
                   </div>
-                   <span class="text-xl font-black italic tracking-tighter text-[#3a525d] font-outfit">${companySettings.company_name.toUpperCase()}</span>
+                   <span class="text-xl font-black italic tracking-tighter text-zinc-900 font-outfit">${companySettings.company_name.toUpperCase()}</span>
                 </div>
-                <p class="text-[9px] font-black uppercase tracking-[0.2em] text-[#2d8d9b] mt-1.5 pl-0.5">Corporate Apparel & Sizing Specialists</p>
+                <p class="text-[9px] font-black uppercase tracking-[0.2em] text-[#C82A2B] mt-1.5 pl-0.5">Corporate Apparel & Sizing Specialists</p>
                 <p class="text-[10px] text-gray-400 mt-2 font-medium">${companySettings.address}<br/>${companySettings.phone} | ${companySettings.email}</p>
               </div>
 
               <div class="text-right">
-                <span class="px-3 py-1 bg-[#2d8d9b]/10 text-[#2d8d9b] font-black text-[9px] uppercase tracking-widest rounded-lg border border-[#2d8d9b]/15 inline-block">
+                <span class="px-3 py-1 bg-[#FFF1F1] text-[#C82A2B] font-black text-[9px] uppercase tracking-widest rounded-lg border border-[#C82A2B]/15 inline-block">
                   ${PRE_APPROVAL_STATUSES.includes(quote.status) ? "Draft Proposal" : "Proposal"}
                 </span>
                 <h1 class="text-xl font-black text-gray-800 mt-2 font-outfit">${quote.quotation_no}</h1>
@@ -3348,12 +3348,12 @@ exports.getSharePDF = async (req, res) => {
               </div>
               <div class="text-center">
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Group Design Number</p>
-                <p class="text-sm font-black text-[#2d8d9b] mt-1">${quote.group_design_number?.code || "—"}</p>
+                <p class="text-sm font-black text-[#C82A2B] mt-1">${quote.group_design_number?.code || "—"}</p>
                 <p class="text-gray-500 mt-0.5 font-medium">Auto-generated Design Collection</p>
               </div>
               <div class="text-right">
                 <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Expected Delivery Target</p>
-                <p class="text-sm font-black text-[#2d8d9b] mt-1">${deliveryDateStr}</p>
+                <p class="text-sm font-black text-[#C82A2B] mt-1">${deliveryDateStr}</p>
                 <p class="text-gray-500 mt-0.5 font-medium">Est. Days: ${quote.production_days_estimate} Production Days</p>
               </div>
             </div>
@@ -3408,7 +3408,7 @@ exports.getSharePDF = async (req, res) => {
                   <tr>
                     <td colspan="2" style="padding-top: 10px; text-align: right;">
                       <p class="text-[9px] font-black uppercase text-gray-400 tracking-wider">Total Contract Value</p>
-                      <p class="text-2xl font-black italic font-outfit text-[#2d8d9b] mt-0.5">₹ ${finalValue.toFixed(2)}</p>
+                      <p class="text-2xl font-black italic font-outfit text-[#C82A2B] mt-0.5">₹ ${finalValue.toFixed(2)}</p>
                     </td>
                   </tr>
                 </tbody>
@@ -3426,7 +3426,7 @@ exports.getSharePDF = async (req, res) => {
               <div>
                 <p class="text-[8px] font-black text-gray-450 uppercase tracking-widest mb-2">Alternative/UPI Payment</p>
                 <p><span class="text-gray-400">IFSC Code:</span> <span class="font-mono text-gray-800 font-black">${companySettings.ifsc_code}</span></p>
-                <p class="mt-1"><span class="text-gray-400">UPI Pay No:</span> <span class="font-mono text-[#2d8d9b] font-black">${companySettings.upi_id}</span></p>
+                <p class="mt-1"><span class="text-gray-400">UPI Pay No:</span> <span class="font-mono text-[#C82A2B] font-black">${companySettings.upi_id}</span></p>
               </div>
             </div>
 
@@ -3508,18 +3508,18 @@ exports.getSharePDF = async (req, res) => {
       <body class="bg-gray-50 flex items-center justify-center min-h-screen">
         
         <div id="loading-overlay" class="text-center p-8 bg-white rounded-3xl shadow-xl max-w-sm w-full mx-4 border border-gray-100">
-          <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-[#3a525d] to-[#2d8d9b] text-white shadow-lg animate-pulse mb-6">
+          <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-[#9E1B1D] to-[#C82A2B] text-white shadow-lg animate-pulse mb-6">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-8 h-8">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
             </svg>
           </div>
-          <h2 class="text-xl font-black text-[#3a525d] tracking-tight">${isDraftCopy ? "Generating Draft Proposal PDF" : "Generating Proposal PDF"}</h2>
+          <h2 class="text-xl font-black text-zinc-900 tracking-tight">${isDraftCopy ? "Generating Draft Proposal PDF" : "Generating Proposal PDF"}</h2>
           <p class="text-xs text-gray-500 mt-2 leading-relaxed">${isDraftCopy
             ? "This is a draft for your review. It is not yet approved and is subject to change."
             : "Please wait, your official proposal document is compiling and will download automatically."}</p>
           
           <div class="mt-6 w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-            <div class="bg-[#2d8d9b] h-1.5 rounded-full animate-shimmer" style="width: 70%;"></div>
+            <div class="bg-[#C82A2B] h-1.5 rounded-full animate-shimmer" style="width: 70%;"></div>
           </div>
         </div>
 
@@ -3535,7 +3535,7 @@ exports.getSharePDF = async (req, res) => {
               100% { background-position: 200% 0; }
             }
             .animate-shimmer {
-              background-image: linear-gradient(90deg, #2d8d9b 0%, #3a525d 50%, #2d8d9b 100%);
+              background-image: linear-gradient(90deg, #C82A2B 0%, #9E1B1D 50%, #C82A2B 100%);
               background-size: 200% 100%;
               animation: shimmer 1.5s infinite linear;
             }
